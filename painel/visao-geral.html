@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rajant · Visão Geral da Malha</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   IDENTIDADE — mexa só aqui para deixar com a sua cara.
+   As cores base são as mesmas do template PPT (0D2052 / 1A2744).
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --fundo:        #08142e;
+  --fundo-2:      #0d2052;
+  --cartao:       #14213f;
+  --cartao-topo:  #1a2b4f;
+  --borda:        #22345c;
+  --borda-forte:  #2e4470;
+
+  --texto:        #e8edf7;
+  --texto-2:      #9fb0cc;
+  --texto-3:      #6b7d9c;
+
+  --ok:           #2ecc71;
+  --atencao:      #f0a640;
+  --critico:      #e8544a;
+  --info:         #3d8bd4;
+  --roxo:         #8b7fd4;
+
+  --raio:         14px;
+  --raio-p:       9px;
+  --sombra:       0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.22);
+  --fonte:        system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono:         ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+*{box-sizing:border-box; margin:0; padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  font-family:var(--fonte);
+  background:
+    radial-gradient(1200px 600px at 15% -10%, #16336b 0%, transparent 55%),
+    radial-gradient(900px 500px at 95% 0%, #102a55 0%, transparent 50%),
+    var(--fundo);
+  background-attachment:fixed;
+  color:var(--texto);
+  min-height:100vh;
+  padding:20px 22px 40px;
+  font-size:14px;
+  line-height:1.45;
+}
+
+/* ── Cabeçalho ─────────────────────────────────────────────── */
+header{
+  display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  padding:0 4px 18px;
+}
+.marca{display:flex; align-items:center; gap:13px; margin-right:auto}
+.logo{
+  width:42px; height:42px; border-radius:11px; flex:0 0 auto;
+  background:linear-gradient(140deg, var(--info), #1f4e79);
+  display:grid; place-items:center;
+  box-shadow:0 4px 14px rgba(61,139,212,.3);
+}
+.logo svg{width:22px; height:22px}
+h1{font-size:19px; font-weight:650; letter-spacing:-.2px}
+.sub{font-size:12.5px; color:var(--texto-2); margin-top:1px}
+
+.controles{display:flex; align-items:center; gap:9px; flex-wrap:wrap}
+.seg{
+  display:flex; background:rgba(255,255,255,.045); padding:3px;
+  border-radius:var(--raio-p); border:1px solid var(--borda);
+}
+.seg button{
+  border:0; background:none; color:var(--texto-2); cursor:pointer;
+  font:inherit; font-size:12.5px; font-weight:550;
+  padding:6px 13px; border-radius:6px; transition:.16s;
+}
+.seg button:hover{color:var(--texto)}
+.seg button.on{background:var(--info); color:#fff; box-shadow:0 2px 8px rgba(61,139,212,.35)}
+
+.pulso{
+  display:flex; align-items:center; gap:7px; font-size:12px;
+  color:var(--texto-2); padding:7px 13px;
+  background:rgba(255,255,255,.045); border:1px solid var(--borda);
+  border-radius:var(--raio-p);
+}
+.led{width:7px; height:7px; border-radius:50%; background:var(--ok);
+     box-shadow:0 0 0 0 rgba(46,204,113,.6); animation:bate 2.4s infinite}
+.led.erro{background:var(--critico); animation:none}
+@keyframes bate{
+  0%{box-shadow:0 0 0 0 rgba(46,204,113,.55)}
+  70%{box-shadow:0 0 0 7px rgba(46,204,113,0)}
+  100%{box-shadow:0 0 0 0 rgba(46,204,113,0)}
+}
+
+/* ── Grade ─────────────────────────────────────────────────── */
+.grade{display:grid; grid-template-columns:repeat(12,1fr); gap:14px}
+.c3{grid-column:span 3} .c4{grid-column:span 4}
+.c6{grid-column:span 6} .c8{grid-column:span 8}
+.c12{grid-column:span 12}
+@media(max-width:1100px){
+  .c3{grid-column:span 6} .c4{grid-column:span 6}
+  .c6,.c8{grid-column:span 12}
+}
+@media(max-width:620px){ .c3,.c4{grid-column:span 12} }
+
+.cartao{
+  background:linear-gradient(180deg, var(--cartao-topo) 0%, var(--cartao) 42%);
+  border:1px solid var(--borda);
+  border-radius:var(--raio);
+  box-shadow:var(--sombra);
+  overflow:hidden;
+  animation:entra .45s cubic-bezier(.22,.9,.32,1) backwards;
+}
+@keyframes entra{from{opacity:0; transform:translateY(9px)}}
+.cartao > h2{
+  font-size:12.5px; font-weight:600; letter-spacing:.3px;
+  color:var(--texto-2); padding:13px 16px 0;
+  display:flex; align-items:center; gap:8px;
+}
+.cartao > h2 .dica{
+  margin-left:auto; font-weight:400; font-size:11px; color:var(--texto-3);
+}
+
+/* ── Cartão de indicador ───────────────────────────────────── */
+.kpi{padding:14px 16px 0; position:relative}
+.kpi .rot{font-size:11.5px; color:var(--texto-2); font-weight:550;
+          letter-spacing:.35px; text-transform:uppercase}
+.kpi .val{
+  font-size:32px; font-weight:680; letter-spacing:-1px; margin-top:5px;
+  font-variant-numeric:tabular-nums; line-height:1.05;
+  transition:color .3s;
+}
+.kpi .un{font-size:15px; font-weight:500; color:var(--texto-2); margin-left:3px}
+.kpi .nota{font-size:11.5px; color:var(--texto-3); margin-top:3px}
+.kpi svg.spark{display:block; width:100%; height:36px; margin-top:8px}
+.v-ok{color:var(--ok)} .v-at{color:var(--atencao)} .v-cr{color:var(--critico)}
+.v-nt{color:var(--texto)}
+
+/* ── Gráficos ──────────────────────────────────────────────── */
+.plot{position:relative; padding:6px 8px 10px}
+.plot svg{display:block; width:100%; overflow:visible}
+.legenda{display:flex; flex-wrap:wrap; gap:6px 14px; padding:2px 16px 14px}
+.legenda span{display:flex; align-items:center; gap:6px; font-size:11.5px;
+              color:var(--texto-2); cursor:default}
+.legenda i{width:9px; height:3px; border-radius:2px; flex:0 0 auto}
+
+.tip{
+  position:absolute; pointer-events:none; opacity:0; transition:opacity .12s;
+  background:rgba(6,15,35,.96); border:1px solid var(--borda-forte);
+  border-radius:9px; padding:9px 11px; font-size:12px; min-width:130px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5); z-index:20;
+}
+.tip b{display:block; font-size:11px; color:var(--texto-3); font-weight:500;
+       margin-bottom:5px}
+.tip .l{display:flex; align-items:center; gap:7px; margin-top:3px;
+        font-variant-numeric:tabular-nums}
+.tip .l i{width:8px; height:8px; border-radius:2px; flex:0 0 auto}
+.tip .l u{text-decoration:none; color:var(--texto-2); margin-right:auto;
+          max-width:130px; overflow:hidden; text-overflow:ellipsis;
+          white-space:nowrap}
+
+/* ── Barras ────────────────────────────────────────────────── */
+.barras{padding:6px 16px 14px; display:flex; flex-direction:column; gap:9px}
+.barra{display:grid; grid-template-columns:1fr auto; gap:3px}
+.barra .nm{font-size:12px; color:var(--texto-2); overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap}
+.barra .vl{font-size:12px; font-variant-numeric:tabular-nums; font-weight:600}
+.barra .tr{grid-column:1/-1; height:6px; border-radius:4px;
+           background:rgba(255,255,255,.06); overflow:hidden}
+.barra .tr i{display:block; height:100%; border-radius:4px;
+             transition:width .6s cubic-bezier(.22,.9,.32,1)}
+
+/* ── Tabelas ───────────────────────────────────────────────── */
+.tab{max-height:290px; overflow:auto}
+table{width:100%; border-collapse:collapse; font-size:12.5px}
+th{
+  position:sticky; top:0; z-index:2; text-align:left; font-weight:600;
+  font-size:11px; letter-spacing:.35px; text-transform:uppercase;
+  color:var(--texto-3); padding:9px 16px;
+  background:var(--cartao-topo);
+  border-bottom:1px solid var(--borda);
+}
+td{padding:8px 16px; border-bottom:1px solid rgba(255,255,255,.045);
+   color:var(--texto-2)}
+tbody tr:hover td{background:rgba(255,255,255,.035); color:var(--texto)}
+td.n{font-variant-numeric:tabular-nums; text-align:right}
+td.p{color:var(--texto); font-weight:550}
+.pino{display:inline-block; padding:2px 8px; border-radius:20px;
+      font-size:10.5px; font-weight:650; letter-spacing:.3px}
+.pino.ok{background:rgba(46,204,113,.16); color:var(--ok)}
+.pino.at{background:rgba(240,166,64,.16); color:var(--atencao)}
+.pino.cr{background:rgba(232,84,74,.16); color:var(--critico)}
+
+/* ── Mapa ──────────────────────────────────────────────────── */
+.mapa{padding:8px 12px 14px; position:relative}
+.mapa svg{display:block; width:100%; height:265px}
+.mapa circle{cursor:pointer; transition:r .15s}
+.mapa circle:hover{r:7}
+
+/* ── Estados ───────────────────────────────────────────────── */
+.vazio{
+  padding:34px 16px; text-align:center; color:var(--texto-3); font-size:12.5px;
+}
+.esq{
+  background:linear-gradient(90deg, rgba(255,255,255,.045) 25%,
+             rgba(255,255,255,.09) 37%, rgba(255,255,255,.045) 63%);
+  background-size:400% 100%; animation:brilho 1.4s ease infinite;
+  border-radius:6px; color:transparent !important;
+}
+@keyframes brilho{0%{background-position:100% 0}100%{background-position:0 0}}
+
+footer{
+  margin-top:22px; padding:14px 6px 0; border-top:1px solid var(--borda);
+  font-size:11.5px; color:var(--texto-3); display:flex; gap:16px;
+  flex-wrap:wrap; align-items:center;
+}
+footer code{font-family:var(--mono); color:var(--texto-2); font-size:11px}
+footer a{color:var(--info); text-decoration:none}
+footer a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="marca">
+    <div class="logo" aria-hidden="true">
+      <!-- Troque por <img src="logo.png"> para pôr a sua marca -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9"
+           stroke-linecap="round">
+        <circle cx="12" cy="12" r="2.4"/>
+        <path d="M7.8 7.8a6 6 0 000 8.4M16.2 16.2a6 6 0 000-8.4"/>
+        <path d="M4.9 4.9a10 10 0 000 14.2M19.1 19.1a10 10 0 000-14.2"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Visão Geral da Malha</h1>
+      <div class="sub" id="sub">Rede mesh Rajant · carregando…</div>
+    </div>
+  </div>
+  <div class="controles">
+    <div class="seg" id="janela">
+      <button data-s="3600">1 h</button>
+      <button data-s="21600" class="on">6 h</button>
+      <button data-s="86400">24 h</button>
+      <button data-s="604800">7 d</button>
+    </div>
+    <div class="pulso"><i class="led" id="led"></i><span id="pulso">—</span></div>
+  </div>
+</header>
+
+<div class="grade" id="kpis"></div>
+<div class="grade" style="margin-top:14px" id="corpo"></div>
+
+<footer>
+  <span>Fonte: <code id="fonte">—</code></span>
+  <span>Atualiza a cada <code>30 s</code></span>
+  <span id="rodape-nota"></span>
+  <span style="margin-left:auto">
+    <a href="#" onclick="alternarDemo();return false" id="linkDemo">modo demo</a>
+  </span>
+</footer>
+
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════
+   CONFIGURAÇÃO
+   ══════════════════════════════════════════════════════════════ */
+const CFG = {
+  // Servido pelo exporter -> usa o proxy /api/q (sem CORS).
+  // Aberto direto do disco -> aponte para o Prometheus aqui.
+  prometheus: "http://localhost:9090",
+  atualizaMs:  30000,
+  janelaS:     21600,
+};
+
+const params  = new URLSearchParams(location.search);
+const VIA_PROXY = location.protocol.startsWith("http") && !params.has("prom");
+let   DEMO    = params.get("demo") === "1";
+if (params.has("prom")) CFG.prometheus = params.get("prom");
+
+const $  = s => document.querySelector(s);
+const el = (t, c, txt) => { const e = document.createElement(t);
+  if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+
+/* ══════════════════════════════════════════════════════════════
+   ACESSO AOS DADOS
+   ══════════════════════════════════════════════════════════════ */
+async function consultar(q, tipo = "instant", janela = CFG.janelaS, passo = 0) {
+  if (DEMO) return demo(q, tipo, janela);
+  passo = passo || Math.max(15, Math.round(janela / 220));
+  let url;
+  if (VIA_PROXY) {
+    url = `/api/q?q=${encodeURIComponent(q)}&t=${tipo}`
+        + (tipo === "range" ? `&janela=${janela}&passo=${passo}` : "");
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.erro || "consulta falhou");
+    return j.res;
+  }
+  const agora = Math.floor(Date.now() / 1000);
+  url = tipo === "range"
+    ? `${CFG.prometheus}/api/v1/query_range?query=${encodeURIComponent(q)}`
+      + `&start=${agora - janela}&end=${agora}&step=${passo}s`
+    : `${CFG.prometheus}/api/v1/query?query=${encodeURIComponent(q)}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  if (j.status !== "success") throw new Error(JSON.stringify(j).slice(0, 120));
+  return j.data.result;
+}
+
+const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+const primeiro = res => res && res.length ? num(res[0].value[1]) : null;
+const rotulo = (m, campos) => campos.map(c => m[c]).filter(Boolean).join(" · ");
+
+/* ══════════════════════════════════════════════════════════════
+   FORMATAÇÃO
+   ══════════════════════════════════════════════════════════════ */
+const fmt = (v, casas = 1) => v == null ? "—"
+  : v.toLocaleString("pt-BR", {minimumFractionDigits: casas,
+                               maximumFractionDigits: casas});
+const fmtInt = v => v == null ? "—" : Math.round(v).toLocaleString("pt-BR");
+function fmtDur(s) {
+  if (s == null) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600);
+  return d ? `${d}d ${h}h` : `${h}h`;
+}
+const hora = ts => new Date(ts * 1000)
+  .toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"});
+
+/** Cor conforme limiares.
+ *  inv=false — MAIOR é melhor (disponibilidade, SNR): passe crit < aten.
+ *              abaixo de `crit` = crítico, abaixo de `aten` = atenção.
+ *  inv=true  — MENOR é melhor (latência, alertas): passe aten < crit.
+ *              acima de `crit` = crítico, acima de `aten` = atenção.
+ */
+function classe(v, aten, crit, inv = false) {
+  if (v == null) return "v-nt";
+  if (inv) return v >= crit ? "v-cr" : v >= aten ? "v-at" : "v-ok";
+  return v <= crit ? "v-cr" : v <= aten ? "v-at" : "v-ok";
+}
+const COR = {"v-ok": "var(--ok)", "v-at": "var(--atencao)",
+             "v-cr": "var(--critico)", "v-nt": "var(--texto)"};
+
+/* ══════════════════════════════════════════════════════════════
+   CARTÃO DE INDICADOR
+   ══════════════════════════════════════════════════════════════ */
+function cartaoKPI({rot, val, un, nota, cls, serie, col = "c3"}) {
+  const c = el("div", `cartao ${col}`);
+  const k = el("div", "kpi");
+  k.appendChild(el("div", "rot", rot));
+  const v = el("div", `val ${cls || "v-nt"}`);
+  v.textContent = val;
+  if (un) { const u = el("span", "un", un); v.appendChild(u); }
+  k.appendChild(v);
+  if (nota) k.appendChild(el("div", "nota", nota));
+  if (serie && serie.length > 1) k.appendChild(sparkline(serie, COR[cls || "v-nt"]));
+  c.appendChild(k);
+  return c;
+}
+
+function sparkline(pts, cor) {
+  const W = 240, H = 36, ns = "http://www.w3.org/2000/svg";
+  const ys = pts.map(p => p[1]).filter(v => v != null);
+  if (!ys.length) return el("div");
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const x = i => i / (pts.length - 1) * W;
+  const y = v => H - 3 - (v - lo) / (hi - lo) * (H - 8);
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "spark");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const id = "sp" + Math.random().toString(36).slice(2, 8);
+  svg.innerHTML =
+    `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+       <stop offset="0%" stop-color="${cor}" stop-opacity=".35"/>
+       <stop offset="100%" stop-color="${cor}" stop-opacity="0"/>
+     </linearGradient></defs>`;
+  const d = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},`
+                            + `${(p[1] == null ? H : y(p[1])).toFixed(1)}`).join("");
+  const area = document.createElementNS(ns, "path");
+  area.setAttribute("d", `${d}L${W},${H}L0,${H}Z`);
+  area.setAttribute("fill", `url(#${id})`);
+  const linha = document.createElementNS(ns, "path");
+  linha.setAttribute("d", d);
+  linha.setAttribute("fill", "none");
+  linha.setAttribute("stroke", cor);
+  linha.setAttribute("stroke-width", "1.6");
+  linha.setAttribute("stroke-linejoin", "round");
+  svg.append(area, linha);
+  return svg;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   GRÁFICO DE LINHAS (SVG puro, sem biblioteca)
+   ══════════════════════════════════════════════════════════════ */
+function grafico(series, {unid = "", casas = 1, alt = 210, zero = false,
+                          faixa = null} = {}) {
+  const ns = "http://www.w3.org/2000/svg";
+  const env = el("div", "plot");
+  if (!series.length || !series.some(s => s.pts.length)) {
+    env.appendChild(el("div", "vazio", "Sem dados no período."));
+    return {no: env, leg: el("div")};
+  }
+  const W = 900, H = alt, M = {t: 12, r: 14, b: 24, l: 46};
+  const todos = series.flatMap(s => s.pts).filter(p => p[1] != null);
+  const txs = todos.map(p => p[0]);
+  const vys = todos.map(p => p[1]);
+  let t0 = Math.min(...txs), t1 = Math.max(...txs);
+  let lo = faixa ? faixa[0] : Math.min(...vys);
+  let hi = faixa ? faixa[1] : Math.max(...vys);
+  if (zero && !faixa) lo = Math.min(0, lo);
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const pad = (hi - lo) * .1; if (!faixa) { hi += pad; lo -= pad; }
+  if (t1 === t0) t1 = t0 + 1;
+  const X = t => M.l + (t - t0) / (t1 - t0) * (W - M.l - M.r);
+  const Y = v => M.t + (1 - (v - lo) / (hi - lo)) * (H - M.t - M.b);
+
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("height", H);
+  svg.setAttribute("preserveAspectRatio", "none");
+  let g = "";
+
+  // grade + eixo Y
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Y(v).toFixed(1);
+    g += `<line x1="${M.l}" x2="${W - M.r}" y1="${y}" y2="${y}"
+            stroke="rgba(255,255,255,.06)" stroke-width="1"/>`
+       + `<text x="${M.l - 8}" y="${y}" dy="3.5" text-anchor="end"
+            font-size="10.5" fill="var(--texto-3)"
+            font-family="var(--fonte)">${fmt(v, casas)}</text>`;
+  }
+  // eixo X
+  for (let i = 0; i <= 4; i++) {
+    const t = t0 + (t1 - t0) * i / 4, x = X(t).toFixed(1);
+    g += `<text x="${x}" y="${H - 7}" text-anchor="middle" font-size="10.5"
+            fill="var(--texto-3)" font-family="var(--fonte)">${hora(t)}</text>`;
+  }
+  svg.innerHTML = g;
+
+  // séries
+  const defs = document.createElementNS(ns, "defs");
+  svg.appendChild(defs);
+  series.forEach((s, si) => {
+    const pts = s.pts.filter(p => p[1] != null);
+    if (!pts.length) return;
+    const d = pts.map((p, i) =>
+      `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+    if (series.length <= 3) {
+      const gid = `gr${si}${Math.random().toString(36).slice(2, 6)}`;
+      defs.insertAdjacentHTML("beforeend",
+        `<linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+           <stop offset="0%" stop-color="${s.cor}" stop-opacity=".26"/>
+           <stop offset="100%" stop-color="${s.cor}" stop-opacity="0"/>
+         </linearGradient>`);
+      const a = document.createElementNS(ns, "path");
+      a.setAttribute("d", `${d}L${X(pts[pts.length-1][0]).toFixed(1)},${H-M.b}`
+                        + `L${X(pts[0][0]).toFixed(1)},${H-M.b}Z`);
+      a.setAttribute("fill", `url(#${gid})`);
+      svg.appendChild(a);
+    }
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", s.cor);
+    p.setAttribute("stroke-width", series.length > 6 ? "1.3" : "1.9");
+    p.setAttribute("stroke-linejoin", "round");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("opacity", series.length > 10 ? ".8" : "1");
+    svg.appendChild(p);
+  });
+
+  // interação: mira + tooltip
+  const mira = document.createElementNS(ns, "line");
+  mira.setAttribute("y1", M.t); mira.setAttribute("y2", H - M.b);
+  mira.setAttribute("stroke", "rgba(255,255,255,.28)");
+  mira.setAttribute("stroke-width", "1");
+  mira.setAttribute("opacity", "0");
+  svg.appendChild(mira);
+  const tip = el("div", "tip");
+  env.append(svg, tip);
+
+  svg.addEventListener("mousemove", ev => {
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) / r.width * W;
+    if (px < M.l || px > W - M.r) return;
+    const t = t0 + (px - M.l) / (W - M.l - M.r) * (t1 - t0);
+    mira.setAttribute("x1", px); mira.setAttribute("x2", px);
+    mira.setAttribute("opacity", "1");
+    const linhas = series.map(s => {
+      let melhor = null, dist = Infinity;
+      for (const p of s.pts) {
+        if (p[1] == null) continue;
+        const dd = Math.abs(p[0] - t);
+        if (dd < dist) { dist = dd; melhor = p; }
+      }
+      return melhor ? {s, p: melhor} : null;
+    }).filter(Boolean).sort((a, b) => b.p[1] - a.p[1]).slice(0, 8);
+    if (!linhas.length) return;
+    tip.innerHTML = `<b>${hora(linhas[0].p[0])}</b>` + linhas.map(o =>
+      `<div class="l"><i style="background:${o.s.cor}"></i>`
+      + `<u>${o.s.nome}</u><span>${fmt(o.p[1], casas)}${unid}</span></div>`).join("");
+    tip.style.opacity = "1";
+    const dir = px > W * .58;
+    tip.style.left = dir ? "auto" : `${px / W * 100}%`;
+    tip.style.right = dir ? `${(1 - px / W) * 100}%` : "auto";
+    tip.style.top = "10px";
+    tip.style.transform = dir ? "translateX(-10px)" : "translateX(10px)";
+  });
+  svg.addEventListener("mouseleave", () => {
+    tip.style.opacity = "0"; mira.setAttribute("opacity", "0");
+  });
+
+  const leg = el("div", "legenda");
+  series.slice(0, 14).forEach(s => {
+    const sp = el("span");
+    const i = el("i"); i.style.background = s.cor;
+    sp.append(i, document.createTextNode(s.nome));
+    leg.appendChild(sp);
+  });
+  if (series.length > 14)
+    leg.appendChild(el("span", null, `+${series.length - 14}`));
+  return {no: env, leg};
+}
+
+const PALETA = ["#3d8bd4","#2ecc71","#f0a640","#8b7fd4","#43c6c6",
+                "#e8544a","#c9a227","#5b8def","#4fb286","#d67ab1"];
+const corDe = i => PALETA[i % PALETA.length];
+
+/* ══════════════════════════════════════════════════════════════
+   BLOCOS
+   ══════════════════════════════════════════════════════════════ */
+function bloco(titulo, dica, col, conteudo) {
+  const c = el("div", `cartao ${col}`);
+  const h = el("h2", null, titulo);
+  if (dica) h.appendChild(el("span", "dica", dica));
+  c.appendChild(h);
+  (Array.isArray(conteudo) ? conteudo : [conteudo]).forEach(x => x && c.appendChild(x));
+  return c;
+}
+
+function tabela(colunas, linhas, vazio = "Nada a mostrar.") {
+  const env = el("div", "tab");
+  if (!linhas.length) { env.appendChild(el("div", "vazio", vazio)); return env; }
+  const t = el("table");
+  const thead = el("thead"), tr = el("tr");
+  colunas.forEach(c => {
+    const th = el("th", null, c.t);
+    if (c.n) th.style.textAlign = "right";
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr); t.appendChild(thead);
+  const tb = el("tbody");
+  linhas.forEach(l => {
+    const r = el("tr");
+    colunas.forEach((c, i) => {
+      const td = el("td", (c.n ? "n " : "") + (i === 0 ? "p" : ""));
+      const v = l[i];
+      if (v && v.pino) {
+        const s = el("span", `pino ${v.pino}`, v.txt); td.appendChild(s);
+      } else td.textContent = v == null ? "—" : v;
+      r.appendChild(td);
+    });
+    tb.appendChild(r);
+  });
+  t.appendChild(tb); env.appendChild(t);
+  return env;
+}
+
+function barras(itens, {unid = "", casas = 1, inv = false,
+                        aten = 0, crit = 0} = {}) {
+  const env = el("div", "barras");
+  if (!itens.length) { env.appendChild(el("div", "vazio", "Sem dados.")); return env; }
+  const max = Math.max(...itens.map(i => Math.abs(i.v)), 1);
+  const min = Math.min(...itens.map(i => i.v), 0);
+  itens.forEach(it => {
+    const b = el("div", "barra");
+    b.appendChild(el("div", "nm", it.nome));
+    const cls = classe(it.v, aten, crit, inv);
+    const vl = el("div", `vl ${cls}`, fmt(it.v, casas) + unid);
+    b.appendChild(vl);
+    const tr = el("div", "tr"), i = el("i");
+    const pct = (it.v - min) / (max - min || 1) * 100;
+    i.style.width = "0%";
+    i.style.background = `linear-gradient(90deg, ${COR[cls]}aa, ${COR[cls]})`;
+    tr.appendChild(i); b.appendChild(tr); env.appendChild(b);
+    requestAnimationFrame(() => { i.style.width = Math.max(3, pct) + "%"; });
+  });
+  return env;
+}
+
+function mapa(pontos) {
+  const ns = "http://www.w3.org/2000/svg";
+  const env = el("div", "mapa");
+  if (!pontos.length) {
+    env.appendChild(el("div", "vazio",
+      "Nenhum equipamento com fix de GPS. Verifique se o módulo está habilitado."));
+    return env;
+  }
+  const W = 900, H = 265, M = 26;
+  const las = pontos.map(p => p.lat), los = pontos.map(p => p.lon);
+  let laMin = Math.min(...las), laMax = Math.max(...las);
+  let loMin = Math.min(...los), loMax = Math.max(...los);
+  if (laMax === laMin) { laMax += .001; laMin -= .001; }
+  if (loMax === loMin) { loMax += .001; loMin -= .001; }
+  const X = lo => M + (lo - loMin) / (loMax - loMin) * (W - 2 * M);
+  const Y = la => H - M - (la - laMin) / (laMax - laMin) * (H - 2 * M);
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const y = M + (H - 2 * M) * i / 4, x = M + (W - 2 * M) * i / 4;
+    g += `<line x1="${M}" x2="${W-M}" y1="${y}" y2="${y}"
+            stroke="rgba(255,255,255,.05)"/>`
+       + `<line y1="${M}" y2="${H-M}" x1="${x}" x2="${x}"
+            stroke="rgba(255,255,255,.05)"/>`;
+  }
+  svg.innerHTML = g;
+  const tip = el("div", "tip");
+  pontos.forEach(p => {
+    const cls = classe(p.snr, 15, 30);
+    const c = document.createElementNS(ns, "circle");
+    c.setAttribute("cx", X(p.lon).toFixed(1));
+    c.setAttribute("cy", Y(p.lat).toFixed(1));
+    c.setAttribute("r", "5");
+    c.setAttribute("fill", COR[cls]);
+    c.setAttribute("fill-opacity", ".85");
+    c.setAttribute("stroke", "rgba(255,255,255,.5)");
+    c.setAttribute("stroke-width", ".8");
+    c.addEventListener("mouseenter", () => {
+      tip.innerHTML = `<b>${p.nome}</b>`
+        + `<div class="l"><u>SNR</u><span>${fmt(p.snr, 1)} dB</span></div>`
+        + `<div class="l"><u>lat</u><span>${p.lat.toFixed(5)}</span></div>`
+        + `<div class="l"><u>lon</u><span>${p.lon.toFixed(5)}</span></div>`;
+      tip.style.opacity = "1";
+      tip.style.left = (X(p.lon) / W * 100) + "%";
+      tip.style.top = (Y(p.lat) / H * 100 * (265 / 265)) + "px";
+      tip.style.right = "auto"; tip.style.transform = "translate(12px,-50%)";
+    });
+    c.addEventListener("mouseleave", () => tip.style.opacity = "0");
+    svg.appendChild(c);
+  });
+  env.append(svg, tip);
+  return env;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MONTAGEM DO PAINEL
+   ══════════════════════════════════════════════════════════════ */
+async function carregar() {
+  const J = CFG.janelaS;
+  const kpis = $("#kpis"), corpo = $("#corpo");
+  const pedir = (q, t = "instant") => consultar(q, t, J).catch(e => {
+    console.warn(q, e); return [];
+  });
+
+  const [online, nos, d24, d7, alertas, reboot, rtt,
+         sDisp, sScore, sRtt, sMud,
+         piores, falhas, info, gpsLat, gpsLon, gpsSnr, uptime] =
+  await Promise.all([
+    pedir("sum(rajant_online)"),
+    pedir("rajant_nos_fisicos_total"),
+    pedir("avg(rajant_disponibilidade_24h_pct)"),
+    pedir("avg(rajant_disponibilidade_7d_pct)"),
+    pedir("sum(rajant_alertas_ativos)"),
+    pedir("sum(rajant_reboot_needed)"),
+    pedir("avg(rajant_ping_rtt_ms)"),
+    pedir("avg(rajant_disponibilidade_1h_pct)", "range"),
+    pedir("rajant_mesh_score", "range"),
+    pedir("avg(rajant_ping_rtt_ms)", "range"),
+    pedir("sum(rajant_link_changes)", "range"),
+    pedir("bottomk(8, rajant_disponibilidade_24h_pct)"),
+    pedir("rajant_falhas_consecutivas > 0"),
+    pedir("rajant_bc_info"),
+    pedir("rajant_gps_lat"),
+    pedir("rajant_gps_lon"),
+    pedir("max by (bc) (rajant_peer_snr_db)"),
+    pedir("avg(rajant_uptime_s)"),
+  ]);
+
+  const serieDe = res => res.map((s, i) => ({
+    nome: rotulo(s.metric, ["bc", "radio"]) || "total",
+    cor:  corDe(i),
+    pts:  (s.values || []).map(v => [num(v[0]), num(v[1])]),
+  }));
+
+  // ── Indicadores ──
+  kpis.innerHTML = "";
+  const nOnline = primeiro(online), nNos = primeiro(nos);
+  const v24 = primeiro(d24), v7 = primeiro(d7);
+  const sDispPts = serieDe(sDisp)[0];
+  const sRttPts  = serieDe(sRtt)[0];
+
+  kpis.append(
+    cartaoKPI({rot: "BreadCrumbs online", val: fmtInt(nOnline),
+      nota: nNos ? `${fmtInt(nNos)} nós físicos` : "",
+      cls: nOnline > 0 ? "v-ok" : "v-cr"}),
+    // maior é melhor: atenção abaixo de 99,9 % (meta), crítico abaixo de 99 %
+    cartaoKPI({rot: "Disponibilidade 24 h", val: fmt(v24, 2), un: "%",
+      nota: "meta 99,9 %", cls: classe(v24, 99.9, 99),
+      serie: sDispPts ? sDispPts.pts : null}),
+    cartaoKPI({rot: "Disponibilidade 7 d", val: fmt(v7, 2), un: "%",
+      nota: "janela BCE", cls: classe(v7, 99.9, 99)}),
+    cartaoKPI({rot: "Latência média", val: fmt(primeiro(rtt), 1), un: "ms",
+      nota: "ICMP até o BC", cls: classe(primeiro(rtt), 10, 50, true),
+      serie: sRttPts ? sRttPts.pts : null}),
+    cartaoKPI({rot: "Alertas ativos", val: fmtInt(primeiro(alertas)),
+      nota: "AlertSystem.alerts",
+      cls: classe(primeiro(alertas), 1, 10, true)}),
+    cartaoKPI({rot: "Pedem reboot", val: fmtInt(primeiro(reboot)),
+      nota: "System.reboot",
+      cls: classe(primeiro(reboot), 1, 1, true)}),
+    cartaoKPI({rot: "Uptime médio", val: fmtDur(primeiro(uptime)),
+      nota: "escala não confirmada", cls: "v-nt"}),
+    cartaoKPI({rot: "Falhas de coleta", val: fmtInt(falhas.length),
+      nota: falhas.length ? "ver tabela abaixo" : "nenhuma",
+      cls: classe(falhas.length, 1, 5, true)}),
+  );
+
+  // ── Gráficos e tabelas ──
+  corpo.innerHTML = "";
+  const gDisp  = grafico(serieDe(sDisp),  {unid: "%", casas: 2, faixa: [90, 100]});
+  const gScore = grafico(serieDe(sScore), {casas: 0, faixa: [0, 100]});
+  const gRtt   = grafico(serieDe(sRtt),   {unid: " ms", zero: true});
+  const gMud   = grafico(serieDe(sMud),   {casas: 0, zero: true});
+
+  corpo.append(
+    bloco("Disponibilidade da malha", "média de todos os BCs", "c6",
+          [gDisp.no, gDisp.leg]),
+    bloco("Mesh score por BreadCrumb", "0 a 100", "c6",
+          [gScore.no, gScore.leg]),
+    bloco("Latência ICMP", "média da frota", "c6", [gRtt.no, gRtt.leg]),
+    bloco("Mudanças de link", "peers que trocaram entre coletas", "c6",
+          [gMud.no, gMud.leg]),
+
+    bloco("Piores disponibilidades", "24 h", "c4",
+      barras(piores.map(s => ({nome: s.metric.bc || "?", v: num(s.value[1])}))
+                   .sort((a, b) => a.v - b.v),
+             {unid: "%", casas: 2, aten: 99.9, crit: 99})),
+
+    bloco("Falhas de coleta", "tentativas consecutivas", "c4",
+      tabela([{t: "BreadCrumb"}, {t: "IP"}, {t: "Falhas", n: true}],
+        falhas.map(s => [s.metric.bc, s.metric.ip,
+          {pino: num(s.value[1]) >= 3 ? "cr" : "at", txt: fmtInt(num(s.value[1]))}]),
+        "Nenhuma falha — é o esperado.")),
+
+    bloco("Posição dos equipamentos", "cor pelo SNR do melhor enlace", "c4",
+      mapa(montarGPS(gpsLat, gpsLon, gpsSnr))),
+
+    bloco("Inventário", `${info.length} BreadCrumbs`, "c12",
+      tabela([{t: "BreadCrumb"}, {t: "IP"}, {t: "Modelo"},
+              {t: "Firmware"}, {t: "Grupos"}],
+        info.map(s => [s.metric.bc, s.metric.ip, s.metric.modelo,
+                       s.metric.firmware, s.metric.grupos])
+            .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        "Sem inventário — o exporter publicou rajant_bc_info?")),
+  );
+
+  // atraso escalonado na entrada dos cartões
+  [...kpis.children, ...corpo.children].forEach((c, i) =>
+    c.style.animationDelay = Math.min(i * 28, 400) + "ms");
+
+  $("#sub").textContent =
+    `Rede mesh Rajant · ${fmtInt(nNos ?? nOnline)} nós · `
+    + `janela de ${J >= 86400 ? (J / 86400) + " dia(s)" : (J / 3600) + " h"}`;
+  $("#fonte").textContent = DEMO ? "dados sintéticos (modo demo)"
+    : (VIA_PROXY ? location.origin + "/api/q" : CFG.prometheus);
+  $("#rodape-nota").textContent = DEMO
+    ? "Nenhum dado real — use para ajustar o visual." : "";
+}
+
+function montarGPS(lats, lons, snrs) {
+  const mapaLon = {}, mapaSnr = {};
+  lons.forEach(s => mapaLon[s.metric.bc] = num(s.value[1]));
+  snrs.forEach(s => mapaSnr[s.metric.bc] = num(s.value[1]));
+  return lats.map(s => ({
+    nome: s.metric.bc, lat: num(s.value[1]),
+    lon: mapaLon[s.metric.bc], snr: mapaSnr[s.metric.bc],
+  })).filter(p => p.lat != null && p.lon != null);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MODO DEMO — dados sintéticos para ajustar o visual sem Prometheus
+   ══════════════════════════════════════════════════════════════ */
+const NOMES = ["BACKBONE-ANEL-N","BACKBONE-ANEL-S","ERB-001","ERB-002","ERB-003",
+               "ERM-005","ERM-012","CA-4007","CA-4017","PF-1803","TT-5604",
+               "EH-220","ESCAV-12","PA-330","CORE-01"];
+let semente = 42;
+const rnd = () => (semente = (semente * 1103515245 + 12345) & 0x7fffffff)
+                  / 0x7fffffff;
+
+function demo(q, tipo, janela) {
+  const agora = Math.floor(Date.now() / 1000);
+  const n = 160, passo = Math.max(15, Math.round(janela / n));
+  const serie = (base, amp, piso, teto) => {
+    const v = [];
+    for (let i = 0; i < n; i++) {
+      const t = agora - janela + i * passo;
+      let x = base + Math.sin(i / 11) * amp + (rnd() - .5) * amp * .7;
+      if (piso != null) x = Math.max(piso, x);
+      if (teto != null) x = Math.min(teto, x);
+      v.push([t, x.toFixed(3)]);
+    }
+    return v;
+  };
+  const um = (val, m = {}) => [{metric: m, value: [agora, String(val)]}];
+
+  // bottomk() vem antes: a string dele contém "disponibilidade_24h" e cairia
+  // no ramo do indicador único, devolvendo uma barra só.
+  if (q.includes("bottomk"))
+    return NOMES.slice(7, 15).map((bc, i) => ({
+      // teto em 99,98: disponibilidade não passa de 100 %
+      metric: {bc}, value: [agora,
+        Math.min(99.98, 96.2 + i * .48 + rnd() * .25).toFixed(2)]}));
+
+  if (q.includes("sum(rajant_online)"))          return um(151);
+  if (q.includes("nos_fisicos"))                 return um(153);
+  if (q.includes("disponibilidade_24h") && tipo === "instant") return um(99.42);
+  if (q.includes("disponibilidade_7d"))          return um(99.11);
+  if (q.includes("alertas_ativos"))              return um(3);
+  if (q.includes("reboot_needed"))               return um(1);
+  if (q.includes("uptime"))                      return um(1987654);
+  if (q.includes("ping_rtt") && tipo === "instant") return um(7.4);
+
+  if (tipo === "range") {
+    if (q.includes("disponibilidade_1h"))
+      return [{metric: {}, values: serie(99.3, .6, 95, 100)}];
+    if (q.includes("ping_rtt"))
+      return [{metric: {}, values: serie(7, 3.2, .4)}];
+    if (q.includes("link_changes"))
+      return [{metric: {}, values: serie(9, 7, 0)}];
+    if (q.includes("mesh_score"))
+      return NOMES.slice(0, 7).map((bc, i) => ({
+        metric: {bc}, values: serie(78 - i * 4, 9, 20, 100)}));
+    return [{metric: {}, values: serie(50, 12)}];
+  }
+
+  if (q.includes("falhas_consecutivas"))
+    return [{metric: {bc: "PF-1803", ip: "10.188.97.42"}, value: [agora, "2"]},
+            {metric: {bc: "CA-4017", ip: "10.188.97.61"}, value: [agora, "4"]}];
+  if (q.includes("bc_info"))
+    return NOMES.map((bc, i) => ({metric: {
+      bc, ip: `10.188.96.${140 + i}`,
+      modelo: i % 3 ? "ES1" : "LX5",
+      firmware: "11.25.0",
+      grupos: i < 2 ? "BACKBONE" : (i < 5 ? "MINA-NORTE" : "MINA-SUL")},
+      value: [agora, "1"]}));
+  if (q.includes("gps_lat"))
+    return NOMES.slice(7).map((bc, i) => ({metric: {bc},
+      value: [agora, (-27.7316 + (rnd() - .5) * .02).toFixed(6)]}));
+  if (q.includes("gps_lon"))
+    return NOMES.slice(7).map((bc, i) => ({metric: {bc},
+      value: [agora, (-50.0690 + (rnd() - .5) * .03).toFixed(6)]}));
+  if (q.includes("peer_snr_db"))
+    return NOMES.slice(7).map((bc, i) => ({metric: {bc},
+      value: [agora, (10 + rnd() * 32).toFixed(1)]}));
+  return [];
+}
+
+function alternarDemo() {
+  const u = new URL(location);
+  DEMO ? u.searchParams.delete("demo") : u.searchParams.set("demo", "1");
+  location.href = u.toString();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CICLO DE VIDA
+   ══════════════════════════════════════════════════════════════ */
+let timer = null;
+async function atualizar() {
+  const led = $("#led"), pulso = $("#pulso");
+  try {
+    await carregar();
+    led.classList.remove("erro");
+    pulso.textContent = new Date().toLocaleTimeString("pt-BR");
+  } catch (e) {
+    led.classList.add("erro");
+    pulso.textContent = "falha ao consultar";
+    console.error(e);
+    if (!$("#corpo").children.length) {
+      $("#corpo").innerHTML =
+        `<div class="cartao c12"><div class="vazio">
+           Não foi possível falar com o Prometheus.<br>
+           <code style="color:var(--texto-2)">${String(e.message).slice(0,160)}</code>
+           <br><br>Abra com <b>?demo=1</b> para ajustar o visual sem dados reais.
+         </div></div>`;
+    }
+  }
+}
+
+$("#janela").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  [...ev.currentTarget.children].forEach(x => x.classList.remove("on"));
+  b.classList.add("on");
+  CFG.janelaS = +b.dataset.s;
+  atualizar();
+});
+$("#linkDemo").textContent = DEMO ? "sair do modo demo" : "modo demo";
+
+atualizar();
+timer = setInterval(atualizar, CFG.atualizaMs);
+document.addEventListener("visibilitychange", () => {
+  clearInterval(timer);
+  if (!document.hidden) { atualizar(); timer = setInterval(atualizar, CFG.atualizaMs); }
+});
+</script>
+</body>
+</html>

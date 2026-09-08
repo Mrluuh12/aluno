@@ -1,0 +1,23 @@
+# Provisionamento dos dashboards Rajant.
+#
+# Instalar em /etc/grafana/provisioning/dashboards/rajant.yaml e copiar os
+# JSON para o caminho indicado em `path`. Ver grafana/README.md.
+apiVersion: 1
+
+providers:
+  - name: rajant
+    orgId: 1
+    folder: Rajant
+    folderUid: rajant
+    type: file
+    # Deixe false: os JSON são gerados por grafana/gerar_dashboards.py, então
+    # uma exclusão pela interface deve voltar no próximo restart em vez de
+    # sumir do disco.
+    disableDeletion: false
+    # Edição pela interface é permitida, mas o provisionamento sobrescreve a
+    # cada intervalo. Mudança que precisa durar vai no gerador.
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/rajant
+      foldersFromFilesStructure: false
