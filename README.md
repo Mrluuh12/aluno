@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 356 testes
+python3 teste_parser.py                        # 360 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -22,7 +22,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 | arquivo | o que é |
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
-| `teste_parser.py` | 356 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 360 testes; roda sem rádio e sem a lib `rajant_api` |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
 | `bcapi-ref/proto/` | os `.proto` do bcapi, referência de tudo que se afirma sobre a API |
@@ -59,6 +59,7 @@ intervalo_moveis_segundos = 20     # coleta acelerada só dos móveis
 [survey]
 max_threads         = 12           # teto de consultas simultâneas
 min_intervalo_s     = 5            # piso do intervalo pela página
+piso_continuo_s     = 1            # espera mínima no modo contínuo
 falhas_para_pular   = 3            # desiste do rádio após N falhas
 usar_cache_fallback = true
 
@@ -68,7 +69,55 @@ fundo_local  = orto.png                     # alternativa; exige fundo_bbox
 fundo_bbox   = -27.7250,-27.7400,-50.0580,-50.0760
 zonas_grade_m = 50
 imagens_no_ppt = false             # false = molduras vazias p/ colar print
+kmz_com_rotas        = false       # true = também a linha ligando amostras
+kmz_com_equipamentos = false       # true = devolve os alfinetes dos BCs
 ```
+
+## O KMZ: rastro em calor, não linha
+
+A rota sai como **mapa de calor**, e só onde o rádio passou: cada amostra
+pinta um núcleo de raio limitado à sua volta e o resto do raster fica
+transparente.
+
+Isso **não** é a superfície de cobertura que foi retirada a pedido. Aquela
+interpolava valor sobre terreno onde ninguém passou — afirmava sinal em
+lugar não medido. Esta só pinta o que foi medido, e há teste exigindo que a
+maior parte da imagem continue transparente. A diferença entre *"medi aqui
+e deu isto"* e *"acho que lá deve dar aquilo"* é o que separa um laudo de
+um chute.
+
+O raio sai do **espaçamento real das amostras** (1,6×, entre 25 e 120 m):
+captura rápida dá rastro fino e fiel; captura espaçada engrossa o bastante
+para não virar bolinha solta.
+
+A linha continua disponível em `kmz_com_rotas = true`, e quando ligada ela
+é **partida nos buracos de medição** — o limiar vem da mediana do próprio
+survey, não de número mágico. Ligar duas amostras distantes é afirmar que
+o veículo passou pela reta entre elas; com amostragem espaçada isso virava
+aresta reta cortando a cava.
+
+> Detalhe que custou depuração: o contorno escuro da rota era **uma linha
+> por trajeto**. Mesmo quebrando os segmentos coloridos, ele sozinho
+> redesenhava a reta que a quebra tinha acabado de tirar.
+
+## Captura contínua
+
+Pedindo intervalo **0**, o ciclo seguinte sai assim que o anterior volta,
+com piso de `piso_continuo_s`. É o que aproxima o traçado de uma linha em
+vez de uma sequência de pontos:
+
+| intervalo | a 40 km/h, distância entre amostras |
+|---|---|
+| 60 s | ~660 m |
+| 20 s | ~220 m |
+| 1 s | ~11 m |
+
+Não é grátis: cada amostra é uma ida e volta ao rádio **pela própria malha
+que se está medindo**. Com poucos veículos o custo é baixo e o ganho é
+grande; com a frota inteira o ciclo já se alonga sozinho pelo teto de
+threads — e é por isso que o aviso da página trata "consultas/s" no
+contínuo como **teto**, não como taxa. O intervalo que de fato aconteceu
+vai para `intervalo_efetivo_s` e para o relatório.
 
 ## Dois relatórios
 
@@ -224,7 +273,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 356 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 360 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de
