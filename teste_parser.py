@@ -3176,6 +3176,63 @@ class TestKmlSurvey(unittest.TestCase):
                            "o calor cobriu quase tudo: virou cobertura")
         self.assertGreater(alfa.max(), 0.5, "o rastro saiu apagado")
 
+    def test_radio_parado_nao_vira_bola_no_calor(self):
+        # Um BC fixo dá dezenas de amostras no MESMO ponto: virava uma
+        # bola isolada, e como ele enxerga o vizinho de perto, saía verde.
+        # Eram as "bolas espalhadas e desconectadas" — e boa parte do
+        # verde que nao batia com a mina.
+        import zipfile, io as _io, math
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        am = []
+        for k in range(30):        # movel RUIM, andando
+            am.append({"radio": "CA-1", "lat": -27.730 + k*3e-4,
+                       "lon": -50.070, "ts": k*5, "banda": "5.8 GHz",
+                       "sinal": -80.0, "snr": 12.0, "ruido": -92.0})
+        for k in range(30):        # fixo OTIMO, parado num ponto
+            am.append({"radio": "ERB-9", "lat": -27.7255, "lon": -50.0669,
+                       "ts": k*5, "banda": "5.8 GHz",
+                       "sinal": -50.0, "snr": 42.0, "ruido": -95.0})
+        dados, _ = rm.gerar_kml_survey(
+            {"id": 1, "nome": "T", "inicio": 1756000000},
+            am, {"ERB-9": (-27.7255, -50.0669)}, cfg=self.cfg, campo="sinal")
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        png = [n for n in z.namelist() if n.endswith(".png")][0]
+        img = mpimg.imread(_io.BytesIO(z.read(png)))
+        rgb, alfa = img[..., :3], img[..., 3]
+        pintado = alfa > 0.4
+        self.assertTrue(pintado.any(), "nao pintou nada")
+        # Onde o BC PARADO esta, o raster tem de ser transparente: ele nao
+        # percorreu nada. Olhar a media do quadro inteiro nao serve — o
+        # rastro do movel tem area muito maior e afogaria a bola.
+        doc = z.read("doc.kml").decode()
+        import re as _re
+        cx = {t: float(_re.search(rf"<{t}>([-\d.]+)</{t}>", doc).group(1))
+              for t in ("north", "south", "east", "west")}
+        n = img.shape[0]
+        # O PNG vai com norte no topo (flipud na gravacao).
+        li = int((cx["north"] + 27.7255) / (cx["north"] - cx["south"]) * (n - 1))
+        co = int((-50.0669 - cx["west"]) / (cx["east"] - cx["west"]) * (n - 1))
+        if 0 <= li < n and 0 <= co < n:
+            janela = alfa[max(0, li-6):li+7, max(0, co-6):co+7]
+            self.assertLess(janela.max(), 0.25,
+                            "o radio parado pintou uma bola no mapa "
+                            f"(alfa {janela.max():.2f} na posicao dele)")
+        # E o rastro do movel, a -80 dBm (abaixo do requisito -75), tem de
+        # sair quente.
+        med = rgb[pintado].mean(axis=0)
+        self.assertGreater(med[0], med[1],
+                           f"rastro saiu esverdeado (RGB {med})")
+
+    def test_raio_acompanha_o_espacamento(self):
+        # Raio menor que o vao entre amostras => nucleos nao se encontram
+        # e o rastro vira colar de contas.
+        fonte = inspect.getsource(rm.gerar_kml_survey)
+        self.assertIn("espacamento_tipico(amostras_aba)", fonte)
+        i = fonte.index("espacamento_tipico(amostras_aba)")
+        trecho = fonte[i:i+260]
+        self.assertIn("raio", trecho)
+
     def test_rotas_desligadas_por_padrao(self):
         # A linha inventava aresta reta entre pontos distantes.
         _, txt, _ = self._arvore()

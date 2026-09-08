@@ -5934,9 +5934,19 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760):
     py = (gy[1] - gy[0]) * mlat
     rx = max(1, int(raio_m / max(px, 1e-6)))
     ry = max(1, int(raio_m / max(py, 1e-6)))
-    sigma = max(raio_m / 2.0, 1.0)
+    # Sigma mais largo que raio/2: com raio/2 o peso no meio do vão entre
+    # duas amostras cai a ~0,25 e o rastro se parte visualmente mesmo com
+    # os círculos se tocando.
+    sigma = max(raio_m / 1.5, 1.0)
 
     peso = np.zeros((n, n)); soma = np.zeros((n, n))
+    # Alfa sai do núcleo MAIS FORTE que cobre o pixel, não da soma deles.
+    # Com a soma, um equipamento parado — 40 amostras no mesmo ponto —
+    # vira uma bola sólida e ainda puxa a referência de opacidade para
+    # cima, apagando o rastro do veículo que andou. Pelo máximo, a faixa
+    # tem largura uniforme independentemente de quantas amostras caíram
+    # ali, que é o que se espera de um rastro.
+    wmax = np.zeros((n, n))
     # Só a janela de cada amostra é tocada: varrer a grade inteira por
     # ponto seria O(pontos x n²) e um survey de horas não terminaria.
     for la, lo, v in pts:
@@ -5952,16 +5962,18 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760):
         w[d2 > raio_m * raio_m] = 0.0     # corte duro: fora do raio, nada
         peso[i0:i1, j0:j1] += w
         soma[i0:i1, j0:j1] += w * v
+        np.maximum(wmax[i0:i1, j0:j1], w, out=wmax[i0:i1, j0:j1])
 
     vivo = peso > 1e-6
     if not vivo.any():
         return None, None
     valor = np.full((n, n), np.nan)
     valor[vivo] = soma[vivo] / peso[vivo]
-    # Alfa cresce com o acúmulo e satura: o miolo do rastro fica sólido e
-    # a borda esvanece, que é o que dá o aspecto de calor em vez de fita.
-    ref = np.percentile(peso[vivo], 65) or 1.0
-    alfa = np.clip(peso / max(ref, 1e-9), 0.0, 1.0) * 0.88
+    # O miolo do rastro fica sólido e a borda esvanece — aspecto de calor
+    # em vez de fita. A raiz alarga a parte opaca: com o gaussiano cru a
+    # faixa só ficava cheia bem no centro e o rastro parecia um colar de
+    # contas.
+    alfa = np.sqrt(np.clip(wmax, 0.0, 1.0)) * 0.9
     alfa[~vivo] = 0.0
     return valor, alfa
 
@@ -6193,6 +6205,29 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     def _calor_no_kmz(amostras_aba, campo, visivel):
         if not comprimir:
             return ""
+        # SÓ quem andou. O rádio parado dá dezenas de amostras no mesmo
+        # ponto: vira uma bola isolada no mapa, e como BC fixo enxerga o
+        # vizinho de perto, ela sai verde. Eram essas as "bolas espalhadas
+        # e desconectadas" — e boa parte do verde que não batia com a mina.
+        # O que se quer é a rota, então o calor usa quem se deslocou.
+        parados = set(fixos or {})
+        moveis = [a for a in amostras_aba if a.get("radio") not in parados]
+        if not parados:
+            # Sem a lista de fixos (chamada solta, teste), separa pelo
+            # próprio dado: quem não mudou de lugar não é rota.
+            por_r = {}
+            for a in amostras_aba:
+                if a.get("lat") is None: continue
+                por_r.setdefault(a["radio"], []).append(a)
+            andou = set()
+            for r, ps in por_r.items():
+                if len(ps) < 2: continue
+                d = max(_dist_m(ps[0]["lat"], ps[0]["lon"], q["lat"], q["lon"])
+                        for q in ps)
+                if d > 30.0: andou.add(r)
+            if andou:
+                moveis = [a for a in amostras_aba if a.get("radio") in andou]
+        amostras_aba = moveis or amostras_aba
         pts = [(a["lat"], a["lon"]) for a in amostras_aba
                if a.get("lat") is not None and a.get("lon") is not None
                and a.get(campo) is not None]
@@ -6205,8 +6240,21 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         # rapida o rastro fica fino e fiel; com captura espacada ele
         # engrossa o suficiente para nao virar bolinha solta. O teto
         # impede que um survey ralo pinte meia cava.
+        # O raio TEM de passar do espaçamento, senão os núcleos não se
+        # encontram e o rastro vira colar de contas — foi o que apareceu
+        # numa captura de 20 s, com ~200 m entre amostras contra um raio
+        # limitado a 120 m. O teto sobe junto, mas segue existindo: sem
+        # ele, uma captura muito rala pintaria meia cava a partir de
+        # meia dúzia de leituras.
+        # Aqui há um limite físico, não de desenho: com amostras a 200 m
+        # não existe faixa estreita E contínua. Ou saem contas separadas,
+        # ou sai um borrão largo que afirma medição a centenas de metros
+        # da estrada. O raio acompanha o espaçamento para ligar os
+        # núcleos, e o teto impede o borrão de virar "meia cava medida".
+        # Quem quiser rastro fino e contínuo baixa o intervalo da captura
+        # — a 1 s são ~11 m entre amostras e o raio cai para o piso.
         esp = espacamento_tipico(amostras_aba) or 40.0
-        raio = float(max(25.0, min(esp * 1.6, 120.0)))
+        raio = float(max(25.0, min(esp * 0.9, 150.0)))
         las = [p[0] for p in pts]; los = [p[1] for p in pts]
         # Margem = raio, em graus: e exatamente o quanto o nucleo pode
         # transbordar da nuvem de pontos. Menos que isso corta o rastro na
@@ -8554,7 +8602,7 @@ DEFAULTS_SURVEY = {
     # Piso do modo continuo (intervalo pedido = 0): espera minima entre
     # ciclos. Nao e o intervalo — o ciclo costuma demorar mais que isto —,
     # e so o que impede uma selecao pequena de virar rajada no radio.
-    "piso_continuo_s":     "1",
+    "piso_continuo_s":     "0",
     # Falhas seguidas até desistir do rádio pelo resto do survey. Um rádio
     # morto não pode segurar o ciclo dos outros.
     "falhas_para_pular":   "3",
@@ -8712,8 +8760,13 @@ class CapturaGPS:
         # com a frota inteira, o ciclo já se alonga sozinho pelo teto de
         # threads, e o intervalo REAL vai para o relatório.
         self.continuo   = int(intervalo_s) <= 0
-        self.piso_cont  = max(0.2, sv.getfloat("piso_continuo_s", fallback=1.0))
-        self.intervalo  = (self.piso_cont if self.continuo
+        # Piso 0 = sem pausa: o ciclo seguinte sai no instante em que o
+        # anterior termina, e a cadência passa a ser só o tempo de ida e
+        # volta ao rádio. O mínimo de 50 ms não é freio de carga — é
+        # proteção contra laço vazio: se TODOS os rádios falharem na
+        # hora, sem ele o processo giraria a 100% de CPU sem medir nada.
+        self.piso_cont  = max(0.0, sv.getfloat("piso_continuo_s", fallback=0.0))
+        self.intervalo  = (max(self.piso_cont, 0.05) if self.continuo
                            else max(self.min_int, int(intervalo_s)))
         self.max_thr    = max(1, sv.getint("max_threads", fallback=12))
         self.timeout_s  = sv.getint("timeout_s", fallback=6)
@@ -12416,10 +12469,14 @@ def criar_handler(cfg):
                     # que vai acontecer. Dizer isso evita que o numero
                     # assuste sem motivo — e que passe despercebido quando
                     # a selecao e grande de verdade.
-                    aviso = (f"Modo continuo: mede sem espera fixa, piso de "
-                             f"{job.piso_cont:g}s. Com {len(ips)} radios o "
-                             f"teto e {cps:.0f} consultas/s; o intervalo real "
-                             f"aparece no fim e vai para o relatorio.")
+                    aviso = ((f"Modo continuo: mede sem parar, sem espera "
+                              f"entre ciclos." if job.piso_cont <= 0 else
+                              f"Modo continuo: piso de {job.piso_cont:g}s "
+                              f"entre ciclos.")
+                             + f" A cadencia passa a ser o tempo de resposta "
+                               f"dos radios; com {len(ips)} selecionado(s) o "
+                               f"teto e {cps:.0f} consultas/s. O intervalo "
+                               f"REAL aparece no fim e vai para o relatorio.")
                     if len(ips) > 12:
                         aviso += (" Selecao grande para continuo: prefira so "
                                   "os veiculos do trajeto.")

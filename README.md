@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 360 testes
+python3 teste_parser.py                        # 362 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -22,7 +22,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 | arquivo | o que é |
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
-| `teste_parser.py` | 360 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 362 testes; roda sem rádio e sem a lib `rajant_api` |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
 | `bcapi-ref/proto/` | os `.proto` do bcapi, referência de tudo que se afirma sobre a API |
@@ -59,7 +59,7 @@ intervalo_moveis_segundos = 20     # coleta acelerada só dos móveis
 [survey]
 max_threads         = 12           # teto de consultas simultâneas
 min_intervalo_s     = 5            # piso do intervalo pela página
-piso_continuo_s     = 1            # espera mínima no modo contínuo
+piso_continuo_s     = 0            # 0 = contínuo sem pausa alguma
 falhas_para_pular   = 3            # desiste do rádio após N falhas
 usar_cache_fallback = true
 
@@ -86,9 +86,21 @@ maior parte da imagem continue transparente. A diferença entre *"medi aqui
 e deu isto"* e *"acho que lá deve dar aquilo"* é o que separa um laudo de
 um chute.
 
-O raio sai do **espaçamento real das amostras** (1,6×, entre 25 e 120 m):
-captura rápida dá rastro fino e fiel; captura espaçada engrossa o bastante
-para não virar bolinha solta.
+**Só entra quem andou.** Rádio parado dá dezenas de amostras no mesmo ponto:
+virava uma bola isolada no mapa e, como BC fixo enxerga o vizinho de perto,
+saía verde. Eram essas as bolas espalhadas e desconectadas — e boa parte do
+verde que não batia com a realidade da mina.
+
+O raio sai do **espaçamento real das amostras** (0,9×, entre 25 e 150 m).
+Aqui há um limite físico, não de desenho: **com amostras a 200 m não existe
+faixa estreita e contínua**. Ou saem contas separadas, ou sai um borrão
+largo afirmando medição a centenas de metros da estrada. O jeito de ter
+rastro fino *e* contínuo é baixar o intervalo — a 1 s são ~11 m entre
+amostras e o raio cai para o piso.
+
+A opacidade vem do núcleo **mais forte** que cobre o pixel, não da soma
+deles: pela soma, um equipamento parado ficava sólido e ainda puxava a
+referência para cima, apagando o rastro de quem andou.
 
 A linha continua disponível em `kmz_com_rotas = true`, e quando ligada ela
 é **partida nos buracos de medição** — o limiar vem da mediana do próprio
@@ -102,9 +114,10 @@ aresta reta cortando a cava.
 
 ## Captura contínua
 
-Pedindo intervalo **0**, o ciclo seguinte sai assim que o anterior volta,
-com piso de `piso_continuo_s`. É o que aproxima o traçado de uma linha em
-vez de uma sequência de pontos:
+Pedindo intervalo **0**, o ciclo seguinte sai no instante em que o anterior
+termina — sem espera nenhuma, com `piso_continuo_s = 0` (o padrão). A
+cadência passa a ser só o tempo de ida e volta ao rádio. É o que aproxima o
+traçado de uma linha em vez de uma sequência de pontos:
 
 | intervalo | a 40 km/h, distância entre amostras |
 |---|---|
@@ -118,6 +131,10 @@ grande; com a frota inteira o ciclo já se alonga sozinho pelo teto de
 threads — e é por isso que o aviso da página trata "consultas/s" no
 contínuo como **teto**, não como taxa. O intervalo que de fato aconteceu
 vai para `intervalo_efetivo_s` e para o relatório.
+
+O único mínimo que resta são 50 ms, e não é freio de carga: é proteção
+contra laço vazio. Se todos os rádios falharem na hora, sem ele o processo
+giraria a 100% de CPU sem medir nada.
 
 ## Dois relatórios
 
@@ -273,7 +290,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 360 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 362 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de
