@@ -1,0 +1,22 @@
+# Empacotamento de entrega: reproduzível a partir do que está versionado.
+*.zip
+*.bundle
+
+# Saída do programa: criada no diretório ATUAL, ao lado de onde ele roda.
+surveys.db
+config.ini
+rajant_monitor.log
+fundo_cache/
+kmz_extraido/
+*.kmz
+
+# Relatórios gerados.
+Relatorio_Semanal_Rede_*.pptx
+Site_Survey_*.pptx
+*.xlsx
+
+# PyInstaller.
+build/log_build.txt
+dist/
+__pycache__/
+*.pyc
