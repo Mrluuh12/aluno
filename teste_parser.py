@@ -3015,13 +3015,28 @@ class TestKmlSurvey(unittest.TestCase):
         doc = raiz.find(self.NS + "Document")
         nomes = [f.find(self.NS + "name").text
                  for f in doc.findall(self.NS + "Folder")]
-        self.assertTrue(any(n.startswith("BreadCrumbs") for n in nomes))
+        # Equipamento NAO entra por padrão: com uma dezena de BCs a camada
+        # de alfinetes cobre justamente a medição.
+        self.assertFalse(any(n.startswith("BreadCrumbs") for n in nomes), nomes)
         # A grandeza virou ABA; rotas e medições são subpastas dela.
         self.assertIn("RSSI", nomes)
         sub = self._subpastas(raiz, "RSSI")
-        self.assertTrue(any(n.startswith("Rotas") for n in sub), sub)
+        # Rotas saiu do padrão: o rastro agora e o GroundOverlay do calor.
         self.assertTrue(any(n.startswith("Medições") for n in sub), sub)
         self.assertTrue(any(n.startswith("Fora do requisito") for n in sub), sub)
+
+    def test_equipamento_volta_quando_pedido(self):
+        # Quem quer o inventario no mesmo arquivo liga a chave; o padrao e
+        # nao poluir o mapa.
+        self.cfg.set("relatorio", "kmz_com_equipamentos", "true")
+        try:
+            raiz, _, _ = self._arvore()
+        finally:
+            self.cfg.set("relatorio", "kmz_com_equipamentos", "false")
+        doc = raiz.find(self.NS + "Document")
+        nomes = [f.find(self.NS + "name").text
+                 for f in doc.findall(self.NS + "Folder")]
+        self.assertTrue(any(n.startswith("BreadCrumbs") for n in nomes), nomes)
 
     def test_uma_aba_por_grandeza_so_a_primeira_visivel(self):
         # Ligadas juntas, os pontos de seis grandezas se empilham no mesmo
@@ -3129,15 +3144,50 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertIn("Cava", raiz.find(self.NS + "Document")
                       .find(self.NS + "name").text)
 
-    def test_sem_heatmap_no_kmz(self):
-        # A superficie de cobertura foi retirada a pedido: a leitura
-        # voltou a ser a ROTA, com cor por medicao.
+    def test_rota_sai_como_mapa_de_calor(self):
+        # A SUPERFICIE de cobertura continua fora: ela pintava terreno
+        # onde ninguem passou. O que entrou e o RASTRO em calor, com raio
+        # limitado em volta de cada medicao — pedido depois de ver que a
+        # linha ficava fina no satelite e ligava pontos distantes por
+        # retas que ninguem percorreu.
         import zipfile, io as _io
         dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
                                        campo="sinal")
         z = zipfile.ZipFile(_io.BytesIO(dados))
-        self.assertEqual([n for n in z.namelist() if n.endswith(".png")], [])
-        self.assertNotIn("<GroundOverlay>", z.read("doc.kml").decode())
+        pngs = [n for n in z.namelist() if n.endswith(".png")]
+        self.assertTrue(pngs, "KMZ saiu sem o raster do calor")
+        doc = z.read("doc.kml").decode()
+        self.assertIn("<GroundOverlay>", doc)
+        self.assertIn("<LatLonBox>", doc)   # sem georreferencia ele escorrega
+
+    def test_calor_so_onde_passou(self):
+        # O que separa "medi aqui" de "acho que la deve dar": fora do raio
+        # das amostras o raster tem de ser TRANSPARENTE.
+        import zipfile, io as _io, numpy as np
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                       campo="sinal")
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        png = [n for n in z.namelist() if n.endswith(".png")][0]
+        img = mpimg.imread(_io.BytesIO(z.read(png)))
+        alfa = img[..., 3]
+        self.assertGreater((alfa < 0.02).mean(), 0.4,
+                           "o calor cobriu quase tudo: virou cobertura")
+        self.assertGreater(alfa.max(), 0.5, "o rastro saiu apagado")
+
+    def test_rotas_desligadas_por_padrao(self):
+        # A linha inventava aresta reta entre pontos distantes.
+        _, txt, _ = self._arvore()
+        self.assertNotIn("<name>Rotas", txt)
+
+    def test_rota_volta_quando_pedida(self):
+        self.cfg.set("relatorio", "kmz_com_rotas", "true")
+        try:
+            _, txt, _ = self._arvore()
+        finally:
+            self.cfg.set("relatorio", "kmz_com_rotas", "false")
+        self.assertIn("<name>Rotas", txt)
 
     def test_cada_medicao_tem_a_cor_da_escala(self):
         # Cor por AMOSTRA, no gradiente continuo — nao mais oito faixas
@@ -3194,8 +3244,13 @@ class TestKmlSurvey(unittest.TestCase):
 
     def test_rota_tem_contorno_escuro(self):
         # Truque de cartografia: contorno por baixo deixa a linha legivel
-        # tanto sobre satelite claro quanto escuro.
-        _, txt, _ = self._arvore()
+        # tanto sobre satelite claro quanto escuro. So vale com a linha
+        # ligada — no padrao o rastro e o calor.
+        self.cfg.set("relatorio", "kmz_com_rotas", "true")
+        try:
+            _, txt, _ = self._arvore()
+        finally:
+            self.cfg.set("relatorio", "kmz_com_rotas", "false")
         self.assertIn('<Style id="lcontorno">', txt)
         self.assertIn("#lcontorno", txt)
 
@@ -3216,10 +3271,16 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertNotIn("mediana movel", fonte.replace("ó", "o"))
         self.assertIn("cor_continua(v, esc_a)", fonte)
 
-    def test_rota_e_contexto_nao_a_medida(self):
-        # Linha grossa e opaca virava rastro de GPS cobrindo o terreno.
-        _, txt, _ = self._arvore()
-        self.assertIn("<width>3.2</width>", txt)
+    def test_rota_ligada_sai_como_fita_visivel(self):
+        # Quando se pede a linha, ela tem de LER sobre o satelite da cava,
+        # que e claro e cheio de textura: com 2,6 px e alfa baixo parecia
+        # risco de GPS, nao medicao.
+        self.cfg.set("relatorio", "kmz_com_rotas", "true")
+        try:
+            _, txt, _ = self._arvore()
+        finally:
+            self.cfg.set("relatorio", "kmz_com_rotas", "false")
+        self.assertIn("<width>7</width>", txt)
         self.assertIn('id="lcontorno"', txt)
 
     def test_interpolacao_nao_inventa_cobertura(self):

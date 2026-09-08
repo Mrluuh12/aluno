@@ -1862,6 +1862,14 @@ DEFAULTS_RELATORIO = {
     # que estiver digitado no template continuam onde estao.
     # false = deck no visual original do template.
     "identidade_anglo": "true",
+    # false = o KMZ do survey NAO leva marcador de equipamento. Com uma
+    # dezena de BCs a camada de alfinetes cobre a medicao, que e o assunto
+    # do arquivo. true devolve a pasta "BreadCrumbs".
+    "kmz_com_equipamentos": "false",
+    # false = a rota sai como MAPA DE CALOR (nucleo por medicao, so onde o
+    # radio passou). true devolve tambem a linha ligando as amostras — e a
+    # linha inventa aresta reta entre pontos distantes.
+    "kmz_com_rotas": "false",
     # false = o PPT sai com MOLDURAS VAZIAS, cada uma dizendo qual KMZ
     # abrir e qual camada ligar para tirar o print no Google Earth. É o
     # caminho de quem quer o satélite real no slide, que o PNG não tem
@@ -5897,6 +5905,141 @@ def _decimar(amostras, teto):
     return amostras[::passo], passo
 
 
+def _calor_da_rota(am, campo, bb, raio_m, n=760):
+    """Mapa de calor SÓ por onde o rádio passou.
+
+    Não é interpolação de cobertura: cada amostra pinta um núcleo de raio
+    `raio_m` à sua volta e nada além disso. Onde ninguém passou fica
+    transparente — o mapa não afirma sinal em lugar que não foi medido.
+    É a diferença entre "medi aqui e deu isto" e "eu acho que lá deve dar
+    aquilo", e só a primeira cabe num laudo.
+
+    Devolve (valor, alfa), ambos n×n, com NaN e 0 fora do rastro.
+    """
+    import numpy as np, math
+    pts = [(a["lat"], a["lon"], float(a[campo])) for a in am
+           if a.get("lat") is not None and a.get("lon") is not None
+           and a.get(campo) is not None]
+    if len(pts) < 3:
+        return None, None
+
+    lat_med = (bb["norte"] + bb["sul"]) / 2.0
+    mlat = 111320.0
+    mlon = 111320.0 * math.cos(math.radians(lat_med))
+    gx = np.linspace(bb["oeste"], bb["leste"], n)
+    gy = np.linspace(bb["sul"],   bb["norte"], n)
+    if gx[-1] <= gx[0] or gy[-1] <= gy[0]:
+        return None, None
+    px = (gx[1] - gx[0]) * mlon          # metros por pixel em x
+    py = (gy[1] - gy[0]) * mlat
+    rx = max(1, int(raio_m / max(px, 1e-6)))
+    ry = max(1, int(raio_m / max(py, 1e-6)))
+    sigma = max(raio_m / 2.0, 1.0)
+
+    peso = np.zeros((n, n)); soma = np.zeros((n, n))
+    # Só a janela de cada amostra é tocada: varrer a grade inteira por
+    # ponto seria O(pontos x n²) e um survey de horas não terminaria.
+    for la, lo, v in pts:
+        j = int(round((lo - gx[0]) / (gx[-1] - gx[0]) * (n - 1)))
+        i = int(round((la - gy[0]) / (gy[-1] - gy[0]) * (n - 1)))
+        i0, i1 = max(0, i - ry), min(n, i + ry + 1)
+        j0, j1 = max(0, j - rx), min(n, j + rx + 1)
+        if i0 >= i1 or j0 >= j1: continue
+        dy = (np.arange(i0, i1) - i)[:, None] * py
+        dx = (np.arange(j0, j1) - j)[None, :] * px
+        d2 = dx * dx + dy * dy
+        w = np.exp(-d2 / (2.0 * sigma * sigma))
+        w[d2 > raio_m * raio_m] = 0.0     # corte duro: fora do raio, nada
+        peso[i0:i1, j0:j1] += w
+        soma[i0:i1, j0:j1] += w * v
+
+    vivo = peso > 1e-6
+    if not vivo.any():
+        return None, None
+    valor = np.full((n, n), np.nan)
+    valor[vivo] = soma[vivo] / peso[vivo]
+    # Alfa cresce com o acúmulo e satura: o miolo do rastro fica sólido e
+    # a borda esvanece, que é o que dá o aspecto de calor em vez de fita.
+    ref = np.percentile(peso[vivo], 65) or 1.0
+    alfa = np.clip(peso / max(ref, 1e-9), 0.0, 1.0) * 0.88
+    alfa[~vivo] = 0.0
+    return valor, alfa
+
+
+def _png_calor(valor, alfa, cmap, vmin, vmax, caminho):
+    """Raster RGBA com transparência POR PIXEL.
+
+    O `_png_overlay` usa alfa constante, que serve a heatmap de área
+    inteira. Aqui a borda precisa esvanecer, senão o rastro vira uma
+    salsicha de contorno duro.
+    """
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    norm = np.clip((valor - vmin) / max(vmax - vmin, 1e-9), 0, 1)
+    rgba = cmap(np.nan_to_num(norm, nan=0.0))
+    rgba[..., 3] = np.where(np.isfinite(valor), alfa, 0.0)
+    plt.imsave(caminho, np.flipud(rgba))     # KML espera norte no topo
+    return caminho
+
+
+def _cfg_bool(cfg, secao, chave, padrao=False):
+    """Lê um booleano do config tolerando cfg=None e seção ausente.
+
+    O KML é gerado tanto pelo serviço (com config) quanto por teste e por
+    linha de comando (sem), e quebrar por falta de seção seria trocar um
+    detalhe de aparência por um survey perdido.
+    """
+    try:
+        return cfg.getboolean(secao, chave, fallback=padrao)
+    except Exception:
+        return padrao
+
+
+def _trechos_continuos(pts, fator=3.0, piso_s=30.0, salto_m=250.0):
+    """Parte o trajeto onde houve BURACO na medição.
+
+    Ligar dois pontos consecutivos é afirmar que o veículo passou pela
+    reta entre eles. Com a amostragem espaçada isso vira aresta reta
+    cortando a cava: o traçado mente sobre por onde se andou e sobre onde
+    o sinal foi medido. Melhor um trecho interrompido — que mostra que ali
+    não se mediu — do que uma reta inventada.
+
+    O limiar sai do PRÓPRIO survey: a mediana do intervalo entre amostras
+    vezes `fator`. Assim uma captura de 5 s tolera vãos de ~15 s e uma de
+    60 s tolera ~180 s, sem número mágico que só serve para um caso. O
+    `piso_s` evita que uma captura muito rápida quebre o trajeto ao menor
+    engasgo da malha, e `salto_m` pega o caso em que o tempo está normal
+    mas a posição pulou (perda de fix, GPS voltando).
+    """
+    if len(pts) < 2:
+        return [pts] if pts else []
+    dts = []
+    for a, b in zip(pts, pts[1:]):
+        ta, tb = a.get("ts"), b.get("ts")
+        if ta is not None and tb is not None and tb > ta:
+            dts.append(tb - ta)
+    if dts:
+        ordenados = sorted(dts)
+        mediana = ordenados[len(ordenados) // 2]
+        limite_t = max(piso_s, mediana * fator)
+    else:
+        limite_t = piso_s
+
+    trechos, atual = [], [pts[0]]
+    for a, b in zip(pts, pts[1:]):
+        ta, tb = a.get("ts"), b.get("ts")
+        quebra = ta is not None and tb is not None and (tb - ta) > limite_t
+        if not quebra:
+            quebra = _dist_m(a["lat"], a["lon"], b["lat"], b["lon"]) > salto_m
+        if quebra:
+            trechos.append(atual); atual = [b]
+        else:
+            atual.append(b)
+    trechos.append(atual)
+    return [t for t in trechos if len(t) >= 2]
+
+
 def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                      campo="sinal", max_pontos=8000, comprimir=True,
                      grade_zonas=50.0, banda=None, campos=None):
@@ -5960,16 +6103,22 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         # Rota e CONTEXTO, nao a medida. Linha grossa e opaca virava
         # rastro de GPS cobrindo o terreno e competindo com o heatmap,
         # que e onde a informacao esta.
+        # Largura e opacidade de survey de verdade: a fita colorida E o
+        # dado. Com 2,6 px e 170 de alfa a rota sumia sobre o satelite da
+        # cava, que ja e claro e cheio de textura — parecia um risco de
+        # GPS, nao uma medicao.
         estilos.append(
-            f'<Style id="l{cor}"><LineStyle><color>{_kml_cor(cor, 170)}</color>'
-            f'<width>2.6</width></LineStyle></Style>')
+            f'<Style id="l{cor}"><LineStyle><color>{_kml_cor(cor, 235)}</color>'
+            f'<width>7</width></LineStyle></Style>')
     # Contorno da rota: mais grosso, escuro e por baixo.
     # Contorno discreto: com uma dezena de equipamentos passando pela
     # mesma pista, contorno grosso e opaco de um veiculo cobre a COR do
     # outro no cruzamento — vira uma malha escura por cima da medicao.
+    # O contorno acompanha a fita: mais largo que ela, para virar borda, e
+    # discreto no alfa para nao empastar cruzamento de dois veiculos.
     estilos.append(
-        '<Style id="lcontorno"><LineStyle><color>70201510</color>'
-        '<width>4.6</width></LineStyle></Style>')
+        '<Style id="lcontorno"><LineStyle><color>60201510</color>'
+        '<width>10</width></LineStyle></Style>')
     estilos.append(
         '<Style id="pFora"><IconStyle><color>ff0000ff</color><scale>0.55</scale>'
         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png'
@@ -6006,14 +6155,19 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             u = max(pts, key=lambda x: x.get("ts") or 0)
             posicoes[radio] = (u["lat"], u["lon"])
 
+    # As posições continuam sendo calculadas — o traçado depende delas —,
+    # mas por padrão NÃO viram marcador. Com uma dezena de equipamentos a
+    # camada de alfinetes cobre justamente a medição, que é o assunto do
+    # arquivo. Quem quiser o inventário liga kmz_com_equipamentos.
     por_tipo = {}
-    for nome, (la, lo) in sorted(posicoes.items()):
-        cat = classificar(nome)
-        tipo = cat if cat in _ICONES_KML else "Móvel"
-        por_tipo.setdefault(tipo, []).append(
-            _placemark(nome, f"<![CDATA[{len(por_radio_geral.get(nome, []))} "
-                             f"amostras]]>", f"bc{tipo}",
-                       ponto=(la, lo)))
+    if _cfg_bool(cfg, "relatorio", "kmz_com_equipamentos", False):
+        for nome, (la, lo) in sorted(posicoes.items()):
+            cat = classificar(nome)
+            tipo = cat if cat in _ICONES_KML else "Móvel"
+            por_tipo.setdefault(tipo, []).append(
+                _placemark(nome, f"<![CDATA[{len(por_radio_geral.get(nome, []))} "
+                                 f"amostras]]>", f"bc{tipo}",
+                           ponto=(la, lo)))
     if por_tipo:
         sub = "".join(
             f"<Folder><name>{_esc(t)} ({len(v)})</name><open>0</open>"
@@ -6026,13 +6180,82 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     # Todas no mesmo arquivo, só a primeira visível: ligadas juntas, os
     # pontos de seis grandezas se empilham no mesmo lugar e o mapa não diz
     # nada. O operador liga a que quer no painel de camadas.
+    # A rota agora e CALOR. A linha continua disponivel para quem quiser
+    # o traco cru, mas desligada: era ela que produzia as arestas retas
+    # ligando pontos por onde ninguem passou.
+    com_rotas = _cfg_bool(cfg, "relatorio", "kmz_com_rotas", False)
+
+    # PNGs do calor, embutidos no KMZ. Em KML solto nao ha onde guardar a
+    # imagem, e overlay apontando para arquivo ausente nao desenha nada —
+    # entao o calor so sai no KMZ.
+    extras = []
+
+    def _calor_no_kmz(amostras_aba, campo, visivel):
+        if not comprimir:
+            return ""
+        pts = [(a["lat"], a["lon"]) for a in amostras_aba
+               if a.get("lat") is not None and a.get("lon") is not None
+               and a.get(campo) is not None]
+        if len(pts) < 3:
+            return ""
+        esc = ESCALAS.get(campo)
+        if not esc:
+            return ""
+        # Raio a partir do espacamento REAL das amostras: com captura
+        # rapida o rastro fica fino e fiel; com captura espacada ele
+        # engrossa o suficiente para nao virar bolinha solta. O teto
+        # impede que um survey ralo pinte meia cava.
+        esp = espacamento_tipico(amostras_aba) or 40.0
+        raio = float(max(25.0, min(esp * 1.6, 120.0)))
+        las = [p[0] for p in pts]; los = [p[1] for p in pts]
+        # Margem = raio, em graus: e exatamente o quanto o nucleo pode
+        # transbordar da nuvem de pontos. Menos que isso corta o rastro na
+        # borda da imagem.
+        import math as _m
+        dlat = raio / 111320.0
+        dlon = raio / (111320.0 * max(0.2, _m.cos(_m.radians(sum(las)/len(las)))))
+        bb = {"sul": min(las) - dlat, "norte": max(las) + dlat,
+              "oeste": min(los) - dlon, "leste": max(los) + dlon}
+        try:
+            valor, alfa = _calor_da_rota(amostras_aba, campo, bb, raio)
+            if valor is None:
+                return ""
+            nome_png = f"calor_{campo}.png"
+            import tempfile as _tf, os as _os
+            cam = _os.path.join(_tf.mkdtemp(), nome_png)
+            _png_calor(valor, alfa, _cmap_rf(invertido=(esc.get("melhor") == "baixo")),
+                       float(esc["lo"]), float(esc["hi"]), cam)
+            with open(cam, "rb") as fh:
+                extras.append((f"files/{nome_png}", fh.read()))
+        except Exception as e:
+            log.warning(f"[kml] calor de {campo} falhou: {e}")
+            return ""
+        rot = esc.get("rot", campo)
+        return (f"<GroundOverlay><name>Calor — {_esc(rot)}</name>"
+                f"<visibility>{1 if visivel else 0}</visibility>"
+                f"<description>{_esc(f'Medido pelo radio, raio de {raio:.0f} m em volta de cada amostra. Transparente onde nao se passou.')}</description>"
+                f"<Icon><href>files/{nome_png}</href></Icon>"
+                f"<LatLonBox><north>{bb['norte']:.7f}</north>"
+                f"<south>{bb['sul']:.7f}</south>"
+                f"<east>{bb['leste']:.7f}</east>"
+                f"<west>{bb['oeste']:.7f}</west></LatLonBox></GroundOverlay>")
+
     def _aba(campo_a, visivel):
         faixas_a = FAIXAS_KML[campo_a]
         op_a, lim_a, un_a, rot_a = (limite_de(campo_a)
                                     or (">", None, "", campo_a.upper()))
         dentro = []
 
-        # ── rotas ──
+        # ── mapa de calor do rastro ──
+        # A rota vira CALOR: um núcleo por medição, só onde o rádio
+        # passou. Substitui a fita de segmentos porque a linha, além de
+        # fina sobre o satélite da cava, ligava pontos distantes por retas
+        # que ninguém percorreu. O calor não tem aresta para inventar.
+        png = _calor_no_kmz(am, campo_a, visivel)
+        if png:
+            dentro.append(png)
+
+        # ── rotas (opcional) ──
         # UM segmento por medição, com a cor exata daquela amostra na
         # escala contínua. Antes eram oito faixas fixas: duas leituras de
         # -74,9 e -75,1 dBm caíam em cores diferentes e o traçado virava
@@ -6040,31 +6263,42 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         # junto com o sinal.
         esc_a = ESCALAS.get(campo_a)
         blocos = []
-        for radio, pts in sorted(por_radio_geral.items()):
+        for radio, pts in (sorted(por_radio_geral.items()) if com_rotas else []):
             pts = sorted(pts, key=lambda x: x.get("ts") or 0)
             if len(pts) < 2: continue
 
-            # O contorno escuro vai como UMA linha só por trajeto: é
-            # moldura, não precisa de cor por trecho. Desenhado antes,
-            # fica por baixo.
-            trechos = [_placemark(None, None, "lcontorno",
-                                  linha=[(q["lat"], q["lon"]) for q in pts])]
-            for i in range(len(pts) - 1):
-                a_, b_ = pts[i], pts[i + 1]
-                v = a_.get(campo_a)
-                if v is None: v = b_.get(campo_a)
-                cor = cor_continua(v, esc_a) or "9E9E9E"
-                cores_linha.add(cor)
-                rot = (f"{v:.1f} {un_a}" if isinstance(v, (int, float))
-                       else "sem medição")
+            # Trajeto partido nos buracos de medição: o que não foi medido
+            # não vira linha. Sem isto, um vão de vários minutos aparecia
+            # como uma reta atravessando a cava, com cor de uma leitura que
+            # não vale para nada naquele caminho.
+            continuos = _trechos_continuos(pts)
+            if not continuos: continue
+            trechos, n_pts = [], 0
+            for corrida in continuos:
+                n_pts += len(corrida)
+                # O contorno escuro é moldura: uma linha por TRECHO — não
+                # por trajeto —, senão ele mesmo redesenha a reta que a
+                # quebra acabou de tirar. Vai antes, para ficar por baixo.
                 trechos.append(_placemark(
-                    rot, None, f"r{cor}",
-                    linha=((a_["lat"], a_["lon"]), (b_["lat"], b_["lon"]))))
+                    None, None, "lcontorno",
+                    linha=[(q["lat"], q["lon"]) for q in corrida]))
+                for a_, b_ in zip(corrida, corrida[1:]):
+                    v = a_.get(campo_a)
+                    if v is None: v = b_.get(campo_a)
+                    cor = cor_continua(v, esc_a) or "9E9E9E"
+                    cores_linha.add(cor)
+                    rot = (f"{v:.1f} {un_a}" if isinstance(v, (int, float))
+                           else "sem medição")
+                    trechos.append(_placemark(
+                        rot, None, f"r{cor}",
+                        linha=((a_["lat"], a_["lon"]), (b_["lat"], b_["lon"]))))
 
+            corte = (f" · {len(continuos)} trechos" if len(continuos) > 1
+                     else "")
             blocos.append(
-                f"<Folder><name>{_esc(radio)} ({len(pts)} pontos)</name>"
+                f"<Folder><name>{_esc(radio)} ({n_pts} pontos{corte})</name>"
                 f"<open>0</open>{''.join(trechos)}</Folder>")
-        if blocos:
+        if blocos and com_rotas:
             dentro.append(
                 f"<Folder><name>Rotas ({len(blocos)})</name>"
                 f"<open>0</open>{''.join(blocos)}</Folder>")
@@ -6242,6 +6476,8 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         buf = _io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("doc.kml", doc)
+            for nome_i, dados_i in extras:
+                z.writestr(nome_i, dados_i)
         log.info(f"[kml] {base}.kmz: {len(campos)} aba(s), "
                  f"{len(am)} amostras, {len(posicoes)} BCs")
         return buf.getvalue(), f"{base}.kmz"
@@ -8315,6 +8551,10 @@ DEFAULTS_SURVEY = {
     "timeout_s":           "6",
     # Piso do intervalo: impede pedir 1 s com 150 rádios pela página.
     "min_intervalo_s":     "5",
+    # Piso do modo continuo (intervalo pedido = 0): espera minima entre
+    # ciclos. Nao e o intervalo — o ciclo costuma demorar mais que isto —,
+    # e so o que impede uma selecao pequena de virar rajada no radio.
+    "piso_continuo_s":     "1",
     # Falhas seguidas até desistir do rádio pelo resto do survey. Um rádio
     # morto não pode segurar o ciclo dos outros.
     "falhas_para_pular":   "3",
@@ -8461,7 +8701,20 @@ class CapturaGPS:
         self.cfg        = cfg_survey(cfg)
         sv              = self.cfg["survey"]
         self.min_int    = sv.getint("min_intervalo_s", fallback=5)
-        self.intervalo  = max(self.min_int, int(intervalo_s))
+        # Modo contínuo (intervalo 0): o ciclo seguinte sai assim que o
+        # anterior volta, sem espera fixa. É o que aproxima o traçado de
+        # uma linha em vez de uma sequência de pontos — a 40 km/h, medir a
+        # cada 20 s espaça os pontos em 220 m; a cada 1 s, em 11 m.
+        #
+        # O piso existe porque "contínuo" não é grátis: cada amostra é uma
+        # ida e volta ao rádio pela própria malha que se está medindo. Com
+        # poucos veículos selecionados o custo é baixo e o ganho é grande;
+        # com a frota inteira, o ciclo já se alonga sozinho pelo teto de
+        # threads, e o intervalo REAL vai para o relatório.
+        self.continuo   = int(intervalo_s) <= 0
+        self.piso_cont  = max(0.2, sv.getfloat("piso_continuo_s", fallback=1.0))
+        self.intervalo  = (self.piso_cont if self.continuo
+                           else max(self.min_int, int(intervalo_s)))
         self.max_thr    = max(1, sv.getint("max_threads", fallback=12))
         self.timeout_s  = sv.getint("timeout_s", fallback=6)
         self.falhas_max = sv.getint("falhas_para_pular", fallback=3)
@@ -9559,6 +9812,10 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None):
                               f"{r_res['pct_ok']:.1f}%")
                 _cartao_anglo(s, 10.52, 5.05, 2.28, 0.85, "Pior 5%",
                               f"{r_res['p05']:g} {un}")
+            # Escala embaixo, na faixa que sobrou entre os cartões e o pé
+            # do slide: sem ela o mapa é uma fita colorida sem significado
+            # para quem não fez a medição.
+            _escala_anglo(s, 8.05, 6.05, 4.75, campo)
 
     # ── Navegacao: indice + botoes em cada slide ──
     # Feita DEPOIS de tudo: os alvos precisam existir para o link nao
@@ -9753,6 +10010,69 @@ def _cartao_anglo(s, x, y, w, h, rotulo, valor):
     _txt_anglo(s, x + 0.18, y + 0.30, w - 0.36, 0.36, valor, 16, True,
                ANGLO["azul"])
     return cx
+
+
+def _escala_anglo(s, x, y, w, campo, blocos=28):
+    """Barra da escala de cores, com os extremos e o requisito marcados.
+
+    O slide mostrava o mapa colorido e o gráfico de distribuição sem dizer
+    o que cada cor significa: quem abrisse o deck sem ter feito a medição
+    via uma fita vermelha-e-verde e tinha de adivinhar o limiar.
+
+    A cor sai de `cor_continua`, a MESMA função que pinta a rota no KMZ e
+    o traçado do PNG. Redesenhar a escala com um gradiente próprio faria
+    ela divergir do mapa na primeira vez que a paleta mudasse — e uma
+    legenda que discorda do mapa é pior que legenda nenhuma.
+    """
+    from pptx.util import Inches, Pt
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.text import PP_ALIGN
+
+    esc = ESCALAS.get(campo)
+    if not esc:
+        return None
+    lo, hi = float(esc["lo"]), float(esc["hi"])
+    un, req = esc.get("un", ""), esc.get("req")
+    maior_melhor = esc.get("melhor") == "alto"
+
+    _txt_anglo(s, x, y, w, 0.24,
+               f"Escala — {esc.get('rot', campo)} ({un})", 9.5, True,
+               ANGLO["suave"])
+
+    yb, hb = y + 0.24, 0.26
+    lb = w / blocos
+    for i in range(blocos):
+        v = lo + (hi - lo) * (i + 0.5) / blocos
+        cor = cor_continua(v, esc)
+        if not cor: continue
+        r = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x + i * lb),
+                               Inches(yb), Inches(lb + 0.004), Inches(hb))
+        r.fill.solid(); r.fill.fore_color.rgb = _rgb(cor)
+        r.line.fill.background(); r.shadow.inherit = False
+
+    # Extremos: "pior" e "melhor" ficam do lado certo conforme a grandeza,
+    # senão a legenda inverte o sentido em ruído, perda, RTT e interf.
+    _txt_anglo(s, x, yb + hb + 0.02, w / 2, 0.22,
+               f"{lo:g}", 8.5, False, ANGLO["suave"])
+    cx = _txt_anglo(s, x + w / 2, yb + hb + 0.02, w / 2, 0.22,
+                    f"{hi:g}", 8.5, False, ANGLO["suave"])
+    cx.text_frame.paragraphs[0].alignment = PP_ALIGN.RIGHT
+
+    if req is not None and lo != hi:
+        f = (float(req) - lo) / (hi - lo)
+        if 0.0 <= f <= 1.0:
+            # Marca no ponto exato do requisito, não no meio do bloco: é
+            # a linha que separa aprovado de reprovado.
+            mk = s.shapes.add_shape(MSO_SHAPE.RECTANGLE,
+                                    Inches(x + f * w - 0.008), Inches(yb - 0.05),
+                                    Inches(0.016), Inches(hb + 0.10))
+            mk.fill.solid(); mk.fill.fore_color.rgb = _rgb(ANGLO["texto"])
+            mk.line.fill.background(); mk.shadow.inherit = False
+            op = "≥" if maior_melhor else "≤"
+            _txt_anglo(s, x, yb + hb + 0.24, w, 0.22,
+                       f"requisito {op} {float(req):g} {un}", 8.5, True,
+                       ANGLO["azul"])
+    return yb + hb + 0.46
 
 
 def _moldura_anglo(s, x, y, w, h, arquivo, detalhe):
@@ -12090,7 +12410,20 @@ def criar_handler(cfg):
                 # continua rodando.
                 aviso = ""
                 cps = len(ips) / float(job.intervalo)
-                if cps > 10:
+                if job.continuo:
+                    # No continuo o ciclo se alonga sozinho pelo teto de
+                    # threads, entao "consultas/s" e um TETO, nao a taxa
+                    # que vai acontecer. Dizer isso evita que o numero
+                    # assuste sem motivo — e que passe despercebido quando
+                    # a selecao e grande de verdade.
+                    aviso = (f"Modo continuo: mede sem espera fixa, piso de "
+                             f"{job.piso_cont:g}s. Com {len(ips)} radios o "
+                             f"teto e {cps:.0f} consultas/s; o intervalo real "
+                             f"aparece no fim e vai para o relatorio.")
+                    if len(ips) > 12:
+                        aviso += (" Selecao grande para continuo: prefira so "
+                                  "os veiculos do trajeto.")
+                elif cps > 10:
                     aviso = (f"Carga alta na malha: {cps:.1f} consultas/s "
                              f"({len(ips)} radios a cada {job.intervalo}s). "
                              f"Aumente o intervalo ou reduza a selecao.")
