@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 100 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 362, em 53 classes |
+| testes | 370, em 54 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 362 testes e as âncoras de seção (§26).
+segura isso são os 370 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -532,6 +532,23 @@ O único mínimo é de 50 ms, e **não é freio de carga**: é proteção contra
 laço vazio. Se todos os rádios falharem instantaneamente, sem ele o
 processo giraria a 100% de CPU sem medir nada.
 
+### O ping tem cadência própria
+
+Posição e RF vêm do `get_state`, que é rápido. Latência e perda vêm do
+ICMP — e o **ping do Windows não aceita intervalo**: `ping -n 4` espera
+~1 s entre envios e custa ~3 s por rádio. Preso ao ciclo, impunha esse
+piso também à posição, que é o que desenha o rastro. Medido com rádio
+simulado: **3,15 s/ciclo → 0,30 s/ciclo**, ou 35 m → 3 m entre amostras a
+40 km/h.
+
+Nos ciclos sem ping, `rtt` e `perda` saem `None` — invariante 1 (§23).
+Repetir a última leitura numa posição nova inventaria medição.
+
+> **A armadilha que isso revelou:** o modo contínuo existia no backend e o
+> campo da página tinha `min="5"`. Dava para configurar e **não dava para
+> usar** — e nada no código acusava. Hoje o campo aceita 0 e há teste que
+> falha se o `min` voltar.
+
 O aviso da página trata "consultas/s" no contínuo como **teto**, não como
 taxa — o ciclo se alonga sozinho pelo teto de threads.
 
@@ -938,7 +955,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 | `imagens_no_ppt` | `false` = molduras vazias para colar print |
 | `zonas_grade_m` | lado da célula na agregação |
 
-### `[survey]` — 6 chaves
+### `[survey]` — 7 chaves
 
 | chave | padrão | o que faz |
 |---|---|---|
@@ -946,6 +963,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 | `timeout_s` | 6 | timeout por rádio |
 | `min_intervalo_s` | 5 | piso do intervalo pedido pela página |
 | `piso_continuo_s` | 0 | espera mínima no contínuo (0 = sem pausa) |
+| `ping_a_cada_s` | 15 | cadência do ping, independente do ciclo |
 | `falhas_para_pular` | 3 | desiste do rádio após N falhas |
 | `usar_cache_fallback` | true | amostra do exportador quando a direta falha |
 
@@ -1003,7 +1021,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 
 ## 21. Testes
 
-`teste_parser.py`: **362 testes em 53 classes**, rodando **sem rádio e sem a
+`teste_parser.py`: **370 testes em 53 classes**, rodando **sem rádio e sem a
 `rajant_api`** (há um stub no topo). Roda em qualquer máquina, inclusive CI
 sem acesso à malha.
 
@@ -1146,7 +1164,8 @@ Não são bugs, e vão continuar assim até alguém decidir o contrário:
 | rota toda branca no Google Earth | ordem dos elementos no KML | `_placemark` (§13) |
 | KMZ vazio / XML quebrado | `<` não escapado | `_esc` (§13) |
 | mapa "todo verde" | rádio parado no calor, ou `sinal` = melhor enlace | §12 e §24 |
-| bolas desconectadas | espaçamento maior que o raio | baixe o intervalo (§12) |
+| bolas desconectadas | espaçamento maior que o raio | intervalo 0 na página (§10) |
+| contínuo ainda espaçado | ping preso ao ciclo | `ping_a_cada_s` (§10) |
 | PPT sem os slides de survey | é o padrão | `survey_no_semanal = true` (§15) |
 | deck sem logo | falta a pasta `marca/` | §16 |
 | PNG sem satélite | provedor bloqueado | `--testar-fundo` (§24) |

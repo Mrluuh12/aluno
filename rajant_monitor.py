@@ -8603,6 +8603,11 @@ DEFAULTS_SURVEY = {
     # ciclos. Nao e o intervalo — o ciclo costuma demorar mais que isto —,
     # e so o que impede uma selecao pequena de virar rajada no radio.
     "piso_continuo_s":     "0",
+    # Cadencia do ping, independente do ciclo. O ping do Windows custa ~3 s
+    # (`ping -n 4` espera ~1 s entre envios e nao aceita intervalo); preso
+    # ao ciclo, ele impunha esse piso tambem a posicao, que e o que desenha
+    # o rastro. 0 = pinga em todo ciclo.
+    "ping_a_cada_s":       "15",
     # Falhas seguidas até desistir do rádio pelo resto do survey. Um rádio
     # morto não pode segurar o ciclo dos outros.
     "falhas_para_pular":   "3",
@@ -8781,6 +8786,12 @@ class CapturaGPS:
         self.alcance_m  = alcance_m
         self.com_ping   = com_ping
         self.ping_n     = max(1, int(ping_n))
+        # Cadencia propria do ping, em segundos. 0 = todo ciclo.
+        self.ping_a_cada = max(0.0, sv.getfloat("ping_a_cada_s", fallback=15.0))
+        self._ultimo_ping = {}
+        # Instrumentacao do ciclo: sem ela, "esta lento" nao tem resposta.
+        self._t_ping = 0.0        # segundos gastos em ping no ciclo
+        self.perfil  = {}         # ultimo ciclo: total, ping, consulta
         self.banco_path = banco_path or BANCO_SURVEY
         self.inicio     = time.time()
         self.fim_previsto = self.inicio + self.minutos*60
@@ -8850,6 +8861,18 @@ class CapturaGPS:
         d = getattr(est, "ultima_dados", None)
         return (d, "cache") if d else (None, None)
 
+    def _toca_pingar(self, ip):
+        """True quando ja passou `ping_a_cada_s` desde o ultimo ping deste
+        radio. Com 0, pinga em todo ciclo (comportamento antigo)."""
+        if self.ping_a_cada <= 0:
+            return True
+        agora = time.time()
+        ultimo = self._ultimo_ping.get(ip, 0.0)
+        if agora - ultimo >= self.ping_a_cada:
+            self._ultimo_ping[ip] = agora
+            return True
+        return False
+
     def _amostra(self, ip, com_ping=True):
         """Uma amostra completa do equipamento.
 
@@ -8897,9 +8920,25 @@ class CapturaGPS:
                for r in radios if r.get("rx_mbps") is not None]
         vazao = round(sum(vaz), 3) if vaz else None
 
+        # O PING NAO ENTRA EM TODO CICLO — e ele que segurava o rastro.
+        #
+        # A posicao e o RF (RSSI, SNR, ruido, interferencia) vem do
+        # get_state, que e rapido. rtt e perda vem do ICMP, e o ping do
+        # Windows NAO tem opcao de intervalo: `ping -n 4` espera ~1 s
+        # entre os envios e custa ~3 s por radio. Amarrado ao ciclo, ele
+        # impunha um piso de ~3 s a TUDO, inclusive a posicao — que e o
+        # que desenha o rastro. Era por isso que o modo continuo continuava
+        # espacando as amostras.
+        #
+        # Agora o ping tem cadencia propria. Nos ciclos sem ping, rtt e
+        # perda saem None: nao medido e None, nunca o valor anterior
+        # repetido — carregar a ultima leitura para a posicao nova
+        # inventaria medicao onde nao houve.
         rtt = perda = None
-        if com_ping:
+        if com_ping and self._toca_pingar(ip):
+            _t0 = time.time()
             rtt, perda = ping_qualidade(ip, n=self.ping_n)
+            self._t_ping += time.time() - _t0
 
         return {
             "nome": s.get("nome") or ip,
@@ -8957,6 +8996,16 @@ class CapturaGPS:
                 # é ele que vai para o relatório.
                 if ciclo_ant is not None:
                     self.efetivo_s = round(ciclo - ciclo_ant, 1)
+                    # Onde o ciclo gastou o tempo. "Esta espacado" sem isto
+                    # e chute; com isto a pagina diz se foi o ping, a
+                    # consulta ou um radio em timeout.
+                    self.perfil = {
+                        "ciclo_s": self.efetivo_s,
+                        "ping_s": round(self._t_ping, 1),
+                        "consulta_s": round(max(0.0, self.efetivo_s
+                                                - self._t_ping), 1),
+                    }
+                self._t_ping = 0.0
                 ciclo_ant = ciclo
                 res = list(ex.map(
                     lambda ip: self._seguro(ip, self.com_ping), self.ips))
@@ -9079,6 +9128,7 @@ class CapturaGPS:
                 # que vale — a página mostra os dois lado a lado.
                 "intervalo_s": self.intervalo,
                 "intervalo_efetivo_s": self.efetivo_s,
+                "perfil": self.perfil,
                 "radios_ativos": vivos,
                 "radios_descartados": len(self.sessoes) - vivos,
                 "amostras_direto": self.n_direto,
@@ -11287,8 +11337,8 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <div class="linha" style="margin-top:10px">
         <div><label class="fraco">Minutos</label>
           <input type="number" id="minutos" value="60" min="1" max="1440"></div>
-        <div><label class="fraco">Intervalo (s)</label>
-          <input type="number" id="intervalo" value="15" min="5" max="300"></div>
+        <div><label class="fraco">Intervalo (s) &middot; <b>0 = contínuo</b></label>
+          <input type="number" id="intervalo" value="0" min="0" max="300"></div>
         <div><label class="fraco">Alcance ERM/ERB (m)</label>
           <input type="number" id="alcance" value="1000" min="200" max="4000" step="100"></div>
       </div>
@@ -11697,7 +11747,20 @@ function validarIntervalo() {
   const el = $('#avisoIntervalo');
   const v = parseInt($('#intervalo').value || '0', 10);
   const n = SEL.size;
-  if (!v || !n) { el.style.display = 'none'; return; }
+  if (!n) { el.style.display = 'none'; return; }
+  if (!v) {
+    // Continuo: nao ha "a cada X s" para dividir, e a taxa passa a ser o
+    // tempo de resposta do radio. Dizer isso evita tanto o susto do
+    // numero quanto a impressao de que da para pedir a frota inteira.
+    el.classList.toggle('atencao', n > 12);
+    el.textContent = 'Contínuo: mede sem pausa entre ciclos — é o que dá '
+                   + 'rastro sem espaçamento. Com ' + n + ' rádio(s), a '
+                   + 'cadência passa a ser o tempo de resposta deles.'
+                   + (n > 12 ? ' Seleção grande para contínuo: prefira só '
+                             + 'os veículos do trajeto.' : '');
+    el.style.display = 'block';
+    return;
+  }
   const cps = n / v;
   el.classList.toggle('atencao', cps > 10);
   el.textContent = n + ' rádios a cada ' + v + 's ≈ ' + cps.toFixed(1)
@@ -11705,6 +11768,7 @@ function validarIntervalo() {
                  + (cps > 10 ? ' Carga alta na malha. Aumente o intervalo'
                              + ' ou reduza a seleção.' : '');
   el.style.display = 'block';
+  return;
 }
 
 async function iniciar() {

@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 362 testes
+python3 teste_parser.py                        # 370 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -22,7 +22,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 | arquivo | o que é |
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
-| `teste_parser.py` | 362 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 370 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -61,6 +61,7 @@ intervalo_moveis_segundos = 20     # coleta acelerada só dos móveis
 max_threads         = 12           # teto de consultas simultâneas
 min_intervalo_s     = 5            # piso do intervalo pela página
 piso_continuo_s     = 0            # 0 = contínuo sem pausa alguma
+ping_a_cada_s       = 15           # ping tem cadência própria, não a do ciclo
 falhas_para_pular   = 3            # desiste do rádio após N falhas
 usar_cache_fallback = true
 
@@ -136,6 +137,28 @@ vai para `intervalo_efetivo_s` e para o relatório.
 O único mínimo que resta são 50 ms, e não é freio de carga: é proteção
 contra laço vazio. Se todos os rádios falharem na hora, sem ele o processo
 giraria a 100% de CPU sem medir nada.
+
+### O ping tinha de sair do caminho
+
+Posição e RF (RSSI, SNR, ruído, interferência) vêm do `get_state`, que é
+rápido. Latência e perda vêm do ICMP — e o **ping do Windows não aceita
+intervalo**: `ping -n 4` espera ~1 s entre os envios e custa ~3 s por
+rádio. Preso ao ciclo, ele impunha esse piso também à posição, que é o que
+desenha o rastro.
+
+Medido com rádio simulado, 20 ciclos:
+
+| | por ciclo | a 40 km/h |
+|---|---|---|
+| ping em todo ciclo | 3,15 s | ~35 m entre amostras |
+| `ping_a_cada_s = 15` | 0,30 s | ~3 m entre amostras |
+
+Nos ciclos sem ping, `rtt` e `perda` saem **`None`** — não medido é `None`,
+nunca a leitura anterior repetida. Carregar o último valor para a posição
+nova inventaria medição onde não houve.
+
+O status da captura publica `perfil` com `ciclo_s`, `ping_s` e
+`consulta_s`: "está espaçado" sem número é chute.
 
 ## Dois relatórios
 
@@ -291,7 +314,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 362 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 370 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

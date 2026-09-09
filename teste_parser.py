@@ -3812,6 +3812,82 @@ def _deck_de_secoes(titulos_e_subtitulos):
     return p
 
 
+class TestLeituraContinua(unittest.TestCase):
+    """O contorno de tudo que fazia a leitura sair espacada."""
+
+    def _cap(self, intervalo, **kw):
+        cfg = rm.configparser.ConfigParser(); cfg.add_section("survey")
+        for k, v in kw.items(): cfg.set("survey", k, str(v))
+        return rm.CapturaGPS("t", ["10.0.0.1"], minutos=1,
+                             intervalo_s=intervalo, coletor_ref=None, cfg=cfg)
+
+    def test_intervalo_zero_e_continuo_sem_pausa(self):
+        c = self._cap(0)
+        self.assertTrue(c.continuo)
+        self.assertEqual(c.piso_cont, 0.0)
+        # Sobram so os 50 ms de guarda contra laco vazio.
+        self.assertLessEqual(c.intervalo, 0.05)
+
+    def test_intervalo_normal_respeita_o_piso(self):
+        c = self._cap(20)
+        self.assertFalse(c.continuo)
+        self.assertEqual(c.intervalo, 20)
+
+    def test_a_pagina_deixa_pedir_continuo(self):
+        # O backend tinha o modo continuo e o campo da pagina era min="5":
+        # dava para configurar e NAO dava para usar. O rastro continuava
+        # espacado e nada no codigo acusava.
+        i = rm.PAGINA_HTML.index('id="intervalo"') if hasattr(rm, "PAGINA_HTML") else -1
+        fonte = rm.criar_handler.__doc__ or ""
+        alvo = None
+        for nome in dir(rm):
+            v = getattr(rm, nome)
+            if isinstance(v, str) and 'id="intervalo"' in v:
+                alvo = v; break
+        if alvo is None:
+            alvo = inspect.getsource(rm)
+        m = re.search(r'id="intervalo"[^>]*min="(\d+)"', alvo)
+        self.assertIsNotNone(m, "campo de intervalo nao encontrado")
+        self.assertEqual(m.group(1), "0",
+                         "a pagina nao deixa pedir intervalo 0 (continuo)")
+
+    def test_ping_nao_segura_o_ciclo(self):
+        # O ping do Windows custa ~3 s (`ping -n 4` espera ~1 s entre
+        # envios e nao aceita intervalo). Preso ao ciclo, impunha esse
+        # piso tambem a POSICAO, que e o que desenha o rastro.
+        c = self._cap(0, ping_a_cada_s=15)
+        self.assertTrue(c._toca_pingar("10.0.0.1"), "o primeiro ping tem de sair")
+        self.assertFalse(c._toca_pingar("10.0.0.1"),
+                         "pingou duas vezes seguidas: voltou a segurar o ciclo")
+
+    def test_ping_a_cada_zero_volta_ao_comportamento_antigo(self):
+        c = self._cap(0, ping_a_cada_s=0)
+        self.assertTrue(c._toca_pingar("10.0.0.1"))
+        self.assertTrue(c._toca_pingar("10.0.0.1"))
+
+    def test_ping_e_por_radio(self):
+        # A cadencia e por radio: um nao pode consumir a vez do outro.
+        c = self._cap(0, ping_a_cada_s=15)
+        self.assertTrue(c._toca_pingar("10.0.0.1"))
+        self.assertTrue(c._toca_pingar("10.0.0.2"))
+
+    def test_ciclo_sem_ping_nao_repete_a_leitura_anterior(self):
+        # rtt/perda sem ping tem de sair None. Repetir a ultima leitura
+        # numa posicao nova inventaria medicao onde nao houve.
+        fonte = inspect.getsource(rm.CapturaGPS._amostra)
+        i = fonte.index("rtt = perda = None")
+        j = fonte.index("return {", i)
+        self.assertNotIn("self._ultimo_rtt", fonte[i:j])
+        self.assertIn("_toca_pingar", fonte[i:j])
+
+    def test_perfil_do_ciclo_e_publicado(self):
+        # "Esta espacado" sem numero e chute.
+        fonte = inspect.getsource(rm.CapturaGPS)
+        self.assertIn('"ping_s"', fonte)
+        self.assertIn('"consulta_s"', fonte)
+        self.assertIn('"perfil": self.perfil', fonte)
+
+
 class TestTituloDoSlide(unittest.TestCase):
     def test_botao_de_menu_nao_vira_titulo(self):
         # O ◂ MENU fica em 0,28" e o título em 0,32": pegar "o texto mais
