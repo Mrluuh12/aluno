@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 370 testes
+python3 teste_parser.py                        # 375 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -22,7 +22,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 | arquivo | o que é |
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
-| `teste_parser.py` | 370 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 375 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -62,6 +62,7 @@ max_threads         = 12           # teto de consultas simultâneas
 min_intervalo_s     = 5            # piso do intervalo pela página
 piso_continuo_s     = 0            # 0 = contínuo sem pausa alguma
 ping_a_cada_s       = 15           # ping tem cadência própria, não a do ciclo
+ping_max_por_ciclo  =              # vazio = teto de threads
 falhas_para_pular   = 3            # desiste do rádio após N falhas
 usar_cache_fallback = true
 
@@ -159,6 +160,25 @@ nova inventaria medição onde não houve.
 
 O status da captura publica `perfil` com `ciclo_s`, `ping_s` e
 `consulta_s`: "está espaçado" sem número é chute.
+
+**E a cadência por rádio não bastou.** Medido em campo com **159 rádios**:
+o ciclo deu **46,3 s**. Como 46 s é maior que `ping_a_cada_s`, todo rádio
+vivia vencido — o ping voltava a ser de todos, todo ciclo, e sozinho
+respondia por ~90% do tempo (159 × 3 s ÷ 12 threads ≈ 40 s).
+
+Por isso há um **orçamento**: no máximo `ping_max_por_ciclo` rádios por
+ciclo, os mais atrasados primeiro. O custo do ping deixa de crescer com a
+frota e passa a ser ~uma leva de threads:
+
+| 159 rádios | ciclo | a 40 km/h |
+|---|---|---|
+| sem orçamento | ~44 s | ~485 m entre amostras |
+| com orçamento | ~7 s | ~77 m |
+| **só os 8 do trajeto** | **~3 s** | **~36 m** |
+
+A última linha é a que importa: **selecione só os veículos do trajeto**.
+Contínuo com a frota inteira é a ferramenta errada — o ciclo se alonga
+sozinho pelo teto de threads, por mais que o ping saia do caminho.
 
 ## Dois relatórios
 
@@ -314,7 +334,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 370 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 375 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

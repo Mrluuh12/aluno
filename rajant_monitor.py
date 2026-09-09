@@ -8608,6 +8608,11 @@ DEFAULTS_SURVEY = {
     # ao ciclo, ele impunha esse piso tambem a posicao, que e o que desenha
     # o rastro. 0 = pinga em todo ciclo.
     "ping_a_cada_s":       "15",
+    # Teto de pings por ciclo. Sem ele, com a frota inteira selecionada o
+    # ciclo fica maior que ping_a_cada_s, TODO radio vive vencido e o ping
+    # volta a ser de todos — foi o que fez o ciclo dar 46 s com 159 radios.
+    # Vazio = usa o teto de threads.
+    "ping_max_por_ciclo":  "",
     # Falhas seguidas até desistir do rádio pelo resto do survey. Um rádio
     # morto não pode segurar o ciclo dos outros.
     "falhas_para_pular":   "3",
@@ -8789,6 +8794,18 @@ class CapturaGPS:
         # Cadencia propria do ping, em segundos. 0 = todo ciclo.
         self.ping_a_cada = max(0.0, sv.getfloat("ping_a_cada_s", fallback=15.0))
         self._ultimo_ping = {}
+        self._pingar_agora = set()
+        # Teto de pings por ciclo. Com o padrao amarrado ao teto de
+        # threads, o ping custa ~uma leva, nao a frota inteira.
+        # Vazio no config = "usa o teto de threads". getint estoura com
+        # string vazia, entao le como texto e so converte se houver valor.
+        _pm = (sv.get("ping_max_por_ciclo", fallback="") or "").strip()
+        try:
+            self.ping_max = max(1, int(_pm)) if _pm else self.max_thr
+        except ValueError:
+            log.warning(f"[survey] ping_max_por_ciclo invalido ({_pm!r}); "
+                        f"usando o teto de threads ({self.max_thr})")
+            self.ping_max = self.max_thr
         # Instrumentacao do ciclo: sem ela, "esta lento" nao tem resposta.
         self._t_ping = 0.0        # segundos gastos em ping no ciclo
         self.perfil  = {}         # ultimo ciclo: total, ping, consulta
@@ -8861,17 +8878,35 @@ class CapturaGPS:
         d = getattr(est, "ultima_dados", None)
         return (d, "cache") if d else (None, None)
 
-    def _toca_pingar(self, ip):
-        """True quando ja passou `ping_a_cada_s` desde o ultimo ping deste
-        radio. Com 0, pinga em todo ciclo (comportamento antigo)."""
+    def _eleger_pings(self):
+        """Escolhe QUAIS radios pingam neste ciclo.
+
+        A cadencia por radio nao basta sozinha. Medido em campo com 159
+        radios: o ciclo levava 46 s, e como 46 s > ping_a_cada_s, TODO
+        radio estava sempre vencido — o ping voltava a ser de todos, todo
+        ciclo, e sozinho respondia por ~90% do tempo (159 x 3 s / 12
+        threads = 40 s).
+
+        Entao ha um ORCAMENTO: no maximo `ping_max` radios por ciclo, os
+        mais atrasados primeiro. O custo do ping deixa de crescer com o
+        tamanho da frota e passa a ser ~uma leva de threads, enquanto a
+        posicao — que e o que desenha o rastro — segue no ritmo do
+        get_state. Cada radio e pingado a cada (N / ping_max) ciclos.
+        """
         if self.ping_a_cada <= 0:
-            return True
+            self._pingar_agora = set(self.ips)      # comportamento antigo
+            return
         agora = time.time()
-        ultimo = self._ultimo_ping.get(ip, 0.0)
-        if agora - ultimo >= self.ping_a_cada:
+        vencidos = [ip for ip in self.ips
+                    if agora - self._ultimo_ping.get(ip, 0.0) >= self.ping_a_cada]
+        vencidos.sort(key=lambda ip: self._ultimo_ping.get(ip, 0.0))
+        self._pingar_agora = set(vencidos[:max(1, self.ping_max)])
+        for ip in self._pingar_agora:
             self._ultimo_ping[ip] = agora
-            return True
-        return False
+
+    def _toca_pingar(self, ip):
+        """Este radio pinga neste ciclo? Quem decide e `_eleger_pings`."""
+        return ip in self._pingar_agora
 
     def _amostra(self, ip, com_ping=True):
         """Uma amostra completa do equipamento.
@@ -9007,6 +9042,7 @@ class CapturaGPS:
                     }
                 self._t_ping = 0.0
                 ciclo_ant = ciclo
+                self._eleger_pings()
                 res = list(ex.map(
                     lambda ip: self._seguro(ip, self.com_ping), self.ips))
                 linhas = []

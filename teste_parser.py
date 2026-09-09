@@ -3856,18 +3856,23 @@ class TestLeituraContinua(unittest.TestCase):
         # envios e nao aceita intervalo). Preso ao ciclo, impunha esse
         # piso tambem a POSICAO, que e o que desenha o rastro.
         c = self._cap(0, ping_a_cada_s=15)
+        c._eleger_pings()
         self.assertTrue(c._toca_pingar("10.0.0.1"), "o primeiro ping tem de sair")
+        c._eleger_pings()          # ciclo seguinte, logo em seguida
         self.assertFalse(c._toca_pingar("10.0.0.1"),
-                         "pingou duas vezes seguidas: voltou a segurar o ciclo")
+                         "pingou dois ciclos seguidos: voltou a segurar o ciclo")
 
     def test_ping_a_cada_zero_volta_ao_comportamento_antigo(self):
         c = self._cap(0, ping_a_cada_s=0)
-        self.assertTrue(c._toca_pingar("10.0.0.1"))
-        self.assertTrue(c._toca_pingar("10.0.0.1"))
+        for _ in range(2):
+            c._eleger_pings()
+            self.assertTrue(c._toca_pingar("10.0.0.1"))
 
     def test_ping_e_por_radio(self):
         # A cadencia e por radio: um nao pode consumir a vez do outro.
         c = self._cap(0, ping_a_cada_s=15)
+        c.ips = ["10.0.0.1", "10.0.0.2"]
+        c._eleger_pings()
         self.assertTrue(c._toca_pingar("10.0.0.1"))
         self.assertTrue(c._toca_pingar("10.0.0.2"))
 
@@ -3879,6 +3884,50 @@ class TestLeituraContinua(unittest.TestCase):
         j = fonte.index("return {", i)
         self.assertNotIn("self._ultimo_rtt", fonte[i:j])
         self.assertIn("_toca_pingar", fonte[i:j])
+
+    def test_ping_tem_orcamento_por_ciclo(self):
+        # A cadencia por radio nao basta: medido em campo com 159 radios o
+        # ciclo dava 46 s, e como 46 s > ping_a_cada_s TODO radio vivia
+        # vencido — o ping voltava a ser de todos, todo ciclo.
+        c = self._cap(0, ping_a_cada_s=15)
+        c.ips = [f"10.0.0.{i}" for i in range(1, 160)]
+        c._eleger_pings()
+        self.assertLessEqual(len(c._pingar_agora), c.ping_max)
+        self.assertGreater(len(c._pingar_agora), 0)
+
+    def test_orcamento_roda_por_toda_a_frota(self):
+        # Teto sem rodizio deixaria os mesmos radios sempre sem ping.
+        c = self._cap(0, ping_a_cada_s=0.0001)
+        c.ips = [f"10.0.0.{i}" for i in range(1, 60)]
+        vistos = set()
+        for _ in range(10):
+            c._eleger_pings(); vistos |= c._pingar_agora
+        self.assertEqual(len(vistos), len(c.ips),
+                         "o rodizio nao cobriu a frota")
+
+    def test_orcamento_escolhe_os_mais_atrasados(self):
+        # Quando TODOS estao vencidos — o caso de campo, com o ciclo maior
+        # que ping_a_cada_s — o teto sozinho pegaria sempre os mesmos
+        # primeiros da lista e os do fim nunca seriam pingados. Quem
+        # garante a vez de cada um e a ordenacao por atraso.
+        c = self._cap(0, ping_a_cada_s=1)
+        c.ips = [f"10.0.0.{i}" for i in range(1, 31)]
+        agora = time.time()
+        # os 5 ultimos da lista sao os mais atrasados
+        for i, ip in enumerate(c.ips):
+            c._ultimo_ping[ip] = agora - 100 - (i * 10)
+        c.ping_max = 5
+        c._eleger_pings()
+        self.assertEqual(c._pingar_agora, set(c.ips[-5:]),
+                         "nao escolheu os mais atrasados")
+
+    def test_orcamento_padrao_segue_o_teto_de_threads(self):
+        c = self._cap(0)
+        self.assertEqual(c.ping_max, c.max_thr)
+
+    def test_orcamento_invalido_no_config_nao_derruba(self):
+        c = self._cap(0, ping_max_por_ciclo="abc")
+        self.assertEqual(c.ping_max, c.max_thr)
 
     def test_perfil_do_ciclo_e_publicado(self):
         # "Esta espacado" sem numero e chute.

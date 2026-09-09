@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 100 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 370, em 54 classes |
+| testes | 375, em 54 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 370 testes e as âncoras de seção (§26).
+segura isso são os 375 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -549,6 +549,17 @@ Repetir a última leitura numa posição nova inventaria medição.
 > usar** — e nada no código acusava. Hoje o campo aceita 0 e há teste que
 > falha se o `min` voltar.
 
+E a cadência por rádio ainda não bastou. Em campo, com **159 rádios**, o
+ciclo deu **46,3 s** — e como 46 s > `ping_a_cada_s`, todo rádio vivia
+vencido: o ping voltava a ser de todos. Daí o **orçamento** de
+`ping_max_por_ciclo` (padrão: o teto de threads), servindo os mais
+atrasados primeiro. O custo do ping para de crescer com a frota; cada
+rádio é pingado a cada *N/orçamento* ciclos.
+
+O que o orçamento **não** resolve: o `get_state` de 159 rádios em 12
+threads já custa ~4 s. Contínuo com a frota inteira é a ferramenta errada
+— **selecione só os veículos do trajeto**.
+
 O aviso da página trata "consultas/s" no contínuo como **teto**, não como
 taxa — o ciclo se alonga sozinho pelo teto de threads.
 
@@ -955,7 +966,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 | `imagens_no_ppt` | `false` = molduras vazias para colar print |
 | `zonas_grade_m` | lado da célula na agregação |
 
-### `[survey]` — 7 chaves
+### `[survey]` — 8 chaves
 
 | chave | padrão | o que faz |
 |---|---|---|
@@ -964,6 +975,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 | `min_intervalo_s` | 5 | piso do intervalo pedido pela página |
 | `piso_continuo_s` | 0 | espera mínima no contínuo (0 = sem pausa) |
 | `ping_a_cada_s` | 15 | cadência do ping, independente do ciclo |
+| `ping_max_por_ciclo` | (teto de threads) | máximo de pings por ciclo |
 | `falhas_para_pular` | 3 | desiste do rádio após N falhas |
 | `usar_cache_fallback` | true | amostra do exportador quando a direta falha |
 
@@ -1021,7 +1033,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 
 ## 21. Testes
 
-`teste_parser.py`: **370 testes em 53 classes**, rodando **sem rádio e sem a
+`teste_parser.py`: **375 testes em 53 classes**, rodando **sem rádio e sem a
 `rajant_api`** (há um stub no topo). Roda em qualquer máquina, inclusive CI
 sem acesso à malha.
 
@@ -1166,6 +1178,7 @@ Não são bugs, e vão continuar assim até alguém decidir o contrário:
 | mapa "todo verde" | rádio parado no calor, ou `sinal` = melhor enlace | §12 e §24 |
 | bolas desconectadas | espaçamento maior que o raio | intervalo 0 na página (§10) |
 | contínuo ainda espaçado | ping preso ao ciclo | `ping_a_cada_s` (§10) |
+| ciclo de dezenas de s | frota inteira selecionada | selecione só o trajeto (§10) |
 | PPT sem os slides de survey | é o padrão | `survey_no_semanal = true` (§15) |
 | deck sem logo | falta a pasta `marca/` | §16 |
 | PNG sem satélite | provedor bloqueado | `--testar-fundo` (§24) |
