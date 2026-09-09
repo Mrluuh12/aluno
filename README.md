@@ -23,6 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `teste_parser.py` | 362 testes; roda sem rádio e sem a lib `rajant_api` |
+| `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
 | `bcapi-ref/proto/` | os `.proto` do bcapi, referência de tudo que se afirma sobre a API |
