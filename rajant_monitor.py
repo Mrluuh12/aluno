@@ -21,13 +21,27 @@ import re, json, time, logging, argparse, threading, configparser, sys, math
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+# A rajant-api so e necessaria para FALAR com os radios. O gerador de
+# relatorios a partir de arquivo do MeshMapper nao toca na rede, e sair
+# com erro no import impediria de rodar quem so quer gerar KMZ e PPT numa
+# maquina sem a biblioteca.
 try:
     from rajant_api import Breadcrumb
 except ImportError:
-    print("ERRO: pip install rajant-api --no-deps"); sys.exit(1)
+    Breadcrumb = None
+
+
+def exigir_rajant_api():
+    """Chamada nos caminhos que precisam de radio de verdade."""
+    if Breadcrumb is None:
+        print("ERRO: esta operacao fala com os radios e precisa da "
+              "rajant-api.\n      pip install rajant-api --no-deps\n"
+              "      pip install \"protobuf==4.23.4\"")
+        sys.exit(1)
+    return Breadcrumb
 try:
     from prometheus_client import start_http_server, Gauge
 except ImportError:
@@ -1574,7 +1588,7 @@ class RajantCollector:
         nome = self.nomes.get(ip, self.cache.nome(ip))
         for tentativa in range(1, self.tentativas+1):
             try:
-                bc = Breadcrumb(host=ip, port=self.port,
+                bc = exigir_rajant_api()(host=ip, port=self.port,
                                 role=self.role, password=self.password)
                 if not bc.reachable():   raise ConnectionRefusedError("nao alcancavel")
                 if not bc.authenticate(): raise PermissionError("autenticacao falhou")
@@ -1654,7 +1668,7 @@ class RajantCollector:
         seeds_ok, seeds_fail = [], []
         for seed in self.seeds:
             try:
-                bc = Breadcrumb(host=seed, port=self.port,
+                bc = exigir_rajant_api()(host=seed, port=self.port,
                                 role=self.role, password=self.password)
                 if bc.reachable() and bc.authenticate():
                     seeds_ok.append(seed)
@@ -6787,6 +6801,426 @@ def gerar_kmz_survey(saida_kmz, csv_path=None, kml_bcs=None, bandas=("2.4 GHz","
     return buf.getvalue(), nome
 
 # ══════════════════════════════════════════════════════════════
+# LEITURA DE CAPTURA DO MESHMAPPER (Rajant BC Commander)
+# ══════════════════════════════════════════════════════════════
+# O MeshMapper é a ferramenta da própria Rajant: roda no notebook dentro
+# do veículo e grava, a cada segundo, a posição e TODOS os vizinhos
+# visíveis. Ler o arquivo dele em vez de sondar a malha resolve três
+# coisas de uma vez:
+#
+#   1. a captura é contínua de verdade (interval = 1 s no arquivo), sem
+#      o custo de um segundo sondador competindo com o Dispatch;
+#   2. traz TODOS os peers visíveis por ponto, não só o que atendeu —
+#      dá para dizer "estava ligado no X e havia um Y melhor ao lado";
+#   3. quem gera o relatório não precisa de rede nenhuma.
+#
+# Fonte preferida: o data.json de dentro do .kmz. Os dois CSVs têm as
+# mesmas colunas, porém sem altitude e sem numActivePeers; servem quando
+# só eles sobraram.
+#
+# ARMADILHAS DE CAMPO, conferidas no arquivo real:
+#
+#   • "RSSI (SNR)" é SNR em dB; "Signal" é o RSSI em dBm. Os nomes das
+#     colunas trocam os dois. Trocá-los inverteria a escala inteira.
+#   • O ruído NÃO vem no arquivo, mas é recuperável: ruido = signal - snr.
+#     Não é estimativa — em 5450 amostras deu só 6 valores distintos,
+#     agrupados em -109 dBm (5,8 GHz) e -94 dBm (2,4 GHz), que é o piso
+#     de ruído que o rádio usou para calcular o SNR.
+#   • "Rate (Kb/s)" traz 65, 130, 195, 260 — as taxas MCS de 802.11n em
+#     Mbps. O rótulo da coluna está errado; 65 Kb/s num enlace de malha
+#     não existe. Tratado como Mbps.
+#   • Ponto sem enlace vem com Type "N/A" e custo 2147483647 (INT_MAX).
+#     Vira amostra SEM sinal, não amostra com sinal ruim: são coisas
+#     diferentes no relatório e no mapa.
+# ══════════════════════════════════════════════════════════════
+
+# Custo que o InstaMesh usa para "sem rota". Aparece cru no CSV.
+CUSTO_SEM_ROTA = 2147483647
+
+
+def _mm_num(v):
+    """Número do CSV/JSON, ou None. Campo vazio, '0' de placeholder e
+    'N/A' significam ausência — e ausência é None, nunca 0."""
+    if v is None: return None
+    s = str(v).strip().strip('"')
+    if not s or s.upper() in ("N/A", "NA", "-"): return None
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    return f
+
+
+def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
+    """Uma amostra no formato interno, a partir do enlace servidor."""
+    sig = _mm_num(path.get("signal"))
+    snr = _mm_num(path.get("rssi"))          # sim: 'rssi' do arquivo é SNR
+    custo = _mm_num(path.get("cost"))
+    if custo is not None and custo >= CUSTO_SEM_ROTA:
+        custo = None                          # INT_MAX = sem rota
+    # Sinal 0 é placeholder de "sem enlace", não medição de 0 dBm.
+    if sig == 0: sig = None
+    if snr == 0 and sig is None: snr = None
+    freq = _mm_num(path.get("freq")) or _mm_num(path.get("frequency"))
+    return {
+        "radio": nome_movel,
+        "ts": ts,
+        "lat": lat, "lon": lon, "alt": alt,
+        "vel": None, "sats": None, "hdop": None,
+        "sinal": sig,
+        "snr": snr,
+        # Recuperado, não estimado — ver o cabeçalho da seção.
+        "ruido": (sig - snr) if (sig is not None and snr is not None) else None,
+        "rtt": None, "perda": None, "interf": None, "vazao": None,
+        "custo": custo,
+        "taxa": _mm_num(path.get("rate")),    # MCS em Mbps, apesar do rótulo
+        "peers": n_peers,
+        "banda": _norm_banda(freq) if freq else None,
+        "canal": _mm_num(path.get("channel")),
+        "servidor": (path.get("name") or path.get("mac") or "").strip() or None,
+        "fonte": "meshmapper",
+    }
+
+
+def ler_meshmapper(caminho):
+    """Lê uma captura do MeshMapper e devolve (sv, amostras, peers).
+
+    `caminho` pode ser o .kmz, o data.json solto, ou um dos dois CSVs —
+    neste caso o par é localizado pelo prefixo do nome.
+
+    `sv`      metadados da captura (nome, início, fim, intervalo, móvel)
+    `amostras` no formato interno, uma por ponto
+    `peers`   todos os vizinhos visíveis por ponto: [{ponto, ts, lat, lon,
+              nome, ip, mac, wlan, banda, canal, sinal, snr, custo}]
+    """
+    p = Path(caminho)
+    if not p.exists():
+        raise RuntimeError(f"arquivo nao encontrado: {caminho}")
+    if p.suffix.lower() == ".kmz":
+        import zipfile
+        with zipfile.ZipFile(p) as z:
+            nomes = [n for n in z.namelist() if n.endswith("data.json")]
+            if not nomes:
+                raise RuntimeError(
+                    f"{p.name}: KMZ sem data.json. Este KMZ nao parece ser "
+                    f"do MeshMapper — se for, mande os CSVs.")
+            return _mm_do_json(json.loads(z.read(nomes[0])), p.stem)
+    if p.suffix.lower() == ".json":
+        return _mm_do_json(json.loads(p.read_text(encoding="utf-8")), p.stem)
+    if p.suffix.lower() == ".csv":
+        return _mm_dos_csv(p)
+    raise RuntimeError(f"{p.name}: esperado .kmz, .json ou .csv do MeshMapper")
+
+
+def _mm_do_json(d, rotulo):
+    pontos = d.get("points") or []
+    if not pontos:
+        raise RuntimeError("captura do MeshMapper sem pontos")
+    cfg_mm = d.get("configuration") or {}
+    meta = cfg_mm.get("crumbMeta") or {}
+    movel = (meta.get("name") or meta.get("serialStr") or "movel").strip()
+
+    amostras, peers = [], []
+    for i, pt in enumerate(pontos, start=1):
+        ts = (pt.get("unixTimeStamp") or 0) / 1000.0 or None
+        lat, lon = pt.get("gpsLat"), pt.get("gpsLong")
+        if lat is None or lon is None:
+            continue                       # sem posição não vai para o mapa
+        path = ((pt.get("traceInfo") or {}).get("path")) or {}
+        amostras.append(_mm_amostra(movel, ts, lat, lon, pt.get("gpsAlt"),
+                                    path, pt.get("numActivePeers")))
+        for wlan, lista in (pt.get("wlanPeers") or {}).items():
+            for q in (lista or []):
+                sig, snr = _mm_num(q.get("signal")), _mm_num(q.get("rssi"))
+                freq = _mm_num(q.get("frequency"))
+                peers.append({
+                    "ponto": i, "ts": ts, "lat": lat, "lon": lon,
+                    "nome": (q.get("name") or "").strip() or q.get("serialNumber"),
+                    "ip": q.get("ipaddr"), "mac": q.get("mac"), "wlan": wlan,
+                    "banda": _norm_banda(freq) if freq else None,
+                    "canal": _mm_num(q.get("channel")),
+                    "sinal": sig, "snr": snr,
+                    "ruido": (sig - snr) if (sig is not None and snr is not None) else None,
+                    "custo": _mm_num(q.get("cost")),
+                })
+
+    ts_v = [a["ts"] for a in amostras if a["ts"]]
+    sv = {
+        "nome": f"MeshMapper — {movel}",
+        "movel": movel,
+        "inicio": min(ts_v) if ts_v else None,
+        "fim": max(ts_v) if ts_v else None,
+        "intervalo_s": cfg_mm.get("interval"),
+        "arquivo": rotulo,
+        "versao_bcc": d.get("bcc_version"),
+        # Limiares que o PRÓPRIO MeshMapper usou. Ficam registrados para o
+        # relatório poder dizer com que régua a captura foi classificada,
+        # em vez de impor a nossa em cima e chamar de "o que o MeshMapper
+        # mostrou".
+        "limiares_mm": {k: cfg_mm.get(k) for k in
+                        ("goodCost", "greatCost", "goodRSSI", "greatRSSI",
+                         "goodPath", "greatPath") if cfg_mm.get(k) is not None},
+    }
+    return sv, amostras, peers
+
+
+def _mm_dos_csv(p):
+    """Par de CSVs do MeshMapper. Menos rico que o data.json — sem
+    altitude e sem numActivePeers —, mas é o que sobra quando só os CSVs
+    foram guardados."""
+    import csv as _csv
+    base = re.sub(r"_(trace_path|peer_info)$", "", p.stem)
+    trace = p.with_name(base + "_trace_path.csv")
+    pinfo = p.with_name(base + "_peer_info.csv")
+    if not trace.exists():
+        raise RuntimeError(f"nao achei {trace.name} ao lado de {p.name}")
+
+    movel = "movel"
+    linhas = trace.read_text(encoding="utf-8", errors="replace").splitlines()
+    if linhas and "Trace to" in linhas[0]:
+        # 1a linha: "Trace to:","Serial:",...,"Name:","CA-1006","IP:",...
+        campos = next(_csv.reader([linhas[0]]))
+        if "Name:" in campos:
+            movel = campos[campos.index("Name:") + 1].strip() or movel
+        linhas = linhas[1:]
+
+    amostras = []
+    for r in _csv.DictReader(linhas):
+        lat, lon = _mm_num(r.get("Latitude")), _mm_num(r.get("Longitude"))
+        if lat is None or lon is None: continue
+        amostras.append(_mm_amostra(
+            movel, _mm_ts(r.get("Timestamp")), lat, lon, None,
+            {"signal": r.get("Signal"), "rssi": r.get("RSSI (SNR)"),
+             "cost": r.get("Cost"), "rate": r.get("Rate (Kb/s)"),
+             "channel": r.get("Channel"), "freq": r.get("Frequency"),
+             "name": r.get("IP/MAC")}, None))
+
+    peers = []
+    if pinfo.exists():
+        for r in _csv.DictReader(open(pinfo, encoding="utf-8", errors="replace")):
+            sig, snr = _mm_num(r.get("Signal")), _mm_num(r.get("RSSI (SNR)"))
+            freq = _mm_num(r.get("Frequency"))
+            peers.append({
+                "ponto": int(_mm_num(r.get("Point Num")) or 0),
+                "ts": _mm_ts(r.get("Timestamp")),
+                "lat": _mm_num(r.get("Latitude")), "lon": _mm_num(r.get("Longitude")),
+                "nome": (r.get("Name") or "").strip() or r.get("Serial"),
+                "ip": r.get("IP"), "mac": r.get("MAC Address"),
+                "wlan": r.get("Wlan"),
+                "banda": _norm_banda(freq) if freq else None,
+                "canal": _mm_num(r.get("Channel")),
+                "sinal": sig, "snr": snr,
+                "ruido": (sig - snr) if (sig is not None and snr is not None) else None,
+                "custo": _mm_num(r.get("Cost")),
+            })
+
+    ts_v = [a["ts"] for a in amostras if a["ts"]]
+    sv = {"nome": f"MeshMapper — {movel}", "movel": movel,
+          "inicio": min(ts_v) if ts_v else None,
+          "fim": max(ts_v) if ts_v else None,
+          "intervalo_s": None, "arquivo": base, "versao_bcc": None,
+          "limiares_mm": {}}
+    return sv, amostras, peers
+
+
+def importar_meshmapper(caminho, con=None, nome=None):
+    """Importa uma captura do MeshMapper como um survey no banco.
+
+    Passar pelo banco em vez de gerar direto do arquivo nao e burocracia:
+    e o que faz a captura importada aparecer no historico, poder ser
+    comparada com outra e alimentar os MESMOS geradores de KMZ, PPT e
+    Excel que o survey proprio usa. Um caminho de saida, duas origens.
+
+    Devolve (sid, sv, amostras, peers).
+    """
+    sv, amostras, peers = ler_meshmapper(caminho)
+    if not amostras:
+        raise RuntimeError(f"{Path(caminho).name}: nenhuma amostra com posicao")
+    fechar = con is None
+    con = con or banco()
+    try:
+        radios = sorted({a["radio"] for a in amostras})
+        sid = survey_criar(con, nome or sv["nome"], sv["inicio"],
+                           sv.get("intervalo_s"), radios)
+        amostras_gravar(con, sid, amostras)
+        resumo = survey_resumo(amostras)
+        # n_moveis/n_fixos: no MeshMapper quem anda e o veiculo com o
+        # notebook — um so. Os vizinhos aparecem como peers, nao como
+        # equipamentos medindo, entao nao entram na contagem de moveis.
+        survey_fechar(con, sid, sv["fim"], resumo,
+                      n_moveis=len(radios), n_fixos=0,
+                      intervalo_efetivo_s=_mm_intervalo_real(amostras))
+        log.info(f"[meshmapper] survey {sid}: {len(amostras)} amostras, "
+                 f"{len(peers)} leituras de vizinho, movel {sv['movel']}")
+        return sid, sv, amostras, peers
+    finally:
+        if fechar: con.close()
+
+
+def _mm_intervalo_real(amostras):
+    """Mediana do intervalo entre pontos. O MeshMapper declara o pedido
+    em `interval`; o que descreve a resolucao e o que aconteceu."""
+    ts = sorted(a["ts"] for a in amostras if a.get("ts"))
+    difs = [b - a for a, b in zip(ts, ts[1:]) if b > a]
+    if not difs: return None
+    difs.sort()
+    return round(difs[len(difs) // 2], 2)
+
+
+def excel_do_meshmapper(sv, amostras, peers, cfg=None):
+    """Excel da captura do MeshMapper: quatro abas.
+
+    Nao reaproveita o workbook semanal porque aquele e um relatorio de
+    PERIODO, montado a partir do Prometheus. Aqui a unidade e uma
+    captura, e ha uma aba que so existe com este dado: a de vizinhos.
+    """
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter as _gcl
+    import io as _io
+
+    movel = sv.get("movel") or "movel"
+    wb = Workbook(); wb.remove(wb.active)
+
+    def dt(ts):
+        return (datetime.utcfromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S")
+                if ts else "")
+
+    # ── 1. Resumo ──
+    ws = wb.create_sheet("Resumo")
+    _cab(ws, f"Site Survey — {movel}",
+         f"Captura do MeshMapper {sv.get('versao_bcc') or ''} · "
+         f"{dt(sv.get('inicio'))} a {dt(sv.get('fim'))} UTC", 6)
+    lin = 4
+    _th(ws, lin, ["Item", "Valor"], [34, 46]); lin += 1
+    dur = ((sv["fim"] - sv["inicio"]) / 60.0) if sv.get("fim") and sv.get("inicio") else None
+    campos = campos_com_medicao(amostras)
+    faltam = [c for c in CAMPOS_KMZ if c not in campos]
+    itens = [
+        ("Equipamento móvel", movel),
+        ("Arquivo", sv.get("arquivo") or ""),
+        ("Versão do BC Commander", sv.get("versao_bcc") or "n/d"),
+        ("Duração (min)", round(dur, 1) if dur else "n/d"),
+        ("Amostras", len(amostras)),
+        ("Intervalo pedido (s)", sv.get("intervalo_s") or "n/d"),
+        ("Intervalo real (s)", _mm_intervalo_real(amostras) or "n/d"),
+        ("Leituras de vizinho", len(peers)),
+        ("Vizinhos distintos", len({p["nome"] for p in peers if p.get("nome")})),
+        ("Pontos sem enlace", sum(1 for a in amostras if a.get("sinal") is None)),
+        ("Grandezas medidas", ", ".join(campos) or "nenhuma"),
+        # Registrar o que NAO veio evita a leitura de "mediu e deu ruim".
+        ("Não fornecido pelo MeshMapper", ", ".join(faltam) or "—"),
+    ]
+    for k, v in itens:
+        lin = _td(ws, lin, [k, v], zebra=(lin % 2 == 0))
+
+    lim = sv.get("limiares_mm") or {}
+    if lim:
+        lin += 1
+        ws.cell(lin, 1, "Régua usada pelo próprio MeshMapper").font = F_TXTB
+        lin += 1
+        _th(ws, lin, ["Limiar", "Valor"], [34, 46]); lin += 1
+        for k, v in lim.items():
+            lin = _td(ws, lin, [k, v], zebra=(lin % 2 == 0))
+
+    # ── 2. Por grandeza ──
+    ws = wb.create_sheet("Por Grandeza")
+    _cab(ws, "Indicadores por grandeza", "Requisito Modular Mining", 7)
+    lin = 4
+    _th(ws, lin, ["Grandeza", "Unid.", "Amostras", "Mediana", "Pior 5%",
+                  "Requisito", "Dentro (%)"], [18, 8, 11, 12, 12, 14, 12])
+    lin += 1
+    resumo = survey_resumo(amostras) or {}
+    for campo in CAMPOS_KMZ:
+        e = ESCALAS.get(campo) or {}
+        r = resumo.get(campo)
+        if not r:
+            lin = _td(ws, lin, [e.get("rot", campo), e.get("un", ""), 0,
+                                "não medido", "", "", ""],
+                      zebra=(lin % 2 == 0))
+            continue
+        op = ">" if e.get("melhor") == "alto" else "<"
+        lin = _td(ws, lin, [e.get("rot", campo), e.get("un", ""),
+                            r.get("n"), r.get("mediana"), r.get("p05"),
+                            f"{op} {e.get('req')}", r.get("pct_ok")],
+                  zebra=(lin % 2 == 0))
+
+    # ── 3. Amostras ──
+    ws = wb.create_sheet("Amostras")
+    _cab(ws, "Trajeto medido", f"{len(amostras)} pontos", 14)
+    lin = 4
+    _th(ws, lin, ["#", "Hora (UTC)", "Latitude", "Longitude", "Alt (m)",
+                  "Banda", "Canal", "RSSI (dBm)", "SNR (dB)", "Ruído (dBm)",
+                  "Custo", "Taxa (Mbps)", "Vizinhos", "Servidor"],
+        [6, 19, 12, 12, 9, 10, 8, 11, 10, 12, 10, 12, 10, 22])
+    lin += 1
+    for i, a in enumerate(sorted(amostras, key=lambda x: x.get("ts") or 0), 1):
+        lin = _td(ws, lin, [i, dt(a.get("ts")), a.get("lat"), a.get("lon"),
+                            a.get("alt"), a.get("banda"), a.get("canal"),
+                            a.get("sinal"), a.get("snr"), a.get("ruido"),
+                            a.get("custo"), a.get("taxa"), a.get("peers"),
+                            a.get("servidor")], estilo=False)
+    ws.freeze_panes = "A5"
+
+    # ── 4. Vizinhos ──
+    # A aba que so existe com dado do MeshMapper: a sondagem pela BC API
+    # devolve o enlace que atendeu, nao a vizinhanca inteira.
+    ws = wb.create_sheet("Vizinhos")
+    _cab(ws, "Todos os vizinhos visíveis, ponto a ponto",
+         "O que a sondagem por API não mostra: quem mais estava ao alcance "
+         "em cada posição", 11)
+    lin = 4
+    _th(ws, lin, ["Ponto", "Hora (UTC)", "Vizinho", "IP", "MAC", "Interface",
+                  "Banda", "Canal", "RSSI (dBm)", "SNR (dB)", "Custo"],
+        [7, 19, 26, 15, 19, 10, 10, 8, 11, 10, 11])
+    lin += 1
+    for p in sorted(peers, key=lambda x: (x.get("ponto") or 0,
+                                          -(x.get("snr") or -999))):
+        lin = _td(ws, lin, [p.get("ponto"), dt(p.get("ts")), p.get("nome"),
+                            p.get("ip"), p.get("mac"), p.get("wlan"),
+                            p.get("banda"), p.get("canal"), p.get("sinal"),
+                            p.get("snr"), p.get("custo")], estilo=False)
+    ws.freeze_panes = "A5"
+
+    buf = _io.BytesIO(); wb.save(buf)
+    quando = datetime.utcfromtimestamp(sv["inicio"]) if sv.get("inicio") else datetime.now()
+    nome = f"Survey_{_slug_arquivo(movel)}_{quando:%Y%m%d_%H%M}.xlsx"
+    return buf.getvalue(), nome
+
+
+def _slug_arquivo(txt):
+    """Nome de equipamento vira parte de nome de arquivo: barra e dois
+    pontos derrubariam a gravacao no Windows."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(txt or "")).strip("-") or "survey"
+
+
+def campos_com_medicao(amostras, candidatos=None):
+    """Quais grandezas tem medicao de verdade nestas amostras.
+
+    O MeshMapper nao traz latencia, perda nem interferencia. Gerar aba
+    para elas produziria pagina vazia com escala e requisito, que se le
+    como "medi e deu tudo fora" em vez de "nao medi".
+    """
+    campos = list(candidatos or CAMPOS_KMZ)
+    return [c for c in campos
+            if any(a.get(c) is not None for a in amostras)]
+
+
+def _mm_ts(txt):
+    """'2026-09-10 15:59:27 UTC' → epoch. O sufixo UTC é literal e o
+    strptime nao o interpreta como fuso: tratar como hora local mudaria o
+    trajeto de lugar no tempo."""
+    if not txt: return None
+    s = str(txt).strip().strip('"').replace(" UTC", "")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
 # PERSISTÊNCIA DOS SURVEYS (SQLite ao lado do executável)
 # ══════════════════════════════════════════════════════════════
 # Sem persistência, cada survey morre quando o processo reinicia — e a
@@ -8659,7 +9093,7 @@ class SessaoRadio:
         self.consultas = 0
 
     def _abrir(self):
-        bc = Breadcrumb(host=self.ip, port=self.porta,
+        bc = exigir_rajant_api()(host=self.ip, port=self.porta,
                         role=self.role, password=self.senha)
         if not bc.reachable():    raise ConnectionRefusedError("nao alcancavel")
         if not bc.authenticate(): raise PermissionError("autenticacao falhou")
@@ -9927,6 +10361,13 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None):
                            ("rtt", "Latência (RTT)")):
             rot_b = f" — {b}" if b else ""
             am_b = [a for a in am if _norm_banda(a.get("banda")) == b] or am
+            # Grandeza sem NENHUMA medicao nao vira slide. Uma pagina com
+            # escala, requisito e grafico vazio le-se como "medi e deu
+            # tudo fora" — que e o oposto de "nao medi". E o caso de
+            # latencia, perda e interferencia numa captura do MeshMapper,
+            # que simplesmente nao fornece esses campos.
+            if not any(a.get(campo) is not None for a in am_b):
+                continue
             lim_ = limite_de(campo)
             sub = ("Rota medida, colorida pelo valor de cada amostra"
                    + (f"  ·  requisito {lim_[0]} {lim_[1]:g} {lim_[2]}"
@@ -12634,7 +13075,7 @@ def criar_handler(cfg):
                     porta_api = cfg.getint("rede","porta_bcapi", fallback=2300)
                     role  = cfg.get("rede","role", fallback="VIEW")
                     senha = cfg.get("rede","password", fallback="")
-                    bc = Breadcrumb(host=ip, port=porta_api, role=role, password=senha)
+                    bc = exigir_rajant_api()(host=ip, port=porta_api, role=role, password=senha)
                     if not bc.reachable():    raise RuntimeError("BC nao alcancavel")
                     if not bc.authenticate(): raise RuntimeError("Autenticacao falhou")
                     raw = bc.get_state()
@@ -13090,7 +13531,7 @@ def main():
     if args.diagnostico_eth:
         ipd = args.diagnostico_eth
         log.info(f"Diagnostico de ethernet em {ipd}...")
-        bc = Breadcrumb(host=ipd, port=port, role=role, password=password)
+        bc = exigir_rajant_api()(host=ipd, port=port, role=role, password=password)
         if not bc.reachable():    log.error("Nao alcancavel"); sys.exit(2)
         if not bc.authenticate(): log.error("Autenticacao falhou"); sys.exit(3)
         raw = bc.get_state()
@@ -13104,7 +13545,7 @@ def main():
     if args.dump_state:
         ipd = args.dump_state
         log.info(f"Coletando state bruto de {ipd}...")
-        bc = Breadcrumb(host=ipd, port=port, role=role, password=password)
+        bc = exigir_rajant_api()(host=ipd, port=port, role=role, password=password)
         if not bc.reachable():    log.error("Nao alcancavel"); sys.exit(2)
         if not bc.authenticate(): log.error("Autenticacao falhou"); sys.exit(3)
         raw = bc.get_state()

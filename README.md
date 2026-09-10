@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 375 testes
+python3 teste_parser.py                        # 386 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -22,7 +22,8 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 | arquivo | o que é |
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
-| `teste_parser.py` | 375 testes; roda sem rádio e sem a lib `rajant_api` |
+| `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
+| `teste_parser.py` | 386 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -75,6 +76,56 @@ imagens_no_ppt = false             # false = molduras vazias p/ colar print
 kmz_com_rotas        = false       # true = também a linha ligando amostras
 kmz_com_equipamentos = false       # true = devolve os alfinetes dos BCs
 ```
+
+## Duas ferramentas
+
+O projeto tem **dois executáveis**, com públicos e dependências distintos:
+
+| | `rajant_monitor` | `survey_meshmapper` |
+|---|---|---|
+| o que faz | sonda a malha, exporta métricas, gera o semanal | lê a captura do MeshMapper e gera o relatório de survey |
+| precisa de rede? | sim, fala com os BCs | **não** |
+| precisa da `rajant-api`? | sim | **não** |
+| onde roda | servidor, o tempo todo | notebook de quem mediu |
+
+```bash
+survey_meshmapper Meshmapper_2026-09-10_12-59-11.kmz
+```
+
+Saem três arquivos: o **KMZ** com o rastro de calor, o **PPT** na
+identidade Anglo e o **Excel** — este com uma aba que só existe aqui, a de
+todos os vizinhos visíveis ponto a ponto.
+
+### Por que ler o arquivo em vez de sondar
+
+O MeshMapper é a ferramenta da própria Rajant, roda no notebook dentro do
+veículo e grava **a cada segundo** a posição e todos os vizinhos visíveis.
+Isso resolve de uma vez o que a sondagem por API não resolvia:
+
+- a captura é contínua de verdade, sem um segundo sondador competindo com
+  o Dispatch na malha que se está medindo;
+- traz **todos** os peers por ponto, não só o que atendeu — dá para dizer
+  *"estava ligado no X e havia um Y melhor ao lado"*;
+- quem gera o relatório não precisa de rede, credencial nem biblioteca.
+
+### O que o MeshMapper não fornece
+
+Latência, perda de pacotes e interferência **não vêm** no arquivo. Elas não
+viram slide nem aba: página com escala e requisito e gráfico vazio lê-se
+como *"medi e deu tudo fora"*, que é o oposto de *"não medi"*.
+
+### Armadilhas do formato, conferidas no arquivo real
+
+- **`RSSI (SNR)` é SNR em dB; `Signal` é o RSSI em dBm.** Os nomes das
+  colunas trocam os dois — trocá-los inverteria a escala inteira.
+- **O ruído não vem, mas é recuperável:** `ruído = signal − snr`. Não é
+  estimativa: em 5450 amostras deu 6 valores distintos, agrupados em
+  −109 dBm (5,8 GHz) e −94 dBm (2,4 GHz), que é o piso que o rádio usou
+  para calcular o SNR.
+- **`Rate (Kb/s)` traz 65, 130, 195, 260** — as taxas MCS de 802.11n em
+  **Mbps**. O rótulo da coluna está errado.
+- **Ponto sem enlace** vem com tipo `N/A` e custo 2147483647 (INT_MAX).
+  Vira amostra *sem sinal*, não amostra com sinal ruim.
 
 ## O KMZ: rastro em calor, não linha
 
@@ -334,7 +385,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 375 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 386 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

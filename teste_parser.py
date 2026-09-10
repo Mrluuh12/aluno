@@ -3937,6 +3937,108 @@ class TestLeituraContinua(unittest.TestCase):
         self.assertIn('"perfil": self.perfil', fonte)
 
 
+class TestMeshMapper(unittest.TestCase):
+    """Leitura da captura do MeshMapper (a ferramenta da propria Rajant).
+
+    A fixture e um recorte do arquivo REAL do cliente: 8 pontos, 3 peers
+    por radio. Inventar o formato levaria a um leitor que so funciona
+    contra a minha imaginacao.
+    """
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        self.sv, self.am, self.pr = rm.ler_meshmapper(str(self.EXEMPLO))
+
+    def test_le_pontos_e_vizinhos(self):
+        self.assertEqual(len(self.am), 8)
+        self.assertTrue(self.pr)
+        self.assertEqual(self.sv["movel"], "CA-1006")
+
+    def test_signal_e_rssi_nao_sao_trocados(self):
+        # No arquivo, "rssi" e SNR em dB e "signal" e RSSI em dBm. Trocar
+        # os dois inverteria a escala inteira do relatorio.
+        a = self.am[0]
+        self.assertLess(a["sinal"], -30)      # dBm e negativo e grande
+        self.assertGreater(a["snr"], 0)       # dB e positivo e pequeno
+        self.assertLess(a["snr"], 60)
+
+    def test_ruido_e_recuperado_de_signal_menos_snr(self):
+        # Nao e estimativa: e o piso que o radio usou para calcular o SNR.
+        for a in self.am:
+            if a["sinal"] is None or a["snr"] is None: continue
+            self.assertEqual(a["ruido"], a["sinal"] - a["snr"])
+
+    def test_ponto_sem_enlace_nao_vira_sinal_zero(self):
+        # Type "N/A" com custo INT_MAX significa SEM ROTA. Virar 0 dBm
+        # seria publicar "medi e deu otimo" onde nao houve enlace.
+        falso = {"signal": 0, "rssi": 0, "cost": rm.CUSTO_SEM_ROTA,
+                 "rate": 0, "channel": 0, "freq": 0}
+        a = rm._mm_amostra("X", 1.0, -18.9, -43.4, None, falso, None)
+        self.assertIsNone(a["sinal"])
+        self.assertIsNone(a["custo"])
+        self.assertIsNone(a["ruido"])
+
+    def test_banda_sai_da_frequencia(self):
+        bandas = {a["banda"] for a in self.am if a["banda"]}
+        self.assertTrue(bandas <= {"2.4 GHz", "5.8 GHz"}, bandas)
+
+    def test_timestamp_e_utc(self):
+        # O sufixo "UTC" do CSV e literal; tratar como hora local moveria
+        # o trajeto no tempo.
+        t = rm._mm_ts("2026-09-10 15:59:27 UTC")
+        self.assertAlmostEqual(t, 1789055967.0, delta=1)
+
+    def test_limiares_do_meshmapper_sao_preservados(self):
+        # A regua que a propria ferramenta usou entra no relatorio, em vez
+        # de impormos a nossa e chamarmos de "o que o MeshMapper mostrou".
+        self.assertIn("goodRSSI", self.sv["limiares_mm"])
+
+    def test_campos_sem_medicao_sao_identificados(self):
+        campos = rm.campos_com_medicao(self.am)
+        self.assertIn("sinal", campos)
+        self.assertIn("snr", campos)
+        # O MeshMapper nao fornece nenhum destes.
+        for c in ("rtt", "perda", "interf"):
+            self.assertNotIn(c, campos)
+
+    def test_grandeza_sem_medicao_nao_vira_slide(self):
+        fonte = inspect.getsource(rm.ppt_survey_anglo)
+        self.assertIn("if not any(a.get(campo) is not None for a in am_b):",
+                      fonte)
+
+    def test_importa_para_o_banco_e_gera_kmz(self):
+        import tempfile, zipfile, io as _io
+        tmp = tempfile.mkdtemp()
+        con = rm.banco(str(Path(tmp) / "s.db"))
+        try:
+            sid, sv, am, pr = rm.importar_meshmapper(str(self.EXEMPLO), con)
+            self.assertGreater(sid, 0)
+            gravadas = rm.survey_amostras(con, sid)
+            self.assertEqual(len(gravadas), len(am))
+            cfg = rm.configparser.ConfigParser()
+            with mock.patch.object(rm, "CONFIG_FILE",
+                                   str(Path(tmp) / "c.ini")):
+                rm.cfg_relatorio(cfg)
+            dados, nome = rm.gerar_kml_survey(
+                sv, am, cfg=cfg, campos=rm.campos_com_medicao(am))
+            z = zipfile.ZipFile(_io.BytesIO(dados))
+            self.assertIn("doc.kml", z.namelist())
+            self.assertTrue([n for n in z.namelist() if n.endswith(".png")],
+                            "KMZ do MeshMapper saiu sem o raster do calor")
+        finally:
+            con.close()
+
+    def test_le_sem_a_rajant_api(self):
+        # O gerador roda no notebook de quem mediu, sem a biblioteca e
+        # sem rede. Sair com erro no import impediria justamente isso.
+        fonte = inspect.getsource(rm)
+        i = fonte.index("from rajant_api import Breadcrumb")
+        j = fonte.index("def exigir_rajant_api")
+        self.assertNotIn("sys.exit(1)", fonte[i:j])
+
+
 class TestTituloDoSlide(unittest.TestCase):
     def test_botao_de_menu_nao_vira_titulo(self):
         # O ◂ MENU fica em 0,28" e o título em 0,32": pegar "o texto mais
