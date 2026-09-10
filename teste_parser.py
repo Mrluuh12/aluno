@@ -4039,6 +4039,94 @@ class TestMeshMapper(unittest.TestCase):
         self.assertNotIn("sys.exit(1)", fonte[i:j])
 
 
+class TestValorDoPixel(unittest.TestCase):
+    """Como o raster escolhe o valor de cada pixel.
+
+    A regra e vizinho mais proximo, nao media. Medido contra o arquivo do
+    cliente: as amostras cruas davam 81% fora do requisito, o vizinho
+    mais proximo 92% (area, nao tempo — sao grandezas diferentes) e a
+    media ponderada dizia 100%, porque APAGAVA as poucas leituras boas ao
+    promedia-las com as vizinhas ruins.
+    """
+
+    def _bb(self, pts, raio):
+        import math
+        las = [p["lat"] for p in pts]; los = [p["lon"] for p in pts]
+        dlat = raio / 111320.0
+        dlon = raio / (111320.0 * math.cos(math.radians(sum(las)/len(las))))
+        return {"sul": min(las)-dlat, "norte": max(las)+dlat,
+                "oeste": min(los)-dlon, "leste": max(los)+dlon}
+
+    def _linha(self, valores, passo=0.0002):
+        return [{"lat": -18.92 + i*passo, "lon": -43.42, "ts": float(i),
+                 "sinal": v, "radio": "CA-1"} for i, v in enumerate(valores)]
+
+    def test_todo_pixel_e_uma_leitura_real(self):
+        # O que separa mapa de laudo: nenhum pixel pode mostrar um valor
+        # que nao foi medido em lugar nenhum.
+        import numpy as np
+        pts = self._linha([-50.0, -90.0, -55.0, -85.0, -60.0])
+        v, a = rm._calor_da_rota(pts, "sinal", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["sinal"])
+        self.assertIsNotNone(v)
+        no_mapa = set(np.round(v[np.isfinite(v)], 3))
+        medidos = {round(float(p["sinal"]), 3) for p in pts}
+        self.assertEqual(no_mapa - medidos, set(),
+                         "o raster inventou valor que nao foi medido")
+
+    def test_leitura_boa_isolada_nao_e_apagada(self):
+        # Era o defeito da media: uma leitura otima cercada de ruins
+        # sumia. E justamente o ponto que interessa achar num survey.
+        import numpy as np
+        pts = self._linha([-90.0, -90.0, -45.0, -90.0, -90.0])
+        v, a = rm._calor_da_rota(pts, "sinal", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["sinal"])
+        self.assertGreater(np.nanmax(v), -50.0,
+                           "a leitura boa foi apagada pela vizinhanca")
+
+    def test_mesmo_lugar_medido_duas_vezes_fica_a_pior(self):
+        # Passar duas vezes no mesmo ponto: a operacao enfrenta as duas
+        # leituras, e e a ruim que para o caminhao.
+        import numpy as np
+        pts = [{"lat": -18.92, "lon": -43.42, "ts": 1.0, "sinal": -50.0,
+                "radio": "CA-1"},
+               {"lat": -18.92, "lon": -43.42, "ts": 99.0, "sinal": -92.0,
+                "radio": "CA-1"},
+               {"lat": -18.9203, "lon": -43.42, "ts": 2.0, "sinal": -70.0,
+                "radio": "CA-1"}]
+        v, a = rm._calor_da_rota(pts, "sinal", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["sinal"])
+        # No pixel do ponto repetido tem de estar a leitura RUIM.
+        i = np.unravel_index(np.nanargmin(v), v.shape)
+        self.assertAlmostEqual(float(v[i]), -92.0, places=1)
+
+    def test_pior_respeita_o_sentido_da_grandeza(self):
+        # Em ruido, latencia, perda e interferencia o pior e o MAIOR.
+        import numpy as np
+        pts = [{"lat": -18.92, "lon": -43.42, "ts": 1.0, "rtt": 10.0,
+                "radio": "CA-1"},
+               {"lat": -18.92, "lon": -43.42, "ts": 99.0, "rtt": 180.0,
+                "radio": "CA-1"},
+               {"lat": -18.9203, "lon": -43.42, "ts": 2.0, "rtt": 30.0,
+                "radio": "CA-1"}]
+        v, a = rm._calor_da_rota(pts, "rtt", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["rtt"])
+        self.assertAlmostEqual(float(np.nanmax(v)), 180.0, places=1)
+
+    def test_empate_e_na_resolucao_da_grade(self):
+        # Com tolerancia grande, o empate disparava entre amostras
+        # CONSECUTIVAS e o mapa inteiro pendia para o lado ruim: 95,8% da
+        # area fora do requisito contra 91,9% pelo vizinho puro. Isso nao
+        # e ser conservador, e distorcer.
+        fonte = inspect.getsource(rm._calor_da_rota)
+        self.assertIn("tol = max(px, py)", fonte)
+
+    def test_nao_usa_media_ponderada(self):
+        fonte = inspect.getsource(rm._calor_da_rota)
+        self.assertNotIn("soma[i0:i1", fonte)
+        self.assertIn("dmin", fonte)
+
+
 class TestGeradorMeshMapper(unittest.TestCase):
     """A ferramenta separada: varios arquivos, juntos ou separados."""
 

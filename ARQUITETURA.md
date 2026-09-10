@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 100 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 386, em 55 classes |
+| testes | 402, em 57 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 386 testes e as âncoras de seção (§26).
+segura isso são os 402 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -646,10 +646,16 @@ separa um laudo de um chute.
 ```python
 # para cada amostra, só a janela dela é tocada
 w = exp(-d²/(2σ²));  w[d > raio] = 0
-peso += w;  soma += w·valor;  wmax = max(wmax, w)
-valor = soma/peso   onde peso > 0
+wmax  = max(wmax, w)                 # opacidade: o núcleo mais forte
+valor = da amostra MAIS PRÓXIMA      # empate na grade → a pior
 alfa  = sqrt(wmax) · 0,9
 ```
+
+**O valor não é média.** Medido num arquivo real: as amostras cruas davam
+81% fora do requisito, o vizinho mais próximo 92% (área, não tempo) e a
+média ponderada 100% — ela apagava as poucas leituras boas ao promediá-las
+com as ruins. Com o vizinho mais próximo, **nenhum pixel mostra um valor
+que não foi medido**, e há teste que falha se algum mostrar.
 
 Varrer a grade inteira por ponto seria O(pontos × n²) e um survey de horas
 não terminaria.

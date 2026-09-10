@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 386 testes
+python3 teste_parser.py                        # 402 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -23,7 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
-| `teste_parser.py` | 386 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 402 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -155,6 +155,33 @@ amostras e o raio cai para o piso.
 A opacidade vem do núcleo **mais forte** que cobre o pixel, não da soma
 deles: pela soma, um equipamento parado ficava sólido e ainda puxava a
 referência para cima, apagando o rastro de quem andou.
+
+### Cada pixel mostra uma leitura real
+
+O valor do pixel é o da **amostra mais próxima** — não uma média.
+
+Isso foi decidido medindo, não por gosto. No mesmo trajeto de um arquivo
+real:
+
+| regra | % da imagem fora do requisito |
+|---|---|
+| amostras cruas (referência) | 81,1% *(estatística de tempo)* |
+| **vizinho mais próximo** | **92,1%** *(estatística de área)* |
+| média ponderada | 100,0% |
+
+A média não escondia problema: ela **apagava o que era bom**. As poucas
+leituras de −45 dBm sumiam ao serem promediadas com as vizinhas ruins, e
+o mapa dizia que 100% do trajeto reprovava quando as medições diziam 81%.
+
+> Área e tempo não são comparáveis: veículo parado gera muitas amostras
+> num ponto só, e trecho percorrido rápido cobre área com poucas
+> amostras. Os dois números respondem perguntas diferentes.
+
+**Passar duas vezes no mesmo lugar:** vale a pior das leituras. A operação
+enfrenta as duas, e é a ruim que para o caminhão. O empate é aferido na
+**resolução da grade** — com tolerância maior, ele disparava entre
+amostras consecutivas e o mapa inteiro pendia para o lado ruim (95,8%
+contra 92,1%), o que não é ser conservador, é distorcer.
 
 A linha continua disponível em `kmz_com_rotas = true`, e quando ligada ela
 é **partida nos buracos de medição** — o limiar vem da mediana do próprio
@@ -385,7 +412,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 386 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 402 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

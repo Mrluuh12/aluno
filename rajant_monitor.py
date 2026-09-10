@@ -5919,7 +5919,7 @@ def _decimar(amostras, teto):
     return amostras[::passo], passo
 
 
-def _calor_da_rota(am, campo, bb, raio_m, n=760):
+def _calor_da_rota(am, campo, bb, raio_m, n=760, esc=None):
     """Mapa de calor SÓ por onde o rádio passou.
 
     Não é interpolação de cobertura: cada amostra pinta um núcleo de raio
@@ -5927,6 +5927,18 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760):
     transparente — o mapa não afirma sinal em lugar que não foi medido.
     É a diferença entre "medi aqui e deu isto" e "eu acho que lá deve dar
     aquilo", e só a primeira cabe num laudo.
+
+    CADA PIXEL MOSTRA UMA LEITURA REAL, a da amostra mais próxima — não
+    uma média. Medido contra o arquivo do cliente: no mesmo trajeto, as
+    amostras cruas davam 81% fora do requisito, o vizinho mais próximo
+    dava 88% e a média ponderada dizia 100%. A média não escondia
+    problema: ela APAGAVA o que era bom, porque as poucas leituras de
+    -45 dBm sumiam ao serem promediadas com as vizinhas ruins.
+
+    Quando duas amostras estão praticamente à mesma distância do pixel —
+    o caso de passar duas vezes no mesmo lugar —, vale a PIOR. Empate
+    entre duas leituras reais se resolve para o lado conservador: a
+    operação enfrenta as duas, e é a ruim que para o caminhão.
 
     Devolve (valor, alfa), ambos n×n, com NaN e 0 fora do rastro.
     """
@@ -5953,7 +5965,24 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760):
     # os círculos se tocando.
     sigma = max(raio_m / 1.5, 1.0)
 
-    peso = np.zeros((n, n)); soma = np.zeros((n, n))
+    # "Pior" depende da grandeza: em RSSI e SNR o pior é o menor; em
+    # ruído, latência, perda e interferência é o maior.
+    maior_melhor = (esc or {}).get("melhor", "alto") == "alto"
+    # Tolerância de empate: UM PIXEL, não uma fração do raio.
+    #
+    # Com 25% do raio, o empate disparava entre amostras CONSECUTIVAS: um
+    # pixel no meio do caminho entre duas leituras fica à mesma distância
+    # das duas, e o mapa inteiro pendia para o lado ruim (95,8% da área
+    # fora do requisito contra 91,9% pelo vizinho puro, no arquivo do
+    # cliente). Isso não é ser conservador, é distorcer.
+    #
+    # Na resolução da grade, só empata o que está de fato no mesmo lugar:
+    # veículo parado, ou segunda passagem pelo mesmo ponto. Aí sim vale a
+    # pior — a operação enfrenta as duas leituras.
+    tol = max(px, py)
+
+    dmin  = np.full((n, n), np.inf)
+    valor = np.full((n, n), np.nan)
     # Alfa sai do núcleo MAIS FORTE que cobre o pixel, não da soma deles.
     # Com a soma, um equipamento parado — 40 amostras no mesmo ponto —
     # vira uma bola sólida e ainda puxa a referência de opacidade para
@@ -5973,16 +6002,24 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760):
         dx = (np.arange(j0, j1) - j)[None, :] * px
         d2 = dx * dx + dy * dy
         w = np.exp(-d2 / (2.0 * sigma * sigma))
-        w[d2 > raio_m * raio_m] = 0.0     # corte duro: fora do raio, nada
-        peso[i0:i1, j0:j1] += w
-        soma[i0:i1, j0:j1] += w * v
+        dentro = d2 <= raio_m * raio_m
+        w = np.where(dentro, w, 0.0)      # corte duro: fora do raio, nada
         np.maximum(wmax[i0:i1, j0:j1], w, out=wmax[i0:i1, j0:j1])
 
-    vivo = peso > 1e-6
+        d  = np.sqrt(d2)
+        jd = dmin[i0:i1, j0:j1]
+        jv = valor[i0:i1, j0:j1]
+        manda  = dentro & (d < jd - tol)                 # mais perto: manda
+        empata = dentro & (np.abs(d - jd) <= tol)        # mesmo lugar
+        with np.errstate(invalid="ignore"):
+            pior = (v < jv) if maior_melhor else (v > jv)
+        jv[manda | (empata & (np.isnan(jv) | pior))] = v
+        np.minimum(jd, np.where(dentro, d, np.inf), out=jd)
+
+    vivo = wmax > 1e-6
     if not vivo.any():
         return None, None
-    valor = np.full((n, n), np.nan)
-    valor[vivo] = soma[vivo] / peso[vivo]
+    valor[~vivo] = np.nan
     # O miolo do rastro fica sólido e a borda esvanece — aspecto de calor
     # em vez de fita. A raiz alarga a parte opaca: com o gaussiano cru a
     # faixa só ficava cheia bem no centro e o rastro parecia um colar de
@@ -6279,7 +6316,8 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         bb = {"sul": min(las) - dlat, "norte": max(las) + dlat,
               "oeste": min(los) - dlon, "leste": max(los) + dlon}
         try:
-            valor, alfa = _calor_da_rota(amostras_aba, campo, bb, raio)
+            valor, alfa = _calor_da_rota(amostras_aba, campo, bb, raio,
+                                         esc=esc)
             if valor is None:
                 return ""
             nome_png = f"calor_{campo}.png"
