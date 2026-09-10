@@ -4039,6 +4039,136 @@ class TestMeshMapper(unittest.TestCase):
         self.assertNotIn("sys.exit(1)", fonte[i:j])
 
 
+class TestGeradorMeshMapper(unittest.TestCase):
+    """A ferramenta separada: varios arquivos, juntos ou separados."""
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        import importlib
+        self.sm = importlib.import_module("survey_meshmapper")
+        self.tmp = tempfile.mkdtemp()
+
+    def test_junta_varios_num_relatorio_so(self):
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            sid, sv, am, pr, org = rm.importar_meshmapper_varios(
+                [str(self.EXEMPLO), str(self.EXEMPLO)], con)
+            self.assertEqual(len(org), 2)
+            self.assertEqual(len(am), 16)      # 8 + 8
+            self.assertTrue(all(o["ok"] for o in org))
+        finally:
+            con.close()
+
+    def test_arquivo_ruim_nao_derruba_os_outros(self):
+        # Relatorio que engole arquivo ilegivel em silencio e pior que
+        # relatorio que falta: a falha entra na lista de origens.
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            sid, sv, am, pr, org = rm.importar_meshmapper_varios(
+                [str(self.EXEMPLO), str(Path(self.tmp) / "nao_existe.kmz")], con)
+            self.assertEqual(len(am), 8)
+            ruins = [o for o in org if not o["ok"]]
+            self.assertEqual(len(ruins), 1)
+            self.assertIn("nao encontrado", ruins[0]["erro"])
+        finally:
+            con.close()
+
+    def test_todos_ruins_falha_com_motivo(self):
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            with self.assertRaises(RuntimeError):
+                rm.importar_meshmapper_varios(
+                    [str(Path(self.tmp) / "x.kmz")], con)
+        finally:
+            con.close()
+
+    def test_amostra_guarda_de_qual_arquivo_veio(self):
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            _, _, am, _, _ = rm.importar_meshmapper_varios(
+                [str(self.EXEMPLO)], con)
+            self.assertTrue(all(a.get("arquivo") for a in am))
+        finally:
+            con.close()
+
+    def test_modo_separado_nao_sobrescreve(self):
+        # Duas capturas do MESMO veiculo na MESMA hora produzem nomes de
+        # saida iguais. Sem subpasta, uma sobrescrevia a outra em
+        # silencio: a contagem dizia 6 relatorios e o disco tinha 3.
+        import shutil
+        a = Path(self.tmp) / "cap_a.json"
+        b = Path(self.tmp) / "cap_b.json"
+        shutil.copy(self.EXEMPLO, a); shutil.copy(self.EXEMPLO, b)
+        saida = Path(self.tmp) / "out"
+        feitos = self.sm.gerar([str(a), str(b)], str(saida), juntar=False,
+                               fazer_ppt=False, fazer_excel=False,
+                               aviso=lambda t: None)
+        self.assertEqual(len(feitos), len({str(f) for f in feitos}),
+                         "dois arquivos gravaram no mesmo caminho")
+        self.assertTrue(all(f.exists() for f in feitos))
+
+    def test_sem_arquivo_reclama_em_vez_de_estourar(self):
+        with self.assertRaises(RuntimeError):
+            self.sm.gerar([], self.tmp, aviso=lambda t: None)
+
+    def test_sem_argumento_abre_a_janela(self):
+        # O duplo clique no .exe caia no erro de uso do argparse e a
+        # janela do console fechava na hora.
+        fonte = inspect.getsource(self.sm.main)
+        self.assertIn("if not a.arquivos:", fonte)
+        self.assertIn("interface()", fonte)
+
+    def test_gera_com_o_tkinter_bloqueado(self):
+        # A geracao tem de rodar SEM interface: e assim na linha de
+        # comando e num servidor sem tcl/tk.
+        #
+        # Em SUBPROCESSO de proposito. A primeira versao bloqueava o
+        # tkinter no sys.modules deste processo, e isso quebrava QUATRO
+        # testes de matplotlib depois — ele resolve o backend olhando o
+        # sys.modules e guardava o estado corrompido para o resto da
+        # sessao. O sintoma (ValueError em gridspec) nao lembrava nem de
+        # longe a causa.
+        import subprocess, textwrap
+        saida = Path(self.tmp) / "sem_tk"
+        codigo = textwrap.dedent(f"""
+            import sys
+            sys.modules["tkinter"] = None
+            sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+            import survey_meshmapper as sm
+            f = sm.gerar([{str(self.EXEMPLO)!r}], {str(saida)!r},
+                         fazer_ppt=False, fazer_excel=False,
+                         aviso=lambda t: None)
+            assert f, "nao gerou nada"
+            assert all(x.exists() for x in f), "arquivo prometido nao existe"
+            print("OK", len(f))
+        """)
+        r = subprocess.run([sys.executable, "-c", codigo],
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0,
+                         f"gerar falhou sem tkinter:\n{r.stdout}\n{r.stderr}")
+        self.assertIn("OK", r.stdout)
+
+    def test_interface_avisa_quando_falta_tkinter(self):
+        # Sem tcl/tk, a janela nao abre — mas o programa tem de dizer o
+        # que fazer, nao morrer com stack trace.
+        with mock.patch.dict(sys.modules, {"tkinter": None}):
+            self.assertEqual(self.sm.interface(), 1)
+
+    def test_spec_do_exe_nao_exclui_tkinter(self):
+        # Herdar o exclude do spec do rajant_monitor geraria um .exe que
+        # abre e fecha na hora, com o erro so no console que ninguem ve.
+        spec = Path(__file__).resolve().parent / "build" / "survey_meshmapper.spec"
+        if not spec.exists():
+            self.skipTest("spec ausente")
+        txt = spec.read_text(encoding="utf-8")
+        i = txt.index("excludes=[")
+        j = txt.index("]", i)
+        self.assertNotIn("tkinter", txt[i:j])
+
+
 class TestTituloDoSlide(unittest.TestCase):
     def test_botao_de_menu_nao_vira_titulo(self):
         # O ◂ MENU fica em 0,28" e o título em 0,32": pegar "o texto mais

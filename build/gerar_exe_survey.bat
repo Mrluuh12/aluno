@@ -113,11 +113,11 @@ echo.
 echo ====================================================================
 echo  PRONTO: dist\survey_meshmapper\survey_meshmapper.exe
 echo.
-echo  Como usar:
-echo     survey_meshmapper.exe Meshmapper_2026-09-10_12-59-11.kmz
+echo  Como usar: DE DUPLO CLIQUE no exe. Abre a janela, escolha os
+echo  arquivos do MeshMapper e clique em Gerar.
 echo.
-echo  Saem tres arquivos na pasta atual: o KMZ com o rastro de calor,
-echo  o PPT na identidade Anglo e o Excel com a aba de vizinhos.
+echo  Pela linha de comando tambem funciona:
+echo     survey_meshmapper.exe captura1.kmz captura2.kmz -o saida
 echo ====================================================================
 echo.
 echo Build concluido em %DATE% %TIME% >> "%LOG%"

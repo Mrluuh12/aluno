@@ -7057,6 +7057,79 @@ def importar_meshmapper(caminho, con=None, nome=None):
         if fechar: con.close()
 
 
+def importar_meshmapper_varios(caminhos, con=None, nome=None):
+    """Junta VARIAS capturas do MeshMapper num survey so.
+
+    Uma campanha de survey costuma ser varios veiculos, ou o mesmo
+    veiculo em turnos diferentes, cobrindo a mina. O laudo e um: um KMZ
+    com todos os rastros, um PPT, um Excel.
+
+    Cada amostra mantem o nome do movel que a produziu — e o que faz o
+    mapa de calor tratar cada trajeto separadamente e a rota nao ser
+    ligada de um veiculo ao outro.
+
+    Devolve (sid, sv, amostras, peers, origens), onde `origens` lista o
+    que veio de cada arquivo, inclusive os que falharam: relatorio que
+    engole arquivo ilegivel em silencio e pior que relatorio que falta.
+    """
+    amostras, peers, origens = [], [], []
+    for c in caminhos:
+        try:
+            sv_i, am_i, pr_i = ler_meshmapper(c)
+        except Exception as e:
+            origens.append({"arquivo": Path(c).name, "ok": False,
+                            "erro": str(e), "amostras": 0})
+            log.warning(f"[meshmapper] {Path(c).name}: {e}")
+            continue
+        for a in am_i:
+            a["arquivo"] = Path(c).name
+        amostras.extend(am_i); peers.extend(pr_i)
+        origens.append({"arquivo": Path(c).name, "ok": True,
+                        "movel": sv_i.get("movel"),
+                        "amostras": len(am_i), "peers": len(pr_i),
+                        "inicio": sv_i.get("inicio"), "fim": sv_i.get("fim"),
+                        "versao_bcc": sv_i.get("versao_bcc"),
+                        "limiares_mm": sv_i.get("limiares_mm") or {}})
+    if not amostras:
+        raise RuntimeError("nenhuma amostra com posicao nos arquivos lidos")
+
+    ok = [o for o in origens if o["ok"]]
+    moveis = sorted({o.get("movel") for o in ok if o.get("movel")})
+    ts_v = [a["ts"] for a in amostras if a.get("ts")]
+    sv = {
+        "nome": nome or (f"MeshMapper — {moveis[0]}" if len(moveis) == 1
+                         else f"MeshMapper — {len(moveis)} equipamentos"),
+        "movel": ", ".join(moveis) or "movel",
+        "inicio": min(ts_v) if ts_v else None,
+        "fim": max(ts_v) if ts_v else None,
+        "intervalo_s": None,
+        "arquivo": f"{len(ok)} arquivo(s)",
+        "versao_bcc": next((o.get("versao_bcc") for o in ok
+                            if o.get("versao_bcc")), None),
+        # A regua e a mesma em todos os arquivos do mesmo MeshMapper;
+        # havendo divergencia, a do primeiro vale e a diferenca aparece
+        # na aba de origens em vez de sumir numa media.
+        "limiares_mm": next((o.get("limiares_mm") for o in ok
+                             if o.get("limiares_mm")), {}),
+        "origens": origens,
+    }
+
+    fechar = con is None
+    con = con or banco()
+    try:
+        radios = sorted({a["radio"] for a in amostras})
+        sid = survey_criar(con, sv["nome"], sv["inicio"], None, radios)
+        amostras_gravar(con, sid, amostras)
+        survey_fechar(con, sid, sv["fim"], survey_resumo(amostras),
+                      n_moveis=len(radios), n_fixos=0,
+                      intervalo_efetivo_s=_mm_intervalo_real(amostras))
+        log.info(f"[meshmapper] survey {sid}: {len(ok)}/{len(origens)} "
+                 f"arquivo(s), {len(amostras)} amostras, {len(radios)} movel(is)")
+        return sid, sv, amostras, peers, origens
+    finally:
+        if fechar: con.close()
+
+
 def _mm_intervalo_real(amostras):
     """Mediana do intervalo entre pontos. O MeshMapper declara o pedido
     em `interval`; o que descreve a resolucao e o que aconteceu."""
@@ -7085,6 +7158,27 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
         return (datetime.utcfromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S")
                 if ts else "")
 
+    # ── 0. Origens (so quando veio de mais de um arquivo) ──
+    origens = sv.get("origens") or []
+    if origens:
+        ws = wb.create_sheet("Origens")
+        _cab(ws, "Arquivos lidos",
+             "Inclusive os que falharam — relatório que engole arquivo "
+             "ilegível em silêncio é pior que relatório que falta", 7)
+        lin = 4
+        _th(ws, lin, ["Arquivo", "Situação", "Móvel", "Amostras",
+                      "Vizinhos", "Início (UTC)", "Fim (UTC)"],
+            [42, 12, 20, 11, 11, 20, 20])
+        lin += 1
+        for o in origens:
+            lin = _td(ws, lin, [
+                o.get("arquivo"),
+                "ok" if o.get("ok") else "FALHOU",
+                o.get("movel") or (o.get("erro") or "")[:40],
+                o.get("amostras"), o.get("peers"),
+                dt(o.get("inicio")), dt(o.get("fim"))],
+                zebra=(lin % 2 == 0))
+
     # ── 1. Resumo ──
     ws = wb.create_sheet("Resumo")
     _cab(ws, f"Site Survey — {movel}",
@@ -7100,6 +7194,9 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
         ("Arquivo", sv.get("arquivo") or ""),
         ("Versão do BC Commander", sv.get("versao_bcc") or "n/d"),
         ("Duração (min)", round(dur, 1) if dur else "n/d"),
+        ("Arquivos lidos", f"{sum(1 for o in (sv.get('origens') or []) if o.get('ok'))}"
+                           f" de {len(sv.get('origens') or [])}"
+                           if sv.get("origens") else "1"),
         ("Amostras", len(amostras)),
         ("Intervalo pedido (s)", sv.get("intervalo_s") or "n/d"),
         ("Intervalo real (s)", _mm_intervalo_real(amostras) or "n/d"),

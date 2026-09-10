@@ -5,6 +5,9 @@
 #
 # Diferenças em relação ao spec do rajant_monitor, e o motivo de cada uma:
 #
+#  * console=True mesmo tendo janela: sem argumento abre a interface, e
+#    com argumento funciona pela linha de comando. Com console=False, a
+#    saida da linha de comando some — e o erro tambem.
 #  * SEM rajant_api nos hiddenimports. Este executável não fala com rádio
 #    nenhum: entra arquivo, sai KMZ/PPT/Excel. Embutir a biblioteca traria
 #    junto a exigência de protobuf 4.23.4 e o shim de ssl.wrap_socket,
@@ -40,7 +43,11 @@ a = Analysis(
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6",
+    # tkinter NAO entra nos excludes aqui: e a interface do programa.
+    # Herdar o exclude do spec do rajant_monitor (que nao tem janela)
+    # geraria um .exe que abre e fecha na hora, com o erro so no console
+    # que ninguem ve.
+    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6",
               "IPython", "jupyter", "notebook", "pytest", "sphinx",
               # Não fala com rádio: a lib e o gRPC que ela declara não
               # têm por que entrar.
