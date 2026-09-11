@@ -4445,5 +4445,325 @@ class TestSlidesTecnicosNoSemanal(unittest.TestCase):
                         f"ancora so em slide de survey: {chamada}")
 
 
+class TestZeroDeVizinhoNaoEMedicao(unittest.TestCase):
+    """O MeshMapper usa 0 para "conheco este vizinho mas ainda nao medi".
+
+    A limpeza existia para o enlace servidor e NAO para a lista de
+    vizinhos. Medido no arquivo real do CA-1006: o ERB-11 L2 aparecia com
+    0 dBm em tres leituras, ganhava a eleicao de `cobertura_disponivel`
+    (que escolhe por `max(sinal)`) e pintava tres pontos do trajeto de
+    verde maximo, com "87 dB disponiveis e nao usados" no laudo.
+    """
+
+    def _json(self, sinal_viz, snr_viz=0):
+        return {"bcc_version": "11.29.1",
+                "configuration": {"interval": 1,
+                                  "crumbMeta": {"name": "CA-1", "serialStr": "S1"}},
+                "points": [{"unixTimeStamp": 1789148756000,
+                            "gpsLat": -18.92, "gpsLong": -43.42, "gpsAlt": 800.0,
+                            "numActivePeers": 2,
+                            "traceInfo": {"path": {"name": "ERB-01", "signal": -88,
+                                                   "rssi": 20, "cost": 5000,
+                                                   "frequency": 5785, "channel": 157}},
+                            "wlanPeers": {"wlan0": [
+                                {"name": "ERB-11 L2", "signal": sinal_viz,
+                                 "rssi": snr_viz, "cost": 4000,
+                                 "frequency": 5785, "channel": 157,
+                                 "ipaddr": "10.0.0.1", "mac": "aa:bb",
+                                 "serialNumber": "S9"}]}}]}
+
+    def test_vizinho_com_zero_vira_ausencia_e_nao_sinal_perfeito(self):
+        sv, am, pr = rm._mm_do_json(self._json(0), "t")
+        self.assertIsNone(pr[0]["sinal"])
+        self.assertIsNone(pr[0]["snr"])
+        self.assertIsNone(pr[0]["ruido"])
+
+    def test_zero_nao_ganha_a_eleicao_da_cobertura(self):
+        sv, am, pr = rm._mm_do_json(self._json(0), "t")
+        rm.cobertura_disponivel(am, pr)
+        # Sem vizinho medido, nao ha cobertura a declarar — e nunca 0 dBm.
+        self.assertIsNone(am[0].get("sinal_cob"))
+        self.assertIsNone(am[0].get("delta_cob"))
+
+    def test_vizinho_medido_de_verdade_continua_passando(self):
+        sv, am, pr = rm._mm_do_json(self._json(-66, 30), "t")
+        self.assertEqual(pr[0]["sinal"], -66)
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -66)
+        self.assertAlmostEqual(am[0]["delta_cob"], 22.0, places=1)
+
+    def test_custo_int_max_do_vizinho_tambem_e_ausencia(self):
+        d = self._json(-66, 30)
+        d["points"][0]["wlanPeers"]["wlan0"][0]["cost"] = rm.CUSTO_SEM_ROTA
+        sv, am, pr = rm._mm_do_json(d, "t")
+        self.assertIsNone(pr[0]["custo"])
+
+    def test_peer_sabe_quem_o_capturou(self):
+        # Sem isso, juntar duas capturas daria a cada radio a vizinhanca
+        # da outra: os numeros de ponto se repetem entre arquivos.
+        sv, am, pr = rm._mm_do_json(self._json(-66, 30), "t")
+        self.assertEqual(pr[0]["movel"], "CA-1")
+
+
+class TestCapturaParada(unittest.TestCase):
+    """Captura feita de um ponto fixo nao e trajeto.
+
+    O MeshMapper ligado numa repetidora produz um arquivo com a MESMA
+    estrutura do de um veiculo. A diferenca e o significado: 115 leituras
+    empilhadas dentro de 0,5 m sao uma janela de TEMPO num lugar, nao um
+    percurso. Rastro de calor disso sai como uma mancha de um pixel
+    pintada com a escala de area — parece mapa e nao e.
+    """
+
+    def _am(self, n, passo_graus):
+        return [{"radio": "R", "ts": 1789148756.0 + i, "sinal": -70.0,
+                 "snr": 25.0, "banda": "5.8 GHz",
+                 "lat": -18.894 + i * passo_graus, "lon": -43.4309}
+                for i in range(n)]
+
+    def test_radio_imovel_e_reconhecido_como_parado(self):
+        # ~0,5 m de oscilacao de GPS, que foi o medido na ERM-12 real.
+        am = self._am(115, 0.000002)
+        self.assertTrue(rm.captura_parada(am))
+        self.assertLess(rm.extensao_da_captura(am)["raio_m"], rm.RAIO_PARADO_M)
+
+    def test_veiculo_andando_nao_e_parado(self):
+        am = self._am(55, 0.00005)          # ~300 m de trajeto
+        self.assertFalse(rm.captura_parada(am))
+
+    def test_raio_e_a_maior_distancia_e_nao_o_desvio(self):
+        # Ida e volta tem desvio pequeno e mesmo assim cobriu distancia.
+        am = self._am(20, 0.0001) + self._am(20, 0.0001)[::-1]
+        self.assertGreater(rm.extensao_da_captura(am)["raio_m"], 50)
+
+    def test_sem_posicao_nao_inventa_extensao(self):
+        self.assertIsNone(rm.extensao_da_captura(
+            [{"radio": "R", "lat": None, "lon": None}]))
+        self.assertFalse(rm.captura_parada([]))
+
+    def test_nada_em_deslocamento_nao_gera_rastro_de_calor(self):
+        # A regressao concreta: `moveis or amostras_aba` fazia a captura
+        # parada cair de volta no conjunto inteiro e pintar tudo.
+        import inspect
+        fonte = inspect.getsource(rm.gerar_kml_survey)
+        i = fonte.index("if not andou:")
+        self.assertIn("return \"\"", fonte[i:i + 700],
+                      "captura parada voltou a virar mancha de um pixel")
+
+
+class TestCensoDeVizinhos(unittest.TestCase):
+    """O produto de uma captura parada: quem fala com aquele radio."""
+
+    def _peers(self):
+        # CA-9 e forte porem passageiro; ERB-1 e fraco porem permanente.
+        p = []
+        for ponto in range(1, 11):
+            p.append({"movel": "ERM-12", "ponto": ponto, "ts": 100.0 + ponto,
+                      "nome": "ERB-1", "sinal": -93.0, "snr": 16.0,
+                      "custo": 5000.0, "banda": "5.8 GHz", "canal": 157,
+                      "wlan": "wlan0", "ip": "10.0.0.1", "mac": "a", "serie": "S1"})
+            if ponto <= 3:
+                p.append({"movel": "ERM-12", "ponto": ponto, "ts": 100.0 + ponto,
+                          "nome": "CA-9", "sinal": -58.0, "snr": 38.0,
+                          "custo": 6000.0, "banda": "2.4 GHz", "canal": 6,
+                          "wlan": "wlan2", "ip": "10.0.0.2", "mac": "b", "serie": "S2"})
+        return p
+
+    def test_uma_linha_por_vizinho_e_nao_por_leitura(self):
+        c = rm.censo_vizinhos(self._peers(), 10)
+        self.assertEqual(len(c), 2)
+        self.assertEqual({x["nome"] for x in c}, {"ERB-1", "CA-9"})
+
+    def test_presenca_separa_o_permanente_do_passageiro(self):
+        c = {x["nome"]: x for x in rm.censo_vizinhos(self._peers(), 10)}
+        # A mediana sozinha diria que o CA-9 e o melhor vizinho. A
+        # presenca mostra que ele esteve em 30% dos pontos e foi embora.
+        self.assertEqual(c["CA-9"]["presenca"], 30.0)
+        self.assertEqual(c["ERB-1"]["presenca"], 100.0)
+
+    def test_ordena_do_sinal_mais_forte_para_o_mais_fraco(self):
+        c = rm.censo_vizinhos(self._peers(), 10)
+        self.assertEqual(c[0]["nome"], "CA-9")
+
+    def test_infra_e_marcada_pelo_padrao(self):
+        c = {x["nome"]: x for x in rm.censo_vizinhos(self._peers(), 10)}
+        self.assertTrue(c["ERB-1"]["infra"])
+        self.assertFalse(c["CA-9"]["infra"])
+
+    def test_vizinho_sem_leitura_valida_nao_recebe_percentual(self):
+        # 0% se leria como "medi e reprovou", que e o oposto de "nao medi".
+        c = rm.censo_vizinhos([{"movel": "E", "ponto": 1, "nome": "X",
+                                "sinal": None, "snr": None, "custo": None}], 1)
+        self.assertIsNone(c[0]["sinal"])
+        self.assertIsNone(c[0]["pct_ok"])
+
+    def test_sem_leitura_vai_para_o_fim_da_lista(self):
+        pr = self._peers() + [{"movel": "ERM-12", "ponto": 1, "nome": "Z",
+                               "sinal": None, "snr": None, "custo": None}]
+        self.assertEqual(rm.censo_vizinhos(pr, 10)[-1]["nome"], "Z")
+
+    def test_resumo_conta_infra_moveis_e_quem_passa_do_requisito(self):
+        r = rm.resumo_do_censo(rm.censo_vizinhos(self._peers(), 10))
+        self.assertEqual(r["vizinhos"], 2)
+        self.assertEqual(r["infra"], 1)
+        self.assertEqual(r["moveis"], 1)
+        self.assertEqual(r["acima_req"], 1)      # so o CA-9, a -58 dBm
+        self.assertEqual(r["constantes"], 1)     # so o ERB-1, em 100%
+
+    def test_sitio_so_leva_os_peers_da_propria_captura(self):
+        # Juntar duas capturas dava a cada radio a vizinhanca da outra.
+        am = [{"radio": "ERM-12", "ts": 1.0 + i, "lat": -18.894, "lon": -43.43}
+              for i in range(10)]
+        pr = self._peers() + [{"movel": "OUTRO", "ponto": 1, "nome": "INTRUSO",
+                               "sinal": -50.0, "snr": 40.0, "custo": 1.0}]
+        s = rm.sitios_parados(am, pr)
+        self.assertEqual(len(s), 1)
+        self.assertNotIn("INTRUSO", {c["nome"] for c in s[0]["censo"]})
+
+
+class TestKmlDePontosFixos(unittest.TestCase):
+    """O mapa so desenha o que tem posicao medida.
+
+    Um BreadCrumb NAO reporta onde estao os vizinhos dele — conferido nos
+    arquivos reais do CA-1006 e da ERM-12: os campos de um peer sao
+    channel, cost, encap, filtered, frequency, ipaddr, mac, name, rssi,
+    serialNumber e signal. Desenhar o vizinho num lugar qualquer seria
+    inventar geometria que ninguem mediu.
+    """
+
+    def _sitio(self, nome, lat, lon, viz):
+        censo = [{"nome": n, "infra": True, "sinal": s, "snr": 20.0,
+                  "presenca": 100.0, "bandas": ["5.8 GHz"], "canais": [157],
+                  "interfaces": ["wlan0"], "ip": None, "mac": None,
+                  "serie": None, "leituras": 1, "pontos": 1, "n_sinal": 1,
+                  "sinal_p10": s, "sinal_p90": s, "sinal_min": s,
+                  "sinal_max": s, "custo": 1.0, "pct_ok": 100.0,
+                  "inicio": 1.0, "fim": 2.0} for n, s in viz]
+        return {"nome": nome, "lat": lat, "lon": lon, "raio_m": 0.5,
+                "pontos": 100, "censo": censo,
+                "resumo": rm.resumo_do_censo(censo),
+                "inicio": 1789148756.0, "fim": 1789148870.0}
+
+    def _kml(self, sitios):
+        import zipfile, io
+        dados, nome = rm.gerar_kml_pontos_fixos(sitios)
+        return zipfile.ZipFile(io.BytesIO(dados)).read("doc.kml").decode()
+
+    def test_o_kml_e_xml_valido(self):
+        # `&harr;` derrubava o documento inteiro: KML e XML, e XML so
+        # conhece as cinco entidades predefinidas. Fora de CDATA nao vale.
+        from xml.dom.minidom import parseString
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)]),
+                         self._sitio("B", -18.90, -43.44, [("A", -84.0)])])
+        parseString(kml)
+
+    def test_vizinho_sem_captura_propria_nao_vira_ponto(self):
+        kml = self._kml([self._sitio("A", -18.89, -43.43,
+                                     [("SEM-POSICAO", -60.0)])])
+        self.assertNotIn("<name>SEM-POSICAO</name>", kml)
+        self.assertIn("nao no mapa", kml)      # declarado, nao escondido
+
+    def test_enlace_entre_dois_capturados_e_desenhado(self):
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)]),
+                         self._sitio("B", -18.90, -43.44, [("A", -70.0)])])
+        self.assertIn("<LineString>", kml)
+        self.assertIn("A ↔ B", kml)
+
+    def test_enlace_assimetrico_fica_com_a_PIOR_das_duas_pontas(self):
+        # E a ponta ruim que limita o enlace e decide se falta radio.
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)]),
+                         self._sitio("B", -18.90, -43.44, [("A", -84.0)])])
+        self.assertIn("RSSI -84 dBm", kml)
+        self.assertNotIn("RSSI -70 dBm", kml)
+
+    def test_um_sitio_so_nao_inventa_enlace(self):
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)])])
+        self.assertNotIn("<LineString>", kml)
+
+    def test_sem_posicao_nenhuma_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            rm.gerar_kml_pontos_fixos([])
+
+
+class TestSaidasDaCapturaParada(unittest.TestCase):
+    """Ponta a ponta: o que sai quando o arquivo e de uma repetidora."""
+
+    def _kmz(self, destino, parado=True):
+        """Escreve um .kmz do MeshMapper de mentira e devolve o caminho."""
+        import json as _json, zipfile
+        passo = 0.000002 if parado else 0.00005
+        pontos = []
+        for i in range(12):
+            pontos.append({
+                "unixTimeStamp": 1789148756000 + i * 1000,
+                "gpsLat": -18.894 + i * passo, "gpsLong": -43.4309,
+                "gpsAlt": 890.0, "numActivePeers": 2,
+                "traceInfo": {"path": {"name": "ERB-01", "signal": -80,
+                                       "rssi": 22, "cost": 5000,
+                                       "frequency": 5785, "channel": 157}},
+                "wlanPeers": {"wlan0": [
+                    {"name": "ERB-07", "signal": -70, "rssi": 30,
+                     "cost": 4000, "frequency": 5785, "channel": 157,
+                     "ipaddr": "10.0.0.7", "mac": "a", "serialNumber": "S7"},
+                    {"name": "CA-1010", "signal": -67, "rssi": 29,
+                     "cost": 8000, "frequency": 2437, "channel": 6,
+                     "ipaddr": "10.0.0.8", "mac": "b", "serialNumber": "S8"}]}})
+        d = {"bcc_version": "11.29.1",
+             "configuration": {"interval": 1,
+                               "crumbMeta": {"name": "ERM-12", "serialStr": "S0"}},
+             "points": pontos}
+        alvo = destino / ("parado.kmz" if parado else "andando.kmz")
+        with zipfile.ZipFile(alvo, "w") as z:
+            z.writestr("data.json", _json.dumps(d))
+        return str(alvo)
+
+    def test_repetidora_gera_vizinhanca_e_nao_rastro(self):
+        import tempfile, shutil, sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            arq = self._kmz(tmp, parado=True)
+            feitos = sm.gerar([arq], str(tmp / "out"), aviso=lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertTrue(any(n.startswith("Vizinhanca_") for n in nomes),
+                            f"sem KMZ de vizinhanca: {nomes}")
+            self.assertFalse(any(n.startswith("Survey_2") and n.endswith(".kmz")
+                                 for n in nomes),
+                             f"captura parada gerou rastro de calor: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_veiculo_continua_gerando_o_rastro(self):
+        import tempfile, shutil, sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            arq = self._kmz(tmp, parado=False)
+            feitos = sm.gerar([arq], str(tmp / "out"), aviso=lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertTrue(any(n.endswith(".kmz") and "Vizinhanca" not in n
+                                for n in nomes), f"sem rastro: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_planilha_declara_que_a_captura_foi_parada(self):
+        import tempfile, shutil, io as _io
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            sv, am, pr = rm.ler_meshmapper(self._kmz(tmp, parado=True))
+            sv["cobertura"] = rm.cobertura_disponivel(am, pr)
+            dados, _ = rm.excel_do_meshmapper(sv, am, pr)
+            wb = load_workbook(_io.BytesIO(dados))
+            self.assertIn("Censo de Vizinhos", wb.sheetnames)
+            texto = " ".join(str(c.value) for c in
+                             wb["Resumo"]["B"][:20] if c.value)
+            self.assertIn("PARADA", texto)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

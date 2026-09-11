@@ -6281,8 +6281,18 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 d = max(_dist_m(ps[0]["lat"], ps[0]["lon"], q["lat"], q["lon"])
                         for q in ps)
                 if d > 30.0: andou.add(r)
-            if andou:
-                moveis = [a for a in amostras_aba if a.get("radio") in andou]
+            if not andou:
+                # NINGUEM andou — captura feita parada, tipicamente do
+                # MeshMapper ligado numa repetidora. Antes caia no `or`
+                # abaixo e pintava tudo: 115 leituras empilhadas em 0,5 m
+                # viravam uma mancha de um pixel com a escala de AREA. E
+                # a leitura errada mais cara que existe, porque parece um
+                # mapa. Sem rastro, o laudo da captura parada e o censo de
+                # vizinhos (ver `censo_vizinhos`) e o KMZ de pontos fixos.
+                log.info("[kml] nenhuma amostra em deslocamento: "
+                         "sem rastro de calor nesta aba")
+                return ""
+            moveis = [a for a in amostras_aba if a.get("radio") in andou]
         amostras_aba = moveis or amostras_aba
         pts = [(a["lat"], a["lon"]) for a in amostras_aba
                if a.get("lat") is not None and a.get("lon") is not None
@@ -6585,6 +6595,172 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 z.writestr(nome_i, dados_i)
         log.info(f"[kml] {base}.kmz: {len(campos)} aba(s), "
                  f"{len(am)} amostras, {len(posicoes)} BCs")
+        return buf.getvalue(), f"{base}.kmz"
+    return doc.encode("utf-8"), f"{base}.kml"
+
+
+def gerar_kml_pontos_fixos(sitios, cfg=None, comprimir=True):
+    """KMZ de capturas feitas PARADAS — uma ou varias repetidoras.
+
+    `sitios`: [{nome, lat, lon, alt, censo, resumo, inicio, fim, pontos}].
+
+    Desenha o que tem posicao de verdade e so isso:
+
+      • um pino por radio capturado, na coordenada que ele proprio
+        reportou, com o censo da vizinhanca no balao;
+      • uma linha por enlace entre DOIS radios cujas posicoes vieram de
+        capturas — colorida pelo RSSI do enlace.
+
+    O vizinho que nao tem captura propria NAO vira ponto no mapa. Ele
+    aparece no balao e na planilha, como texto. Um BreadCrumb nao reporta
+    a posicao dos vizinhos (conferido nos arquivos reais: os campos sao
+    channel, cost, encap, filtered, frequency, ipaddr, mac, name, rssi,
+    serialNumber, signal), e desenhar um vizinho num lugar arbitrario —
+    ao redor da repetidora, ou no proprio pino dela — seria inventar
+    geometria que ninguem mediu. O mapa mostra o que existe; o que falta
+    fica declarado.
+
+    Devolve (bytes, nome_arquivo).
+    """
+    import zipfile, io as _io
+
+    sitios = [s for s in (sitios or [])
+              if s.get("lat") is not None and s.get("lon") is not None]
+    if not sitios:
+        raise RuntimeError("nenhuma captura parada com posicao")
+
+    faixas = FAIXAS_KML["sinal"]
+    req = float(ESCALAS["sinal"]["req"])
+    estilos = []
+    for cor in sorted({c for _, c in faixas} | {"808080"}):
+        estilos.append(
+            f'<Style id="e{cor}"><LineStyle><color>{_kml_cor(cor, 235)}</color>'
+            f'<width>5</width></LineStyle></Style>')
+    estilos.append(
+        '<Style id="sitio"><IconStyle><scale>1.3</scale>'
+        f'<color>{_kml_cor("F1C40F")}</color><Icon><href>http://maps.google.com/'
+        'mapfiles/kml/shapes/target.png</href></Icon></IconStyle>'
+        '<LabelStyle><scale>0.95</scale></LabelStyle></Style>')
+
+    # Posicao por nome: so de quem foi capturado. E esta a chave do
+    # cruzamento — e o motivo de duas capturas valerem muito mais que
+    # duas vezes uma.
+    pos = {s["nome"]: (s["lat"], s["lon"]) for s in sitios}
+
+    pins, linhas = [], {}
+    for s in sitios:
+        censo = s.get("censo") or []
+        r = s.get("resumo") or {}
+        com = [c for c in censo if c["sinal"] is not None]
+        tab = "".join(
+            f"<tr><td>{_esc(c['nome'])}</td>"
+            f"<td align='right'>{c['sinal']:g}</td>"
+            f"<td align='right'>{'' if c['snr'] is None else format(c['snr'], 'g')}</td>"
+            f"<td align='right'>{'' if c['presenca'] is None else format(c['presenca'], 'g')}%</td>"
+            f"<td>{_esc(', '.join(c['bandas']))}</td></tr>"
+            for c in com[:60])
+        dur = ((s.get("fim") or 0) - (s.get("inicio") or 0)) / 60.0
+        bal = ("<![CDATA["
+               f"<h3>{_esc(s['nome'])}</h3>"
+               f"<p>{s.get('pontos', 0)} leituras em {dur:.1f} min &middot; "
+               f"{r.get('vizinhos', len(censo))} vizinhos "
+               f"({r.get('infra', 0)} de infraestrutura, "
+               f"{r.get('moveis', 0)} moveis)<br>"
+               f"{r.get('acima_req', 0)} acima de {req:g} dBm, "
+               f"{r.get('abaixo_req', 0)} abaixo</p>"
+               "<table border='1' cellpadding='3' cellspacing='0'>"
+               "<tr><th>Vizinho</th><th>RSSI</th><th>SNR</th>"
+               "<th>Presenca</th><th>Banda</th></tr>"
+               f"{tab}</table>"
+               + (f"<p><small>{len(com) - 60} vizinho(s) a mais na "
+                  f"planilha.</small></p>" if len(com) > 60 else "")
+               + "]]>")
+        pins.append(
+            f"<Placemark><name>{_esc(s['nome'])}</name>"
+            f"<description>{bal}</description><styleUrl>#sitio</styleUrl>"
+            f"<Point><altitudeMode>clampToGround</altitudeMode>"
+            f"<coordinates>{s['lon']:.7f},{s['lat']:.7f},0</coordinates>"
+            f"</Point></Placemark>")
+
+        for c in censo:
+            outro = c["nome"]
+            if outro not in pos or outro == s["nome"]:
+                continue
+            # O enlace A-B aparece nas duas capturas, com leituras
+            # proprias de cada ponta. Desenhar as duas empilharia linha
+            # sobre linha; fica a PIOR das duas, que e a que limita o
+            # enlace — e a que decide se precisa de mais radio ali.
+            par = tuple(sorted((s["nome"], outro)))
+            v = c["sinal"]
+            ant = linhas.get(par)
+            if ant is None or (v is not None and
+                               (ant[0] is None or v < ant[0])):
+                linhas[par] = (v, c)
+
+    itens_l = []
+    for par, (v, c) in sorted(linhas.items()):
+        (la1, lo1), (la2, lo2) = pos[par[0]], pos[par[1]]
+        cor = _bucket_cor(v, faixas)
+        d = _dist_m(la1, lo1, la2, lo2)
+        txt_rssi = "sem leitura" if v is None else f"{v:g} dBm"
+        txt_snr = "—" if c.get("snr") is None else f"{c['snr']:g} dB"
+        itens_l.append(
+            # Caractere literal, nao "&harr;": KML e XML, e XML so conhece
+            # as cinco entidades predefinidas. `&harr;` derruba o
+            # documento inteiro com "undefined entity" — e o Google Earth
+            # nao abre nada. Dentro de CDATA (os baloes) entidade HTML
+            # passa, porque ali nao ha parsing.
+            f"<Placemark><name>{_esc(par[0])} ↔ {_esc(par[1])}</name>"
+            f"<description><![CDATA[RSSI {txt_rssi} &middot; SNR {txt_snr}"
+            f" &middot; {_milhar(round(d))} m]]></description>"
+            f"<styleUrl>#e{cor}</styleUrl>"
+            f"<LineString><tessellate>1</tessellate>"
+            f"<altitudeMode>clampToGround</altitudeMode>"
+            f"<coordinates>{lo1:.7f},{la1:.7f},0 {lo2:.7f},{la2:.7f},0"
+            f"</coordinates></LineString></Placemark>")
+
+    pastas = [f"<Folder><name>Radios capturados ({len(pins)})</name>"
+              f"<open>1</open>{''.join(pins)}</Folder>"]
+    if itens_l:
+        pastas.append(f"<Folder><name>Enlaces medidos ({len(itens_l)})</name>"
+                      f"<open>1</open>{''.join(itens_l)}</Folder>")
+
+    legenda = "".join(
+        f"<tr><td bgcolor='#{cor}' width='26'>&nbsp;</td>"
+        f"<td>&lt; {lim:g} dBm</td></tr>"
+        for lim, cor in faixas if lim < 900)
+    sem_pos = sorted({c["nome"] for s in sitios for c in (s.get("censo") or [])
+                      if c["nome"] not in pos})
+    desc = ("<![CDATA["
+            f"<p><b>{len(pins)}</b> radio(s) capturado(s) parado(s), "
+            f"<b>{len(itens_l)}</b> enlace(s) desenhado(s).</p>"
+            f"<h4>Cor do enlace — RSSI</h4>"
+            f"<table border='0' cellpadding='2'>{legenda}</table>"
+            f"<p>Requisito Modular: RSSI &gt; {req:g} dBm</p>"
+            + (f"<p><b>{len(sem_pos)}</b> vizinho(s) aparecem no censo mas "
+               f"nao no mapa: so ha posicao de quem tem captura propria. "
+               f"O BreadCrumb nao informa onde estao os vizinhos dele.</p>"
+               if sem_pos else "")
+            + f"<p><small>Gerado por rajant_monitor em "
+              f"{datetime.now():%d/%m/%Y %H:%M}</small></p>]]>")
+
+    quando = (datetime.fromtimestamp(sitios[0]["inicio"])
+              if sitios[0].get("inicio") else datetime.now())
+    doc = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+           f'<name>Vizinhanca medida — {quando:%d/%m/%Y}</name>'
+           f'<description>{desc}</description>'
+           f'{"".join(estilos)}{"".join(pastas)}</Document></kml>')
+
+    base = (f"Vizinhanca_{_slug_arquivo(sitios[0]['nome'])}_{quando:%Y%m%d_%H%M}"
+            if len(sitios) == 1
+            else f"Vizinhanca_{len(sitios)}_radios_{quando:%Y%m%d_%H%M}")
+    log.info(f"[kml] {base}: {len(pins)} radio(s), {len(itens_l)} enlace(s), "
+             f"{len(sem_pos)} vizinho(s) sem posicao")
+    if comprimir:
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("doc.kml", doc)
         return buf.getvalue(), f"{base}.kmz"
     return doc.encode("utf-8"), f"{base}.kml"
 
@@ -6894,16 +7070,34 @@ def _mm_num(v):
     return f
 
 
-def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
-    """Uma amostra no formato interno, a partir do enlace servidor."""
-    sig = _mm_num(path.get("signal"))
-    snr = _mm_num(path.get("rssi"))          # sim: 'rssi' do arquivo é SNR
-    custo = _mm_num(path.get("cost"))
-    if custo is not None and custo >= CUSTO_SEM_ROTA:
-        custo = None                          # INT_MAX = sem rota
-    # Sinal 0 é placeholder de "sem enlace", não medição de 0 dBm.
+def _mm_enlace(sig, snr, custo):
+    """Limpa um trio (sinal, SNR, custo) vindo do MeshMapper.
+
+    O arquivo usa 0 como "ainda nao medi este enlace", e 0 dBm nao existe
+    num radio de malha — seria uma potencia recebida igual a 1 mW, colada
+    na antena. Deixar passar nao e detalhe: `cobertura_disponivel()`
+    escolhe o vizinho por `max(sinal)`, e o 0 ganha de todos. Medido no
+    arquivo real do CA-1006: tres pontos do trajeto saiam pintados de
+    verde maximo com "87 dB disponiveis e nao usados", em cima de um 0 do
+    ERB-11 L2. Numero inventado entrando no laudo como prova.
+
+    Vale para o enlace servidor E para cada vizinho da lista — o furo
+    estava justamente na lista, que nao passava por aqui.
+    """
     if sig == 0: sig = None
     if snr == 0 and sig is None: snr = None
+    if custo is not None and custo >= CUSTO_SEM_ROTA:
+        custo = None                          # INT_MAX = sem rota
+    ruido = (sig - snr) if (sig is not None and snr is not None) else None
+    return sig, snr, custo, ruido
+
+
+def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
+    """Uma amostra no formato interno, a partir do enlace servidor."""
+    sig, snr, custo, ruido = _mm_enlace(
+        _mm_num(path.get("signal")),
+        _mm_num(path.get("rssi")),            # sim: 'rssi' do arquivo é SNR
+        _mm_num(path.get("cost")))
     freq = _mm_num(path.get("freq")) or _mm_num(path.get("frequency"))
     return {
         "radio": nome_movel,
@@ -6913,7 +7107,7 @@ def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
         "sinal": sig,
         "snr": snr,
         # Recuperado, não estimado — ver o cabeçalho da seção.
-        "ruido": (sig - snr) if (sig is not None and snr is not None) else None,
+        "ruido": ruido,
         "rtt": None, "perda": None, "interf": None, "vazao": None,
         "custo": custo,
         "taxa": _mm_num(path.get("rate")),    # MCS em Mbps, apesar do rótulo
@@ -6974,17 +7168,24 @@ def _mm_do_json(d, rotulo):
                                     path, pt.get("numActivePeers")))
         for wlan, lista in (pt.get("wlanPeers") or {}).items():
             for q in (lista or []):
-                sig, snr = _mm_num(q.get("signal")), _mm_num(q.get("rssi"))
+                sig, snr, custo, ruido = _mm_enlace(
+                    _mm_num(q.get("signal")), _mm_num(q.get("rssi")),
+                    _mm_num(q.get("cost")))
                 freq = _mm_num(q.get("frequency"))
                 peers.append({
+                    # `movel` e QUEM CAPTUROU, nao o vizinho. Sem ele, ao
+                    # juntar varios arquivos nao da para saber de qual
+                    # captura veio a leitura: os numeros de ponto se
+                    # repetem entre arquivos.
+                    "movel": movel,
                     "ponto": i, "ts": ts, "lat": lat, "lon": lon,
                     "nome": (q.get("name") or "").strip() or q.get("serialNumber"),
-                    "ip": q.get("ipaddr"), "mac": q.get("mac"), "wlan": wlan,
+                    "ip": q.get("ipaddr"), "mac": q.get("mac"),
+                    "serie": q.get("serialNumber"), "wlan": wlan,
                     "banda": _norm_banda(freq) if freq else None,
                     "canal": _mm_num(q.get("channel")),
-                    "sinal": sig, "snr": snr,
-                    "ruido": (sig - snr) if (sig is not None and snr is not None) else None,
-                    "custo": _mm_num(q.get("cost")),
+                    "freq": freq,
+                    "sinal": sig, "snr": snr, "ruido": ruido, "custo": custo,
                 })
 
     ts_v = [a["ts"] for a in amostras if a["ts"]]
@@ -7041,20 +7242,22 @@ def _mm_dos_csv(p):
     peers = []
     if pinfo.exists():
         for r in _csv.DictReader(open(pinfo, encoding="utf-8", errors="replace")):
-            sig, snr = _mm_num(r.get("Signal")), _mm_num(r.get("RSSI (SNR)"))
+            sig, snr, custo, ruido = _mm_enlace(
+                _mm_num(r.get("Signal")), _mm_num(r.get("RSSI (SNR)")),
+                _mm_num(r.get("Cost")))
             freq = _mm_num(r.get("Frequency"))
             peers.append({
+                "movel": movel,          # quem capturou — ver _mm_do_json
                 "ponto": int(_mm_num(r.get("Point Num")) or 0),
                 "ts": _mm_ts(r.get("Timestamp")),
                 "lat": _mm_num(r.get("Latitude")), "lon": _mm_num(r.get("Longitude")),
                 "nome": (r.get("Name") or "").strip() or r.get("Serial"),
                 "ip": r.get("IP"), "mac": r.get("MAC Address"),
-                "wlan": r.get("Wlan"),
+                "serie": r.get("Serial"), "wlan": r.get("Wlan"),
                 "banda": _norm_banda(freq) if freq else None,
                 "canal": _mm_num(r.get("Channel")),
-                "sinal": sig, "snr": snr,
-                "ruido": (sig - snr) if (sig is not None and snr is not None) else None,
-                "custo": _mm_num(r.get("Cost")),
+                "freq": freq,
+                "sinal": sig, "snr": snr, "ruido": ruido, "custo": custo,
             })
 
     ts_v = [a["ts"] for a in amostras if a["ts"]]
@@ -7242,8 +7445,20 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     dur = ((sv["fim"] - sv["inicio"]) / 60.0) if sv.get("fim") and sv.get("inicio") else None
     campos = campos_com_medicao(amostras)
     faltam = [c for c in CAMPOS_KMZ if c not in campos]
+    ext = extensao_da_captura(amostras)
+    parada = bool(ext) and ext["raio_m"] <= RAIO_PARADO_M
     itens = [
         ("Equipamento móvel", movel),
+        # Parado x andando muda o que a captura significa, e por isso
+        # abre o resumo: as mesmas 115 linhas sao um trajeto ou sao uma
+        # janela de tempo num lugar so, e nao da para ler o resto sem
+        # saber qual das duas.
+        ("Tipo de captura",
+         (f"PARADA — tudo dentro de {ext['raio_m']:g} m. Vale como laudo "
+          f"do rádio, não como mapa de área"
+          if parada else
+          f"em movimento — trajeto de até {ext['raio_m']:g} m do centro")
+         if ext else "sem posição"),
         ("Arquivo", sv.get("arquivo") or ""),
         ("Versão do BC Commander", sv.get("versao_bcc") or "n/d"),
         ("Duração (min)", round(dur, 1) if dur else "n/d"),
@@ -7354,7 +7569,40 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                             a.get("delta_cob")], estilo=False)
     ws.freeze_panes = "A5"
 
-    # ── 4. Vizinhos ──
+    # ── 4. Censo de vizinhos ──
+    # Uma linha por VIZINHO, nao por leitura. E a aba que responde "quem
+    # fala com este radio e como" — a pergunta de uma captura parada, e
+    # tambem util na de trajeto para saber quem apareceu no percurso.
+    censo = censo_vizinhos(peers, len(amostras))
+    if censo:
+        rc = resumo_do_censo(censo)
+        ws = wb.create_sheet("Censo de Vizinhos")
+        _cab(ws, f"Vizinhança de {movel}",
+             f"{rc['vizinhos']} rádios distintos · {rc['infra']} de "
+             f"infraestrutura, {rc['moveis']} móveis · {rc['acima_req']} "
+             f"acima de {rc['requisito']:g} dBm", 13)
+        lin = 4
+        _th(ws, lin, ["Vizinho", "Tipo", "RSSI mediano (dBm)",
+                      "Pior 10% (dBm)", "Melhor 10% (dBm)", "SNR (dB)",
+                      # Presenca separa o radio estavel do que so passou:
+                      # -58 dBm em 35% dos pontos e um veiculo passando,
+                      # -93 dBm em 100% e um vizinho permanente e fraco.
+                      # A mediana sozinha nao distingue os dois.
+                      "Presença (%)", "Leituras", f"Dentro do requisito (%)",
+                      "Custo mediano", "Banda", "Canal", "Interface"],
+            [26, 10, 18, 15, 17, 10, 13, 10, 20, 14, 18, 12, 12])
+        lin += 1
+        for c in censo:
+            lin = _td(ws, lin, [
+                c["nome"], "infra" if c["infra"] else "móvel",
+                c["sinal"], c["sinal_p10"], c["sinal_p90"], c["snr"],
+                c["presenca"], c["leituras"], c["pct_ok"], c["custo"],
+                ", ".join(c["bandas"]),
+                ", ".join(str(x) for x in c["canais"]),
+                ", ".join(c["interfaces"])], zebra=(lin % 2 == 0))
+        ws.freeze_panes = "A5"
+
+    # ── 5. Vizinhos, leitura a leitura ──
     # A aba que so existe com dado do MeshMapper: a sondagem pela BC API
     # devolve o enlace que atendeu, nao a vizinhanca inteira.
     ws = wb.create_sheet("Vizinhos")
@@ -7442,6 +7690,206 @@ def cobertura_disponivel(amostras, peers, padrao=None):
             a["delta_cob"] = round(melhor["sinal"] - a["sinal"], 1)
     return {"com_infra": n_infra, "sem_infra": n_fallback,
             "padrao": padrao or PADRAO_INFRA}
+
+
+# ══════════════════════════════════════════════════════════════
+# CAPTURA DE UM PONTO FIXO — o laudo da repetidora
+# ══════════════════════════════════════════════════════════════
+# O MeshMapper rodando ligado a uma repetidora produz um arquivo com a
+# MESMA estrutura do arquivo de um veiculo — conferido campo a campo na
+# captura da ERM-12: `points`, `wlanPeers`, `traceInfo`, nada a mais.
+#
+# A diferenca esta no que ele significa. O arquivo do veiculo e um
+# TRAJETO: cada ponto e um lugar. O arquivo da repetidora e uma JANELA DE
+# TEMPO num lugar so: 115 pontos empilhados dentro de 0,4 m.
+#
+# Duas consequencias praticas:
+#
+#   • Rastro de calor nao se aplica. Sairia uma mancha de um pixel,
+#     pintada com a escala de area — a leitura errada mais cara possivel,
+#     porque PARECE um mapa.
+#   • O que o arquivo tem de valioso e a VIZINHANCA: 40 radios distintos,
+#     24 deles moveis, vistos em 114 segundos. Quem fala com esta
+#     repetidora, com que sinal, em que banda, e com que constancia.
+#
+# O que o arquivo NAO tem, e nenhum ajuste de codigo cria: a POSICAO dos
+# vizinhos. Um BreadCrumb reporta do vizinho apenas
+#   channel, cost, encap, filtered, frequency, ipaddr, mac, name,
+#   rssi, serialNumber, signal
+# — conferido nos dois arquivos reais, do veiculo e da repetidora. As
+# coordenadas do peer_info.csv sao as de QUEM CAPTUROU, repetidas para
+# cada vizinho. Por isso o censo e uma tabela, nao um mapa.
+
+# Raio abaixo do qual a captura conta como parada. O GPS de um radio
+# imovel oscila poucos metros; 15 m cobre a oscilacao com folga e fica
+# duas ordens de grandeza abaixo de qualquer trajeto. Medido: a captura
+# da ERM-12 deu raio 0,4 m em 115 pontos; a do CA-1006 rodando, 890 m.
+RAIO_PARADO_M = 15.0
+
+
+def extensao_da_captura(amostras):
+    """Ate onde a captura foi: {raio_m, lat, lon, n} do centro, ou None.
+
+    `raio_m` e a MAIOR distancia de um ponto ao centro, nao o desvio
+    padrao: um trajeto de ida e volta tem desvio pequeno e mesmo assim
+    cobriu quilometros.
+    """
+    pts = [(a["lat"], a["lon"]) for a in amostras
+           if a.get("lat") is not None and a.get("lon") is not None]
+    if not pts:
+        return None
+    la = sum(p[0] for p in pts) / len(pts)
+    lo = sum(p[1] for p in pts) / len(pts)
+    return {"raio_m": round(max(_dist_m(la, lo, p[0], p[1]) for p in pts), 1),
+            "lat": la, "lon": lo, "n": len(pts)}
+
+
+def captura_parada(amostras, limite_m=None):
+    """A captura saiu de um ponto fixo? Decide qual produto faz sentido."""
+    ext = extensao_da_captura(amostras)
+    if not ext:
+        return False
+    return ext["raio_m"] <= (RAIO_PARADO_M if limite_m is None else limite_m)
+
+
+def censo_vizinhos(peers, n_pontos=None, padrao=None):
+    """Um registro por vizinho, juntando todas as leituras dele.
+
+    Ordenado do sinal mais forte para o mais fraco. Cada registro traz o
+    que decide instalacao: quem e, em que banda, quao forte, e — o que
+    uma media esconderia — com que CONSTANCIA apareceu.
+
+    `presenca` e a fracao dos pontos da captura em que o vizinho estava
+    visivel. Separa o radio estavel do intermitente: na ERM-12, o CA-1027
+    aparece em 100% dos pontos a -93 dBm e o CA-1022 em 35% a -58 dBm.
+    Os dois sao verdade, e significam coisas opostas — um esta sempre la
+    e fraco, o outro passou perto e foi embora. Mediana sozinha nao
+    distingue os dois casos.
+
+    Vizinho sem NENHUMA leitura valida entra com sinal None, nunca 0: o
+    MeshMapper usa 0 para "conheco este vizinho mas ainda nao medi".
+    """
+    rx = re.compile(padrao or PADRAO_INFRA, re.I)
+    por_nome = {}
+    for p in peers:
+        chave = (p.get("nome") or p.get("serie") or p.get("mac") or "?")
+        por_nome.setdefault(chave, []).append(p)
+
+    total = n_pontos or len({p.get("ponto") for p in peers if p.get("ponto")})
+    req = float(ESCALAS["sinal"]["req"])
+    out = []
+    for nome, lst in por_nome.items():
+        sig = sorted(p["sinal"] for p in lst if p.get("sinal") is not None)
+        snr = sorted(p["snr"] for p in lst if p.get("snr") is not None)
+        cst = sorted(p["custo"] for p in lst if p.get("custo") is not None)
+        pontos = {p.get("ponto") for p in lst if p.get("ponto")}
+        ts = [p["ts"] for p in lst if p.get("ts")]
+        reg = {
+            "nome": nome,
+            "infra": bool(rx.search(nome)),
+            "ip": next((p.get("ip") for p in lst if p.get("ip")), None),
+            "mac": next((p.get("mac") for p in lst if p.get("mac")), None),
+            "serie": next((p.get("serie") for p in lst if p.get("serie")), None),
+            "leituras": len(lst),
+            "pontos": len(pontos),
+            "presenca": (round(len(pontos) * 100.0 / total, 1)
+                         if total else None),
+            "bandas": sorted({p["banda"] for p in lst if p.get("banda")}),
+            "canais": sorted({int(p["canal"]) for p in lst
+                              if p.get("canal") is not None}),
+            "interfaces": sorted({p["wlan"] for p in lst if p.get("wlan")}),
+            "sinal": _mm_mediana(sig), "sinal_p10": _mm_pct(sig, .10),
+            "sinal_p90": _mm_pct(sig, .90),
+            "sinal_min": sig[0] if sig else None,
+            "sinal_max": sig[-1] if sig else None,
+            "snr": _mm_mediana(snr),
+            "custo": _mm_mediana(cst),
+            "n_sinal": len(sig),
+            # Sem leitura valida nao ha percentual: 0% se leria como
+            # "medi e reprovou".
+            "pct_ok": (round(sum(1 for v in sig if v > req) * 100.0 / len(sig), 1)
+                       if sig else None),
+            "inicio": min(ts) if ts else None,
+            "fim": max(ts) if ts else None,
+        }
+        out.append(reg)
+    # Sem sinal vai para o fim: e ausencia de medida, nao medida pessima.
+    out.sort(key=lambda r: (r["sinal"] is None, -(r["sinal"] or 0)))
+    return out
+
+
+def _mm_mediana(ordenados):
+    n = len(ordenados)
+    if not n: return None
+    m = (ordenados[n // 2] if n % 2
+         else (ordenados[n // 2 - 1] + ordenados[n // 2]) / 2.0)
+    return round(m, 1)
+
+
+def _mm_pct(ordenados, q):
+    if not ordenados: return None
+    return round(ordenados[min(len(ordenados) - 1,
+                               max(0, int(q * (len(ordenados) - 1))))], 1)
+
+
+def sitios_parados(amostras, peers, limite_m=None):
+    """As capturas PARADAS que ha neste conjunto, prontas para o mapa.
+
+    Trabalha por equipamento que capturou, nao por arquivo: uma campanha
+    pode misturar veiculos andando e repetidoras paradas no mesmo lote, e
+    cada um vira o produto que faz sentido para ele. O veiculo alimenta o
+    rastro de calor; a repetidora, o censo e o pino.
+
+    Devolve a lista no formato que `gerar_kml_pontos_fixos()` espera.
+    """
+    por_radio = {}
+    for a in amostras:
+        if a.get("lat") is None or a.get("lon") is None: continue
+        por_radio.setdefault(a.get("radio"), []).append(a)
+
+    sitios = []
+    for nome, am in por_radio.items():
+        if not captura_parada(am, limite_m):
+            continue
+        ext = extensao_da_captura(am)
+        # Peers da MESMA captura. Sem este filtro, juntar dois arquivos
+        # daria a cada repetidora a vizinhanca da outra.
+        pr = [p for p in peers if p.get("movel") == nome]
+        if not pr:
+            continue
+        censo = censo_vizinhos(pr, len(am))
+        ts = [a["ts"] for a in am if a.get("ts")]
+        sitios.append({
+            "nome": nome, "lat": ext["lat"], "lon": ext["lon"],
+            "raio_m": ext["raio_m"], "pontos": len(am),
+            "censo": censo, "resumo": resumo_do_censo(censo),
+            "inicio": min(ts) if ts else None,
+            "fim": max(ts) if ts else None,
+        })
+    sitios.sort(key=lambda s: s["nome"] or "")
+    return sitios
+
+
+def resumo_do_censo(censo):
+    """Os numeros de capa do laudo da repetidora."""
+    com = [c for c in censo if c["sinal"] is not None]
+    infra = [c for c in com if c["infra"]]
+    movel = [c for c in com if not c["infra"]]
+    req = float(ESCALAS["sinal"]["req"])
+    forte = [c for c in com if c["sinal"] > req]
+    return {
+        "vizinhos": len(censo),
+        "com_leitura": len(com),
+        "infra": len(infra),
+        "moveis": len(movel),
+        "acima_req": len(forte),
+        "abaixo_req": len(com) - len(forte),
+        "requisito": req,
+        # Constantes = presentes em todos os pontos. Sao os que sustentam
+        # a malha; os intermitentes passaram.
+        "constantes": sum(1 for c in com if (c["presenca"] or 0) >= 99.0),
+        "bandas": sorted({b for c in censo for b in c["bandas"]}),
+    }
 
 
 def campos_com_medicao(amostras, candidatos=None):
@@ -10513,13 +10961,18 @@ def capa_anglo(p, titulo, subtitulo=""):
     return s
 
 
-def ppt_survey_anglo(sid, cfg=None, bandas=None):
+def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     """Deck EXCLUSIVO de site survey, na identidade Anglo.
 
     Separado do relatorio semanal a pedido: o survey virou dois tercos
     daquele deck e tem publico proprio. Aqui ele nao depende do template
     do cliente — os slides sao construidos do zero, entao a identidade e
     a mesma do inicio ao fim.
+
+    `sitios` (de `sitios_parados()`) acrescenta o laudo das capturas
+    feitas de um ponto fixo. Vem por parametro porque o censo nasce dos
+    PEERS, e peer nao e amostra: nao esta no banco do survey, so no
+    arquivo do MeshMapper.
 
     Devolve (bytes, nome).
     """
@@ -10589,6 +11042,60 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None):
     for rot, val in cart:
         _cartao_anglo(s, 8.35, y, 4.45, 0.72, rot, val)
         y += 0.82
+
+    # ── Laudo das capturas feitas paradas ──
+    # Uma por slide. Vem antes das paginas de area de proposito: quem
+    # capturou parado precisa ler primeiro que aquilo NAO e um mapa.
+    for st in (sitios or []):
+        r = st.get("resumo") or {}
+        censo = [c for c in (st.get("censo") or []) if c["sinal"] is not None]
+        s = slide_anglo(p, f"Vizinhança de {st['nome']}",
+                        f"Captura parada — {st.get('pontos', 0)} leituras "
+                        f"num raio de {st.get('raio_m', 0):g} m. "
+                        f"Caracteriza o rádio, não a área ao redor.")
+        linhas = [[c["nome"], "infra" if c["infra"] else "móvel",
+                   f"{c['sinal']:g}",
+                   "—" if c["snr"] is None else f"{c['snr']:g}",
+                   "—" if c["presenca"] is None else f"{c['presenca']:g}%",
+                   ", ".join(c["bandas"]) or "—"]
+                  for c in censo[:16]]
+        dest = {}
+        req_c = float(ESCALAS["sinal"]["req"])
+        for i, c in enumerate(censo[:16], start=1):
+            if c["sinal"] <= req_c: dest[(i, 2)] = "C0392B"
+            # Presenca baixa com sinal forte e veiculo de passagem, nao
+            # cobertura: destacar impede que ele entre no laudo como se
+            # fosse enlace permanente.
+            if (c["presenca"] or 0) < 50: dest[(i, 4)] = "E67E22"
+        _tabela_anglo(s, 0.55, 1.6, 8.1,
+                      ["Vizinho", "Tipo", "RSSI (dBm)", "SNR (dB)",
+                       "Presença", "Banda"], linhas, dest, tam=9)
+        y = 1.6
+        for rot, val in (("Vizinhos", str(r.get("vizinhos", 0))),
+                         ("De infraestrutura", str(r.get("infra", 0))),
+                         ("Móveis", str(r.get("moveis", 0))),
+                         (f"Acima de {req_c:g} dBm", str(r.get("acima_req", 0))),
+                         ("Presentes o tempo todo", str(r.get("constantes", 0)))):
+            _cartao_anglo(s, 8.9, y, 3.9, 0.72, rot, val)
+            y += 0.82
+        _txt_anglo(s, 0.55, 6.75, 12.25, 0.5,
+                   "O BreadCrumb não informa onde estão os vizinhos: o "
+                   "censo diz com quem e com que sinal, não em que ponto "
+                   "do terreno. Posição só de quem tiver captura própria.",
+                   9.5, False, ANGLO["suave"], italico=True)
+
+    # Sem nenhum equipamento em deslocamento nao ha area medida: zona e
+    # moldura de mapa sairiam descrevendo um ponto como se fosse regiao.
+    andou = [a for a in am if a.get("radio") not in fixos]
+    if not andou:
+        n_nav = _navegacao_anglo(p)
+        if MARCA_DEMO.get("ativa"):
+            marcar_ppt_demo(p)
+        buf = _io.BytesIO(); p.save(buf)
+        seguro = re.sub(r"[^\w\-]+", "_", nome_sv)[:40]
+        log.info(f"[ppt/survey] {len(p.slides)} slides (captura parada), "
+                 f"{len(am)} amostras, {n_nav} atalhos")
+        return buf.getvalue(), f"Site_Survey_{seguro}_{quando:%Y%m%d}.pptx"
 
     # ── Zonas-problema por banda: a pagina acionavel ──
     try:

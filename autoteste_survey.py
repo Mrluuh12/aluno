@@ -8,7 +8,7 @@ de campo:
 
     python autoteste_survey.py
 
-A suíte completa (396 testes) fica no projeto principal; aqui o objetivo
+A suíte completa (438 testes) fica no projeto principal; aqui o objetivo
 é outro — provar que ESTA cópia, nesta máquina, gera o que promete.
 """
 import sys, io, zipfile, tempfile, shutil
@@ -16,6 +16,9 @@ from pathlib import Path
 
 AQUI = Path(__file__).resolve().parent
 EXEMPLO = AQUI / "exemplos" / "meshmapper_exemplo.json"
+# Captura feita PARADA (o MeshMapper ligado numa repetidora). Produto
+# diferente: censo de vizinhos, não rastro de calor.
+REPETIDORA = AQUI / "exemplos" / "meshmapper_repetidora.json"
 falhas = []
 
 
@@ -48,6 +51,8 @@ def main():
     checa((AQUI / "rajant_monitor.py").exists(), "rajant_monitor.py (o motor)")
     checa((AQUI / "survey_meshmapper.py").exists(), "survey_meshmapper.py")
     checa(EXEMPLO.exists(), "exemplos/meshmapper_exemplo.json")
+    if not REPETIDORA.exists():
+        print("  aviso  exemplos/meshmapper_repetidora.json ausente")
     marca = AQUI / "marca" / "anglo_azul.png"
     if marca.exists():
         checa(True, "marca/ (logos)")
@@ -73,8 +78,40 @@ def main():
           "SNR em dB")
     checa(all(a["ruido"] == a["sinal"] - a["snr"] for a in com_sinal
               if a["snr"] is not None), "ruído recuperado de signal − snr")
+    # 0 dBm não existe num rádio de malha: é o "ainda não medi" do
+    # arquivo. Deixar passar fazia o vizinho zerado ganhar a eleição de
+    # cobertura e pintar o ponto de verde máximo.
+    checa(all(p["sinal"] != 0 for p in pr), "nenhum vizinho com 0 dBm")
+    checa(not rm.captura_parada(am), "reconhecida como captura em trajeto")
 
-    print("\n4. Geração")
+    print("\n4. Leitura de uma captura feita parada")
+    if REPETIDORA.exists():
+        sv2, am2, pr2 = rm.ler_meshmapper(str(REPETIDORA))
+        checa(rm.captura_parada(am2),
+              f"{sv2.get('movel')} reconhecida como parada "
+              f"({rm.extensao_da_captura(am2)['raio_m']:g} m de raio)")
+        censo = rm.censo_vizinhos(pr2, len(am2))
+        r = rm.resumo_do_censo(censo)
+        checa(len(censo) > 1, f"censo com {len(censo)} vizinhos "
+                              f"({r['infra']} de infraestrutura)")
+        checa(all(c["presenca"] is not None for c in censo),
+              "presença calculada para todos")
+        dados, nome = rm.gerar_kml_pontos_fixos(
+            [{"nome": sv2["movel"], **{k: rm.extensao_da_captura(am2)[k]
+                                       for k in ("lat", "lon", "raio_m")},
+              "pontos": len(am2), "censo": censo, "resumo": r,
+              "inicio": sv2["inicio"], "fim": sv2["fim"]}])
+        from xml.dom.minidom import parseString
+        doc = zipfile.ZipFile(io.BytesIO(dados)).read("doc.kml").decode()
+        try:
+            parseString(doc); checa(True, "KMZ da vizinhança é XML válido")
+        except Exception as e:
+            checa(False, "KMZ da vizinhança é XML válido", str(e))
+    else:
+        print("  aviso  exemplos/meshmapper_repetidora.json ausente — "
+              "pulei a verificação da captura parada")
+
+    print("\n5. Geração")
     tmp = Path(tempfile.mkdtemp())
     try:
         feitos = sm.gerar([str(EXEMPLO)], str(tmp), aviso=lambda t: None)

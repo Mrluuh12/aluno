@@ -55,14 +55,14 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 
 | | |
 |---|---|
-| linhas | ~13.100 |
-| funções no topo | 220 |
+| linhas | ~14400 |
+| funções no topo | 243 |
 | métodos | 105 |
 | classes | 7 |
 | famílias de métrica | 100 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 411, em 58 classes |
+| testes | 438, em 63 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 411 testes e as âncoras de seção (§26).
+segura isso são os 438 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -634,6 +634,54 @@ Com as posições dos fixos e o RSSI medido, ajusta `A` e `n` por banda e
 guarda `rms` e nº de amostras. Serve para estimar alcance — e a estimativa
 **nunca** é desenhada junto com a medição sem distinção visual (§23).
 
+### Captura parada: o laudo do rádio
+
+Uma captura do MeshMapper feita com o notebook ligado a uma **repetidora**
+tem a mesma estrutura da de um veículo — conferido campo a campo nos dois
+arquivos reais do cliente. O que muda é o significado:
+
+| | veículo | repetidora |
+|---|---|---|
+| o arquivo é | um trajeto: cada ponto é um lugar | uma janela de tempo num lugar só |
+| medido | 146 m de raio em 55 pontos | **0,5 m** de raio em 115 pontos |
+| produto | rastro de calor, zonas-problema | censo de vizinhos, pino, enlaces |
+
+`captura_parada()` decide pelo **dado**, não pelo nome do rádio: um ERM
+rebocado é trajeto, e um caminhão estacionado a manhã inteira não é. O
+corte é `RAIO_PARADO_M = 15`, duas ordens de grandeza acima da oscilação
+do GPS parado e abaixo de qualquer percurso. `extensao_da_captura()` usa a
+**maior distância ao centro**, não o desvio padrão — ida e volta tem
+desvio pequeno e mesmo assim cobriu distância.
+
+| função | o que produz |
+|---|---|
+| `extensao_da_captura` | `{raio_m, lat, lon, n}` do centro das amostras |
+| `captura_parada` | se a captura saiu de um ponto fixo |
+| `censo_vizinhos` | uma linha por vizinho, agregando todas as leituras |
+| `resumo_do_censo` | os números de capa: infra × móveis, acima do requisito |
+| `sitios_parados` | as capturas paradas do lote, prontas para o mapa |
+| `gerar_kml_pontos_fixos` | KMZ com pino por rádio e enlace entre os capturados |
+
+**Por que `presenca` existe.** Na captura real da ERM-12, o CA-1022
+aparece a −58 dBm em 35% dos pontos e o CA-1027 a −93 dBm em 100%. Os
+dois são verdade e pedem decisões opostas: o primeiro passou perto e foi
+embora, o segundo é permanente e fraco. Mediana sozinha não distingue.
+
+**O que nenhuma captura de repetidora pode dar: a posição dos vizinhos.**
+Um BreadCrumb reporta de cada peer exatamente `channel, cost, encap,
+filtered, frequency, ipaddr, mac, name, rssi, serialNumber, signal` —
+conferido nos dois arquivos. Sem latitude nem longitude. As coordenadas do
+`_peer_info.csv` são as de **quem capturou**, repetidas para cada vizinho.
+
+Por isso `gerar_kml_pontos_fixos()` desenha **só** o que tem posição
+medida: o pino de cada rádio que fez uma captura, e a linha entre dois
+deles quando ambos foram capturados. O vizinho sem captura própria fica
+na tabela e no balão, e o KML **declara no cabeçalho** quantos ficaram de
+fora — esconder isso seria pior que não mostrar.
+
+Enlace assimétrico (A vê B a −70, B vê A a −84) fica com a **pior** das
+duas pontas: é ela que limita o enlace e decide se falta rádio ali.
+
 ---
 
 ## 12. Survey: o mapa de calor
@@ -1135,6 +1183,15 @@ Zero é indistinguível de "medido e deu zero". Campo sem medição vira `None`
 e a série é **omitida**. Era o que fazia contador de erro de ethernet e CPU
 parecerem saudáveis num painel inteiro.
 
+A invariante vaza pelas bordas, e a borda mais recente foi a lista de
+vizinhos do MeshMapper. A limpeza existia para o enlace servidor e não
+para os peers: 0 dBm — potência recebida de 1 mW, impossível num rádio de
+malha — passava direto e **ganhava** a eleição de `cobertura_disponivel()`,
+que escolhe por `max(sinal)`. No arquivo real do CA-1006 isso pintava três
+pontos do trajeto de verde máximo, com "87 dB disponíveis e não usados" no
+laudo. Hoje `_mm_enlace()` é o único lugar onde a regra vive, e as duas
+listas passam por ele.
+
 ### 2. Nada se afirma sobre a BC API sem conferir o `.proto`
 
 A auditoria removeu **19 séries** que não tinham campo correspondente e
@@ -1214,6 +1271,9 @@ relatório Excel                           →  Prometheus, obter_dados
 preenchimento do PPT                      →  gerar_ppt, _slides_tecnicos
 heatmaps de CSV, leitura de KMZ           →  ler_kmz
 KMZ e KML do survey                       →  gerar_kml_survey, _calor_da_rota
+KML de captura parada                     →  gerar_kml_pontos_fixos
+leitura do MeshMapper                     →  ler_meshmapper, _mm_enlace
+análise da vizinhança                     →  censo_vizinhos, sitios_parados
 persistência dos surveys                  →  survey_criar, amostras_gravar
 medições manuais, seleção por tag
 fundo de satélite, mapas do survey

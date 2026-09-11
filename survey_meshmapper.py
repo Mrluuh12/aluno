@@ -100,12 +100,23 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
     campos = rm.campos_com_medicao(amostras)
     faltando = [c for c in rm.CAMPOS_KMZ if c not in campos]
     dur = ((sv["fim"] - sv["inicio"]) / 60.0) if sv.get("fim") and sv.get("inicio") else 0
+    # Uma captura feita de um ponto fixo — o MeshMapper ligado numa
+    # repetidora — não é um trajeto. Rastro de calor dela sairia como uma
+    # mancha de um pixel pintada com a escala de área, que parece mapa e
+    # não é. O produto dela é outro: quem fala com aquele rádio e como.
+    sitios = rm.sitios_parados(amostras, peers)
+    parados = {s["nome"] for s in sitios}
+    andando = sorted({a.get("radio") for a in amostras} - parados)
 
     aviso(f"  equipamento(s) ..... {sv.get('movel')}")
     aviso(f"  amostras ........... {len(amostras)}")
     aviso(f"  vizinhos lidos ..... {len(peers)}")
     aviso(f"  duração ............ {dur:.1f} min")
     aviso(f"  intervalo real ..... {rm._mm_intervalo_real(amostras)} s")
+    for s in sitios:
+        r = s["resumo"]
+        aviso(f"  captura parada ..... {s['nome']} (raio {s['raio_m']:g} m) — "
+              f"{r['vizinhos']} vizinhos, {r['infra']} de infraestrutura")
     aviso(f"  grandezas medidas .. {', '.join(campos) or 'nenhuma'}")
     if faltando:
         # Dizer o que NÃO veio evita a leitura errada de "mediu e deu
@@ -114,16 +125,27 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
 
     feitos = []
     if fazer_kmz:
-        if campos:
+        if campos and andando:
             dados, nome_kmz = rm.gerar_kml_survey(sv, amostras, cfg=cfg,
                                                   campos=campos)
             alvo = destino / nome_kmz
             alvo.write_bytes(dados); feitos.append(alvo)
+        elif not campos:
+            aviso("  ! sem grandeza medida: KMZ do trajeto não gerado")
         else:
-            aviso("  ! sem grandeza medida: KMZ não gerado")
+            aviso("  · nenhum equipamento em deslocamento: "
+                  "sem rastro de calor")
+        if sitios:
+            try:
+                dados, nome_f = rm.gerar_kml_pontos_fixos(sitios, cfg=cfg)
+                alvo = destino / nome_f
+                alvo.write_bytes(dados); feitos.append(alvo)
+            except Exception as e:
+                aviso(f"  ! KMZ da vizinhança não gerado: {e}")
     if fazer_ppt:
         try:
-            dados, nome_ppt = rm.ppt_survey_anglo(sid, cfg, bandas)
+            dados, nome_ppt = rm.ppt_survey_anglo(sid, cfg, bandas,
+                                                  sitios=sitios)
             alvo = destino / nome_ppt
             alvo.write_bytes(dados); feitos.append(alvo)
         except Exception as e:
