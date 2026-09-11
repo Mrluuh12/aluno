@@ -5778,6 +5778,11 @@ FAIXAS_KML = {
     "sinal": [(-85, "8B1A1A"), (-80, "C0392B"), (-75, "E74C3C"),
               (-70, "E67E22"), (-67, "F1C40F"), (-60, "9ACD32"),
               (-50, "27AE60"), (999, "1E8449")],
+    # Cobertura usa as MESMAS faixas do RSSI: e a mesma grandeza, lida de
+    # outra fonte. Faixas proprias fariam duas reguas para o mesmo dBm.
+    "sinal_cob": [(-85, "8B1A1A"), (-80, "C0392B"), (-75, "E74C3C"),
+                  (-70, "E67E22"), (-67, "F1C40F"), (-60, "9ACD32"),
+                  (-50, "27AE60"), (999, "1E8449")],
     "snr":   [(10, "8B1A1A"), (15, "C0392B"), (20, "E74C3C"),
               (25, "E67E22"), (30, "F1C40F"), (40, "9ACD32"),
               (999, "27AE60")],
@@ -7074,6 +7079,7 @@ def importar_meshmapper(caminho, con=None, nome=None):
     sv, amostras, peers = ler_meshmapper(caminho)
     if not amostras:
         raise RuntimeError(f"{Path(caminho).name}: nenhuma amostra com posicao")
+    sv["cobertura"] = cobertura_disponivel(amostras, peers)
     fechar = con is None
     con = con or banco()
     try:
@@ -7119,11 +7125,15 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
                             "erro": str(e), "amostras": 0})
             log.warning(f"[meshmapper] {Path(c).name}: {e}")
             continue
+        # A cobertura e por ARQUIVO: os numeros de ponto se repetem entre
+        # capturas, e cruza-los ligaria o vizinho de uma ao trajeto de
+        # outra.
+        cob_i = cobertura_disponivel(am_i, pr_i)
         for a in am_i:
             a["arquivo"] = Path(c).name
         amostras.extend(am_i); peers.extend(pr_i)
         origens.append({"arquivo": Path(c).name, "ok": True,
-                        "movel": sv_i.get("movel"),
+                        "movel": sv_i.get("movel"), "cobertura": cob_i,
                         "amostras": len(am_i), "peers": len(pr_i),
                         "inicio": sv_i.get("inicio"), "fim": sv_i.get("fim"),
                         "versao_bcc": sv_i.get("versao_bcc"),
@@ -7149,6 +7159,11 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
         # na aba de origens em vez de sumir numa media.
         "limiares_mm": next((o.get("limiares_mm") for o in ok
                              if o.get("limiares_mm")), {}),
+        "cobertura": {
+            "com_infra": sum((o.get("cobertura") or {}).get("com_infra", 0) for o in ok),
+            "sem_infra": sum((o.get("cobertura") or {}).get("sem_infra", 0) for o in ok),
+            "padrao": PADRAO_INFRA,
+        },
         "origens": origens,
     }
 
@@ -7248,6 +7263,44 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     for k, v in itens:
         lin = _td(ws, lin, [k, v], zebra=(lin % 2 == 0))
 
+    # ── Cobertura x serviço entregue ──
+    # O bloco que muda a recomendação do laudo. Cobertura boa com enlace
+    # ruim nao e falta de radio: e escolha de caminho, e repetidora nova
+    # nao resolveria.
+    cob = [a["sinal_cob"] for a in amostras if a.get("sinal_cob") is not None]
+    dlt = [a["delta_cob"] for a in amostras if a.get("delta_cob") is not None]
+    if cob:
+        srv = [a["sinal"] for a in amostras if a.get("sinal") is not None]
+        req = float(ESCALAS["sinal"]["req"])
+        def _fora(v): return round(sum(1 for x in v if x < req) * 100.0 / len(v), 1)
+        def _med(v):
+            o = sorted(v); m = len(o) // 2
+            return round(o[m] if len(o) % 2 else (o[m-1] + o[m]) / 2, 1)
+        lin += 1
+        ws.cell(lin, 1, "Cobertura disponível x serviço entregue").font = F_TXTB
+        lin += 1
+        _th(ws, lin, ["O que se mede", "Mediana (dBm)",
+                      f"Fora do requisito (> {req:g} dBm)"], [34, 16, 30])
+        lin += 1
+        lin = _td(ws, lin, ["Cobertura disponível (melhor infra)",
+                            _med(cob), f"{_fora(cob)}%"], zebra=True)
+        if srv:
+            lin = _td(ws, lin, ["Enlace que atendeu", _med(srv),
+                                f"{_fora(srv)}%"])
+        if dlt:
+            lin = _td(ws, lin, ["RSSI disponível e não usado (mediana)",
+                                _med(dlt), "—"], zebra=True)
+        info = sv.get("cobertura") or {}
+        if info.get("sem_infra"):
+            # Ponto sem nenhum ERB/ERM visivel caiu para o melhor vizinho
+            # qualquer — que pode ser outro caminhao. Dizer isso evita
+            # apresentar veiculo de passagem como cobertura da area.
+            lin = _td(ws, lin, [
+                "Pontos sem infra visível (usou o melhor vizinho)",
+                info["sem_infra"], "—"])
+        lin = _td(ws, lin, ["Critério de infraestrutura",
+                            info.get("padrao", PADRAO_INFRA), "—"], zebra=True)
+
     lim = sv.get("limiares_mm") or {}
     if lim:
         lin += 1
@@ -7285,15 +7338,20 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     lin = 4
     _th(ws, lin, ["#", "Hora (UTC)", "Latitude", "Longitude", "Alt (m)",
                   "Banda", "Canal", "RSSI (dBm)", "SNR (dB)", "Ruído (dBm)",
-                  "Custo", "Taxa (Mbps)", "Vizinhos", "Servidor"],
-        [6, 19, 12, 12, 9, 10, 8, 11, 10, 12, 10, 12, 10, 22])
+                  "Custo", "Taxa (Mbps)", "Vizinhos", "Servidor",
+                  # As tres ultimas sao a outra pergunta: o que HAVIA
+                  # disponivel ali, e quanto disso nao foi usado.
+                  "Cobertura (dBm)", "Melhor infra", "Δ não usado (dB)"],
+        [6, 19, 12, 12, 9, 10, 8, 11, 10, 12, 10, 12, 10, 22, 14, 22, 15])
     lin += 1
     for i, a in enumerate(sorted(amostras, key=lambda x: x.get("ts") or 0), 1):
         lin = _td(ws, lin, [i, dt(a.get("ts")), a.get("lat"), a.get("lon"),
                             a.get("alt"), a.get("banda"), a.get("canal"),
                             a.get("sinal"), a.get("snr"), a.get("ruido"),
                             a.get("custo"), a.get("taxa"), a.get("peers"),
-                            a.get("servidor")], estilo=False)
+                            a.get("servidor"),
+                            a.get("sinal_cob"), a.get("servidor_cob"),
+                            a.get("delta_cob")], estilo=False)
     ws.freeze_panes = "A5"
 
     # ── 4. Vizinhos ──
@@ -7326,6 +7384,64 @@ def _slug_arquivo(txt):
     """Nome de equipamento vira parte de nome de arquivo: barra e dois
     pontos derrubariam a gravacao no Windows."""
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(txt or "")).strip("-") or "survey"
+
+
+# Quem conta como INFRAESTRUTURA. Repetidora fixa (ERB) e movel (ERM)
+# caracterizam a cobertura da area; um caminhao encostado, nao — ele tem
+# sinal otimo e vai embora no minuto seguinte.
+PADRAO_INFRA = r"^\s*(ERB|ERM)\b"
+
+
+def cobertura_disponivel(amostras, peers, padrao=None):
+    """Anexa a cada amostra o MELHOR vizinho de infraestrutura do ponto.
+
+    Duas perguntas diferentes vivem no mesmo arquivo:
+
+      "existe sinal servivel aqui?"   -> o melhor vizinho de infra
+      "a aplicacao funcionou aqui?"   -> o enlace que o InstaMesh usou
+
+    Medido no arquivo do cliente, as duas divergem muito: o enlace
+    entregue tinha mediana -88 dBm e 81% fora do requisito, enquanto o
+    melhor vizinho de infra dava -66 dBm e 100% dentro. Reportar so a
+    primeira leva a conclusao errada de que falta radio na area.
+
+    Os campos anexados sao `sinal_cob`, `snr_cob`, `servidor_cob` e
+    `delta_cob` (quanto de RSSI ficou na mesa). Devolve um resumo com a
+    contagem, para o relatorio poder dizer com que criterio contou.
+    """
+    rx = re.compile(padrao or PADRAO_INFRA, re.I)
+    por_ponto = {}
+    for p in peers:
+        if p.get("sinal") is None: continue
+        nome = (p.get("nome") or "")
+        por_ponto.setdefault(p.get("ponto"), []).append((rx.search(nome) is not None, p))
+
+    n_infra = n_fallback = 0
+    for i, a in enumerate(amostras, start=1):
+        lista = por_ponto.get(i) or []
+        infra = [p for eh, p in lista if eh]
+        if infra:
+            n_infra += 1
+        elif lista:
+            # Sem nenhum vizinho de infra visivel: cai para o melhor
+            # vizinho qualquer, MARCADO como tal. Silenciar isso faria o
+            # relatorio apresentar um caminhao encostado como cobertura.
+            infra = [p for _, p in lista]
+            n_fallback += 1
+        if not infra:
+            continue
+        melhor = max(infra, key=lambda p: p["sinal"])
+        a["sinal_cob"] = melhor["sinal"]
+        a["snr_cob"] = melhor.get("snr")
+        a["servidor_cob"] = melhor.get("nome")
+        a["cob_e_infra"] = bool([p for eh, p in lista if eh])
+        if a.get("sinal") is not None:
+            # Quanto de RSSI havia disponivel e nao foi usado. E aqui que
+            # mora o diagnostico: delta grande com cobertura boa nao e
+            # falta de radio, e escolha de caminho.
+            a["delta_cob"] = round(melhor["sinal"] - a["sinal"], 1)
+    return {"com_infra": n_infra, "sem_infra": n_fallback,
+            "padrao": padrao or PADRAO_INFRA}
 
 
 def campos_com_medicao(amostras, candidatos=None):
@@ -7440,7 +7556,12 @@ def banco(caminho=None):
             con.execute(f"ALTER TABLE survey ADD COLUMN {col} {tipo}")
     tem_am = {r["name"] for r in con.execute("PRAGMA table_info(amostra)")}
     for col, tipo in (("fonte", "TEXT"), ("servidor", "TEXT"),
-                      ("interf", "REAL"), ("canal", "INTEGER")):
+                      ("interf", "REAL"), ("canal", "INTEGER"),
+                      # Cobertura disponivel no ponto: o melhor vizinho de
+                      # infraestrutura, que e outra grandeza do enlace que
+                      # atendeu. Ver cobertura_disponivel().
+                      ("sinal_cob", "REAL"), ("snr_cob", "REAL"),
+                      ("servidor_cob", "TEXT"), ("delta_cob", "REAL")):
         if col not in tem_am:
             con.execute(f"ALTER TABLE amostra ADD COLUMN {col} {tipo}")
     con.commit()
@@ -7475,7 +7596,8 @@ def amostras_gravar(con, sid, linhas):
     if not linhas: return 0
     cols = ["radio","ts","lat","lon","vel","snr","sinal","ruido","rtt","perda",
             "custo","taxa","vazao","peers","sats","hdop","banda","fonte",
-            "servidor","interf","canal"]
+            "servidor","interf","canal",
+            "sinal_cob","snr_cob","servidor_cob","delta_cob"]
     con.executemany(
         f"INSERT INTO amostra (survey_id,{','.join(cols)}) "
         f"VALUES (?,{','.join('?'*len(cols))})",
@@ -7574,7 +7696,15 @@ def survey_resumo(amostras):
     """
     out = {"amostras": len(amostras),
            "radios": len({a["radio"] for a in amostras})}
-    for campo, (op, lim, un, rot) in REQUISITOS.items():
+    # Os cinco requisitos contratuais MAIS a cobertura disponivel. Ela
+    # nao e requisito do cliente — e o mesmo RSSI lido de outra fonte —,
+    # mas sem ela no resumo o relatorio so sabe dizer como foi o enlace
+    # entregue, e nao se havia sinal servivel no lugar.
+    alvos = dict(REQUISITOS)
+    if any(a.get("sinal_cob") is not None for a in amostras):
+        e = ESCALAS["sinal_cob"]
+        alvos["sinal_cob"] = (">", float(e["req"]), e["un"], e["rot"])
+    for campo, (op, lim, un, rot) in alvos.items():
         vs = [a[campo] for a in amostras if a.get(campo) is not None]
         if not vs:
             out[campo] = None
@@ -8219,7 +8349,12 @@ def _fixos_do_survey(amostras, limiar=0.0003):
 
 # Grandezas que viram KMZ, na ordem em que aparecem no relatório. É esta
 # lista que o slide cita ao mandar tirar o print.
-CAMPOS_KMZ = ["sinal", "snr", "ruido", "rtt", "perda", "interf"]
+# "sinal_cob" vem PRIMEIRO de proposito: numa captura do MeshMapper, a
+# aba que abre e a de COBERTURA, nao a do enlace entregue. Cobertura e o
+# que dimensiona repetidora; o enlace entregue e o que a aplicacao
+# enfrentou. Abrir pela segunda faz o leitor concluir "falta radio" onde
+# o problema e outro.
+CAMPOS_KMZ = ["sinal_cob", "sinal", "snr", "ruido", "rtt", "perda", "interf"]
 
 
 def gerar_todos_kmz(sid, cfg=None, campos=None, bandas=None):
@@ -8669,6 +8804,13 @@ ESCALAS = {
     # operação ("o sinal está cheio e a rede está lenta").
     "interf": {"rot": "Interferência", "un": "%", "lo": 0, "hi": 60,
                "req": 20, "melhor": "baixo"},
+    # COBERTURA DISPONIVEL — o melhor vizinho de INFRAESTRUTURA visivel
+    # naquele ponto, nao o enlace que atendeu. Responde "existe sinal
+    # servivel aqui?", que e outra pergunta de "a aplicacao funcionou
+    # aqui?". Mesma escala e mesmo requisito do RSSI: e RSSI, medido de
+    # outra fonte.
+    "sinal_cob": {"rot": "Cobertura disponível", "un": "dBm",
+                  "lo": -90, "hi": -55, "req": -75, "melhor": "alto"},
 }
 
 # Vermelho → verde, o mesmo racional do heatmap do cliente.
@@ -10488,7 +10630,8 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None):
 
     # ── Molduras para o print do Google Earth ──
     for b in bandas:
-        for campo, rot in (("sinal", "Intensidade de Sinal (RSSI)"),
+        for campo, rot in (("sinal_cob", "Cobertura Disponível (melhor infra)"),
+                           ("sinal", "Intensidade de Sinal (RSSI)"),
                            ("snr", "Relação Sinal/Ruído (SNR)"),
                            ("ruido", "Noise Floor"),
                            ("interf", "Interferência de Canal"),

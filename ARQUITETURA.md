@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 100 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 402, em 57 classes |
+| testes | 411, em 58 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 402 testes e as âncoras de seção (§26).
+segura isso são os 411 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -588,6 +588,13 @@ As grandezas medidas e seus requisitos (Modular Mining):
 | `rtt` | Latência | ms | 0 … 200 | < 100 | baixo |
 | `perda` | Perda | % | 0 … 10 | < 2 | baixo |
 | `interf` | Interferência | % | 0 … 60 | < 20 | baixo |
+| `sinal_cob` | Cobertura disponível | dBm | −90 … −55 | > −75 | alto |
+
+`sinal_cob` não é requisito contratual: é o **mesmo RSSI lido de outra
+fonte** — o melhor vizinho de infraestrutura visível no ponto, em vez do
+enlace que o InstaMesh usou. Responde *"existe sinal servível aqui?"*,
+que é outra pergunta de *"a aplicação funcionou aqui?"*. No arquivo do
+cliente as duas divergiam em 22 dB de mediana.
 
 Interferência: 20% é onde o CSMA começa a atrasar o acesso ao meio de forma
 perceptível; acima de 50% a banda útil despenca **mesmo com RSSI ótimo** —

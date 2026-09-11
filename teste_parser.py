@@ -4039,6 +4039,98 @@ class TestMeshMapper(unittest.TestCase):
         self.assertNotIn("sys.exit(1)", fonte[i:j])
 
 
+class TestCoberturaDisponivel(unittest.TestCase):
+    """Duas perguntas diferentes que viviam no mesmo numero.
+
+    "existe sinal servivel aqui?"  -> melhor vizinho de INFRAESTRUTURA
+    "a aplicacao funcionou aqui?"  -> enlace que o InstaMesh usou
+
+    No arquivo do cliente elas divergiam muito: enlace entregue com
+    mediana -88 dBm e 81% fora do requisito, contra cobertura de -66 dBm
+    e 100% dentro. Reportar so a primeira leva a conclusao errada de que
+    falta radio na area.
+    """
+
+    def _dados(self):
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -88.0, "snr": 20.0}]
+        pr = [{"ponto": 1, "nome": "ERB-07", "sinal": -66.0, "snr": 30.0},
+              {"ponto": 1, "nome": "CA-1021", "sinal": -40.0, "snr": 50.0},
+              {"ponto": 1, "nome": "ERM-03", "sinal": -72.0, "snr": 25.0}]
+        return am, pr
+
+    def test_cobertura_usa_infra_e_nao_o_vizinho_mais_forte(self):
+        # O mais forte (-40 dBm) e outro CAMINHAO: some quando ele sai, e
+        # por isso nao caracteriza cobertura da area.
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -66.0)
+        self.assertEqual(am[0]["servidor_cob"], "ERB-07")
+        self.assertTrue(am[0]["cob_e_infra"])
+
+    def test_delta_mostra_o_que_ficou_na_mesa(self):
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        self.assertAlmostEqual(am[0]["delta_cob"], 22.0, places=1)
+
+    def test_sem_infra_cai_para_o_melhor_e_MARCA(self):
+        # Sem ERB/ERM visivel, usa o melhor vizinho qualquer — mas
+        # sinalizado. Silenciar isso apresentaria um caminhao de
+        # passagem como cobertura da area.
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -88.0}]
+        pr = [{"ponto": 1, "nome": "CA-1021", "sinal": -40.0, "snr": 50.0}]
+        r = rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -40.0)
+        self.assertFalse(am[0]["cob_e_infra"])
+        self.assertEqual(r["sem_infra"], 1)
+        self.assertEqual(r["com_infra"], 0)
+
+    def test_ponto_sem_vizinho_nao_inventa_cobertura(self):
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -88.0}]
+        rm.cobertura_disponivel(am, [])
+        self.assertIsNone(am[0].get("sinal_cob"))
+        self.assertIsNone(am[0].get("delta_cob"))
+
+    def test_cobertura_entra_no_resumo(self):
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        r = rm.survey_resumo(am)
+        self.assertIsNotNone(r.get("sinal_cob"))
+        self.assertEqual(r["sinal_cob"]["pct_ok"], 100.0)   # -66 > -75
+        self.assertEqual(r["sinal"]["pct_ok"], 0.0)         # -88 < -75
+
+    def test_cobertura_e_a_primeira_aba_do_kmz(self):
+        # Abrir pelo enlace entregue faz o leitor concluir "falta radio"
+        # onde o problema e outro.
+        self.assertEqual(rm.CAMPOS_KMZ[0], "sinal_cob")
+
+    def test_cobertura_tem_escala_e_faixas_proprias_registradas(self):
+        self.assertIn("sinal_cob", rm.ESCALAS)
+        self.assertIn("sinal_cob", rm.FAIXAS_KML)
+        # Mesma regua do RSSI: e a mesma grandeza, de outra fonte.
+        self.assertEqual(rm.ESCALAS["sinal_cob"]["req"],
+                         rm.ESCALAS["sinal"]["req"])
+        self.assertEqual(rm.FAIXAS_KML["sinal_cob"], rm.FAIXAS_KML["sinal"])
+
+    def test_banco_guarda_as_colunas_de_cobertura(self):
+        import tempfile
+        con = rm.banco(str(Path(tempfile.mkdtemp()) / "s.db"))
+        try:
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(amostra)")}
+            for c in ("sinal_cob", "snr_cob", "servidor_cob", "delta_cob"):
+                self.assertIn(c, cols)
+        finally:
+            con.close()
+
+    def test_varios_arquivos_nao_cruzam_vizinhos(self):
+        # Os numeros de ponto se repetem entre capturas: cruza-los ligaria
+        # o vizinho de uma ao trajeto de outra.
+        fonte = inspect.getsource(rm.importar_meshmapper_varios)
+        self.assertIn("cobertura_disponivel(am_i, pr_i)", fonte)
+
+
 class TestValorDoPixel(unittest.TestCase):
     """Como o raster escolhe o valor de cada pixel.
 

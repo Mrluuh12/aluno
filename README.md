@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 402 testes
+python3 teste_parser.py                        # 411 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -23,7 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
-| `teste_parser.py` | 402 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 411 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -107,6 +107,40 @@ Isso resolve de uma vez o que a sondagem por API não resolvia:
 - traz **todos** os peers por ponto, não só o que atendeu — dá para dizer
   *"estava ligado no X e havia um Y melhor ao lado"*;
 - quem gera o relatório não precisa de rede, credencial nem biblioteca.
+
+### Cobertura disponível × serviço entregue
+
+São **duas perguntas diferentes**, e o relatório passou a responder as
+duas separadamente:
+
+| pergunta | o que se mede |
+|---|---|
+| *"existe sinal servível aqui?"* | o melhor vizinho de **infraestrutura** (ERB/ERM) visível no ponto |
+| *"a aplicação funcionou aqui?"* | o enlace que o **InstaMesh usou** |
+
+No arquivo real do cliente, no mesmo trajeto e ao mesmo tempo:
+
+| | mediana | fora do requisito (> −75 dBm) |
+|---|---|---|
+| **cobertura disponível** | −66 dBm | **0%** |
+| enlace que atendeu | −88 dBm | **81,1%** |
+| RSSI disponível e não usado | 20 dB (mediana) | |
+
+**A área tem cobertura. O caminho escolhido é que era ruim.** Isso muda a
+recomendação do laudo: repetidora nova não resolveria.
+
+Por que **infraestrutura** e não o vizinho mais forte: o mais forte é
+quase sempre outro caminhão encostado (−40 dBm no arquivo do cliente).
+Ele some quando o caminhão sai, então não caracteriza cobertura da área.
+Quando não há nenhum ERB/ERM visível, cai para o melhor vizinho qualquer
+— **e o relatório diz isso**, em vez de apresentar veículo de passagem
+como cobertura.
+
+A aba de cobertura é a **primeira** do KMZ. Abrir pelo enlace entregue faz
+o leitor concluir "falta rádio" onde o problema é outro.
+
+O critério de infraestrutura é o padrão `^\s*(ERB|ERM)\b` e vai escrito no
+Excel, ao lado dos números.
 
 ### O que o MeshMapper não fornece
 
@@ -412,7 +446,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 402 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 411 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de
