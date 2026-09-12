@@ -5211,6 +5211,70 @@ class TestMalhaConhecida(unittest.TestCase):
             rm.descobrir_malha([], incluir_conhecidos=False)
 
 
+class TestGetStateDevolveObjeto(unittest.TestCase):
+    """`bc.get_state()` devolve o OBJETO State, não texto.
+
+    Quem converte é o `parse_state`, com `str()`. Medir o tamanho do
+    retorno antes disso estourou em campo com
+
+        TypeError: object of type 'State' has no len()
+
+    e a exceção matou as 156 threads de uma vez: a tela ficou vazia e o
+    traceback saiu no console, que quem usa a janela não vê.
+    """
+
+    class FakeState:
+        """Objeto sem __len__, como o State do protobuf."""
+        def __init__(self, texto): self._t = texto
+        def __str__(self):  return self._t
+
+    def setUp(self):
+        self._orig = rm.Breadcrumb
+        vivos = dict(list(rm.REDE_CONHECIDA.items())[:3])
+        FS = self.FakeState
+        st = ('configuration {\n  saved {\n    general {\n      name: "%s"\n'
+              '    }\n  }\n}\nwireless {\n  name: "wlan0"\n  channel: 157\n'
+              '  peer {\n    ipv4Address: "10.0.0.9"\n    signal: -70\n'
+              '    rssi: 25\n  }\n}\n')
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None):
+                s.h = host
+            def reachable(s):    return s.h in vivos
+            def authenticate(s): return True
+            def get_state(s, *a, **k):
+                return FS(st % (vivos[s.h] or s.h))
+        rm.Breadcrumb = F
+        self.vivos = vivos
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def test_descoberta_lida_com_o_objeto_state(self):
+        r = rm.descobrir_malha(list(self.vivos), incluir_conhecidos=False)
+        resp = [v for v in r.values() if not v.get("erro")]
+        self.assertEqual(len(resp), len(self.vivos),
+                         f"nenhum respondeu: {[v.get('erro') for v in r.values()]}")
+        self.assertTrue(all(v["bytes_state"] > 0 for v in resp))
+
+    def test_falha_interna_vira_linha_na_tela_e_nao_thread_morta(self):
+        # A propriedade que faltava: erro de programação dentro do worker
+        # tem de aparecer como motivo naquele rádio, não sumir.
+        class Explode:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k):
+                class SemNada:
+                    def __str__(s2): raise RuntimeError("boom interno")
+                return SemNada()
+        rm.Breadcrumb = Explode
+        r = rm.descobrir_malha(["10.0.0.1"], incluir_conhecidos=False)
+        self.assertIn("10.0.0.1", r)
+        self.assertTrue(r["10.0.0.1"]["erro"],
+                        "erro interno sumiu em vez de virar motivo")
+
+
 class TestListaDeIpsDeArquivo(unittest.TestCase):
     """Outra mina, outra lista: a de arquivo continua aceita."""
 

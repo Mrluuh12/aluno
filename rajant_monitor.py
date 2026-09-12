@@ -10296,7 +10296,13 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
                     raise ConnectionRefusedError("nao alcancavel")
                 if not bc.authenticate():
                     raise PermissionError("autenticacao falhou")
-                txt = bc.get_state()
+                # get_state() devolve o OBJETO State, não texto — quem
+                # converte é o parse_state, com str(). Medir o tamanho
+                # antes disso estourava com "object of type 'State' has
+                # no len()", e a exceção matava a thread sem registrar
+                # nada: 156 rádios sumiam calados. Converte-se uma vez
+                # aqui e o resto trabalha sobre o texto.
+                txt = str(bc.get_state())
                 d = parse_state(txt)
             except Exception as e:
                 with lk:
@@ -10353,7 +10359,22 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
         novos, ths, saidas = set(), [], {}
 
         def _worker(x):
-            saidas[x] = _um(x)
+            # Qualquer erro AQUI DENTRO tem de virar linha na tela, nunca
+            # thread morta. Um `len()` mal colocado derrubou as 156
+            # threads de uma vez e a tela ficou vazia sem explicar por
+            # quê — o traceback saiu no console, que o usuário de janela
+            # não vê.
+            try:
+                saidas[x] = _um(x)
+            except BaseException as e:
+                with lk:
+                    achados[x] = {"ip": x,
+                                  "nome": REDE_CONHECIDA.get(x) or x,
+                                  "tem_gps": False, "serial": None,
+                                  "modelo": None, "vizinhos": 0,
+                                  "erro": f"falha interna: "
+                                          f"{type(e).__name__}: {e}"}
+                saidas[x] = set()
         for ip in lote:
             t = threading.Thread(target=_worker, args=(ip,), daemon=True)
             ths.append(t); t.start()
