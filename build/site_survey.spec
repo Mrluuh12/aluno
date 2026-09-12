@@ -11,7 +11,10 @@
 #  * tkinter NÃO entra nos excludes: é a interface do programa. Herdar o
 #    exclude do spec do rajant_monitor geraria um exe que abre e fecha na
 #    hora, com o erro só no console que ninguém vê.
-#  * SEM prometheus_client e sem servidor web. O rajant_monitor entra como
+#  * prometheus_client ENTRA, mesmo este exe não expondo /metrics: o
+#    rajant_monitor o importa no topo e sai se faltar. Excluí-lo uma vez
+#    e o exe passou a fechar sozinho — ver o bloco de excludes.
+#  * Sem servidor web em uso. O rajant_monitor entra como
 #    BIBLIOTECA (parser, KMZ, PPT, Excel), nunca executado — o coletor de
 #    métricas e a página web não têm por que vir junto.
 #  * console=True mesmo tendo janela: os módulos também rodam por linha de
