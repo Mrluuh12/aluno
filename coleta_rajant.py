@@ -181,7 +181,13 @@ class Coleta:
             # A sessão guarda o motivo; sem trazê-lo para cá o usuário vê
             # só um contador de falhas subindo, sem nenhuma pista.
             raise RuntimeError(ses.ultimo_erro or "sem resposta")
-        return rm.parse_state(txt)
+        d = rm.parse_state(txt)
+        # Interferência e CPU não saem de UMA leitura: os contadores de
+        # canal são cumulativos desde o boot, e a razão entre eles daria a
+        # média da vida inteira do rádio. `calcular_taxas` guarda a
+        # leitura anterior por IP e devolve a taxa do intervalo. Sem esta
+        # chamada, `interf_pct` fica None para sempre.
+        return rm.calcular_taxas(ip, d, time.monotonic())
 
     def _amostra(self, ip, d, agora):
         s = d["sistema"]
@@ -205,34 +211,61 @@ class Coleta:
         if fix is not None:
             self.ultimo_fix[ip] = fix
 
-        melhor, banda, canal, servidor = None, None, None, None
+        # O melhor enlace do ponto, e TUDO que ele mede junto. Guardar só
+        # o RSSI deixava o laudo sem SNR e sem ruído — as duas grandezas
+        # sumiam do KMZ e do PPT por falta de dado, não por não existirem.
+        bom = None
         vizinhos = []
         for r in d.get("radios") or []:
+            # Piso de ruído é do RÁDIO, não do vizinho: é a mesma antena
+            # ouvindo. 0 aqui é "não medido", como em todo campo em dBm.
+            ruido_r = r.get("ruido") or None
+            banda_r = rm._norm_banda(r.get("freq")) if r.get("freq") else None
             for p in (r.get("peers") or []):
-                sig = p.get("sinal")
+                # MESMA regra do arquivo: `_i()` devolve 0 para campo
+                # ausente, e 0 dBm ganharia a eleição do melhor sinal.
+                sig, snr, custo, _ru = rm.limpar_enlace(
+                    p.get("sinal"), p.get("snr"), p.get("custo"))
                 vizinhos.append({
                     "nome": p.get("nome") or p.get("ip"),
                     "ip": p.get("ip"), "encap": p.get("encap"),
-                    "sinal": sig, "snr": p.get("snr"),
-                    "custo": p.get("custo"), "taxa": p.get("taxa"),
-                    "banda": rm._norm_banda(r.get("freq")) if r.get("freq") else None,
-                    "canal": r.get("canal"),
+                    "sinal": sig, "snr": snr,
+                    "custo": custo, "taxa": p.get("taxa") or None,
+                    "banda": banda_r, "canal": r.get("canal"),
                 })
-                if sig is not None and (melhor is None or sig > melhor):
-                    melhor = sig
-                    banda = vizinhos[-1]["banda"]
-                    canal = r.get("canal")
-                    servidor = vizinhos[-1]["nome"]
+                if sig is not None and (bom is None or sig > bom["sinal"]):
+                    bom = {"sinal": sig, "snr": snr, "custo": custo,
+                           "taxa": p.get("taxa") or None,
+                           "ruido": ruido_r, "banda": banda_r,
+                           "canal": r.get("canal"),
+                           "servidor": vizinhos[-1]["nome"],
+                           "interf": r.get("interf_pct")}
+        bom = bom or {}
+
+        # SNR preferido do próprio enlace; sem ele, recuperado de
+        # sinal − ruído, que é a definição. Nunca inventado.
+        snr_f = bom.get("snr")
+        if snr_f is None and bom.get("sinal") is not None and bom.get("ruido"):
+            snr_f = round(bom["sinal"] - bom["ruido"], 1)
 
         return {
             "radio": nome, "ts": time.time(),
             "lat": lat, "lon": lon, "alt": s.get("gps_alt"),
             "vel": s.get("gps_vel"), "sats": s.get("gps_sats"),
             "hdop": s.get("gps_hdop"),
-            "sinal": melhor, "snr": None, "ruido": None,
-            "rtt": None, "perda": None, "interf": None, "vazao": None,
-            "custo": None, "taxa": None, "peers": len(vizinhos),
-            "banda": banda, "canal": canal, "servidor": servidor,
+            "sinal": bom.get("sinal"), "snr": snr_f, "ruido": bom.get("ruido"),
+            # Latência e perda o rádio não mede — ficam None, e sem
+            # medição a grandeza não vira aba nem slide.
+            "rtt": None, "perda": None,
+            # Interferência a coleta ao vivo TEM, e o MeshMapper nunca deu:
+            # é a fração do meio ocupada por transmissor alheio. Só aparece
+            # a partir da segunda leitura do mesmo rádio (os contadores são
+            # cumulativos desde o boot; ver calcular_taxas).
+            "interf": bom.get("interf"), "vazao": None,
+            "custo": bom.get("custo"), "taxa": bom.get("taxa"),
+            "peers": len(vizinhos),
+            "banda": bom.get("banda"), "canal": bom.get("canal"),
+            "servidor": bom.get("servidor"),
             "fonte": "direto",
         }, vizinhos
 

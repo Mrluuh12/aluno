@@ -67,6 +67,26 @@ As duas podem divergir muito. No arquivo do CA-1006 a diferença foi de
 a −66 dBm no mesmo ponto, sem uso. Isso muda o laudo: a área tinha
 cobertura, o caminho escolhido é que era ruim.
 
+**A cor do mapa é exatamente a da legenda.** O rastro é pintado em
+degraus por faixa, não em gradiente contínuo: um pixel de −78 dBm sai com
+a mesma cor que a legenda mostra para a faixa −80 a −75. Antes o raster
+interpolava 256 tons entre −90 e −55, e cor conferida contra legenda dava
+outra coisa.
+
+| faixa | leitura |
+|---|---|
+| acima de −50 dBm | excelente |
+| −60 a −50 | muito bom |
+| −67 a −60 | bom — limiar clássico de voz e vídeo |
+| −70 a −67 | aceitável |
+| **−75 a −70** | **limite do requisito Modular** |
+| −80 a −75 | fraco |
+| −85 a −80 | muito fraco |
+| abaixo de −85 | inutilizável |
+
+O PPT traz um slide de **Metodologia** logo após o sumário, com essa
+mesma régua e com o que foi e o que não foi medido.
+
 ## As abas de vizinhança
 
 Ficam **desligadas**. Censo de vizinhos, pegada por repetidora e o KMZ de

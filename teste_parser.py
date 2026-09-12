@@ -4927,6 +4927,182 @@ wireless {
                             f"encap {enc} nao e sufixo de {ser}")
 
 
+class TestSlideDeMetodologia(unittest.TestCase):
+    """Como o número saiu, antes de discuti-lo.
+
+    Duas coisas não se adivinham olhando o mapa: de ONDE vem a cor (a
+    melhor ERB/ERM do ponto, não o enlace que atendeu) e QUAL é a régua.
+    Sem isso o leitor confere a cor contra a própria intuição.
+    """
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        import tempfile, sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        self.tmp = Path(tempfile.mkdtemp())
+        feitos = sm.gerar([str(self.EXEMPLO)], str(self.tmp),
+                          aviso=lambda t: None)
+        from pptx import Presentation
+        self.p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _slide(self, titulo):
+        for s in self.p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame and sh.text_frame.text.strip().startswith(titulo):
+                    return s
+        return None
+
+    def test_existe_e_vem_logo_apos_o_sumario(self):
+        titulos = []
+        for s in self.p.slides:
+            t = [sh.text_frame.text.strip().split("\n")[0]
+                 for sh in s.shapes
+                 if sh.has_text_frame and sh.text_frame.text.strip()]
+            titulos.append(t[0] if t else "")
+        self.assertIn("Metodologia", titulos)
+        self.assertEqual(titulos.index("Metodologia"),
+                         titulos.index("Sumário") + 1)
+
+    def test_declara_de_onde_vem_a_cor(self):
+        s = self._slide("Metodologia")
+        texto = " ".join(c.text for sh in s.shapes if sh.has_table
+                         for r in sh.table.rows for c in r.cells)
+        self.assertIn("ERB/ERM", texto)
+        self.assertIn("não o enlace que atendeu", texto)
+
+    def test_declara_o_que_nao_foi_medido(self):
+        # Latência e perda ausentes precisam ser ditas, senão o leitor
+        # supõe que foram medidas e deram bem.
+        s = self._slide("Metodologia")
+        texto = " ".join(c.text for sh in s.shapes if sh.has_table
+                         for r in sh.table.rows for c in r.cells)
+        self.assertIn("latência", texto.lower())
+        self.assertIn("perda", texto.lower())
+
+    def test_a_regua_mostra_as_cores_de_verdade(self):
+        # As amostras de cor do slide têm de ser as MESMAS do raster e da
+        # legenda do KMZ. Uma régua desenhada à mão divergiria na
+        # primeira vez que as faixas mudassem.
+        s = self._slide("Metodologia")
+        cores = []
+        for sh in s.shapes:
+            try:
+                if (sh.fill.type is not None
+                        and sh.fill.fore_color.rgb is not None
+                        and sh.width < 400000 and sh.height < 250000):
+                    cores.append(str(sh.fill.fore_color.rgb).upper())
+            except Exception:
+                pass
+        self.assertEqual(cores,
+                         [c.upper() for _, c in rm.FAIXAS_KML["sinal"]])
+
+    def test_ping_pong_saiu_dos_cartoes(self):
+        for s in self.p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame:
+                    self.assertNotIn("Ping-pong", sh.text_frame.text)
+
+
+class TestCorBateComALegenda(unittest.TestCase):
+    """A cor do raster tem de ser a MESMA da legenda, valor por valor.
+
+    Antes o raster interpolava um gradiente contínuo de 256 tons entre
+    `lo` e `hi`, enquanto a legenda do balão listava as faixas de
+    `FAIXAS_KML`. As duas réguas não coincidem em ponto nenhum: um pixel
+    de −78 dBm caía em 34% do gradiente e saía laranja, mas a legenda diz
+    que −80 a −75 é vermelho. Quem conferisse cor contra legenda
+    encontrava outra coisa — e num laudo de aprovação isso basta para
+    invalidar a leitura.
+    """
+
+    def _pinta(self, campo, valores):
+        import tempfile, os
+        import numpy as np
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        v = np.array([valores], dtype=float)
+        cam = os.path.join(tempfile.mkdtemp(), "t.png")
+        rm._png_calor(v, np.ones_like(v), rm._cmap_rf(),
+                      float(rm.ESCALAS[campo]["lo"]),
+                      float(rm.ESCALAS[campo]["hi"]), cam,
+                      faixas=rm.FAIXAS_KML[campo])
+        img = mpimg.imread(cam)[::-1]
+        return ["".join(f"{int(round(c * 255)):02X}" for c in img[0, j][:3])
+                for j in range(len(valores))]
+
+    def test_cada_faixa_de_rssi_sai_na_cor_da_legenda(self):
+        vals = [-95.0, -82.0, -78.0, -72.0, -68.0, -62.0, -55.0, -45.0]
+        obtido = self._pinta("sinal", vals)
+        for v, cor in zip(vals, obtido):
+            esperado = rm._bucket_cor(v, rm.FAIXAS_KML["sinal"])
+            self.assertEqual(cor.upper(), esperado.upper(),
+                             f"{v:g} dBm saiu {cor}, legenda diz {esperado}")
+
+    def test_vale_para_as_grandezas_de_sentido_invertido(self):
+        # Ruído: quanto MAIS NEGATIVO, melhor. Se o degrau usasse o
+        # sentido errado, o mapa sairia espelhado.
+        for campo, vals in (("ruido", [-99.0, -92.0, -87.0, -82.0, -60.0]),
+                            ("snr", [5.0, 12.0, 18.0, 22.0, 28.0, 35.0, 50.0])):
+            for v, cor in zip(vals, self._pinta(campo, vals)):
+                esperado = rm._bucket_cor(v, rm.FAIXAS_KML[campo])
+                self.assertEqual(cor.upper(), esperado.upper(),
+                                 f"{campo} {v:g} saiu {cor}, "
+                                 f"legenda diz {esperado}")
+
+    def test_o_valor_no_limite_cai_na_faixa_de_cima(self):
+        # `_bucket_cor` usa `v < lim`. O raster tem de concordar, senão a
+        # borda de cada faixa vira uma linha de cor errada no mapa.
+        for v in (-85.0, -80.0, -75.0, -70.0, -67.0, -60.0, -50.0):
+            cor = self._pinta("sinal", [v])[0]
+            self.assertEqual(cor.upper(),
+                             rm._bucket_cor(v, rm.FAIXAS_KML["sinal"]).upper(),
+                             f"limite {v:g} divergiu")
+
+    def test_sem_medicao_fica_transparente(self):
+        import numpy as np, tempfile, os
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        v = np.array([[-70.0, np.nan]])
+        alfa = np.array([[1.0, 1.0]])
+        cam = os.path.join(tempfile.mkdtemp(), "t.png")
+        rm._png_calor(v, alfa, rm._cmap_rf(), -90.0, -55.0, cam,
+                      faixas=rm.FAIXAS_KML["sinal"])
+        img = mpimg.imread(cam)[::-1]
+        self.assertGreater(img[0, 0][3], 0.9)
+        self.assertLess(img[0, 1][3], 0.01, "pixel sem medição ficou opaco")
+
+    def test_o_kmz_real_usa_os_degraus(self):
+        # A prova de ponta a ponta: o raster dentro do arquivo só pode ter
+        # as cores da tabela, e mais nenhuma.
+        import tempfile, shutil, zipfile, io as _io
+        import numpy as np
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        am = [{"radio": "CA-1", "ts": 100.0 + i,
+               "lat": -18.90 + i * 0.0004, "lon": -43.43,
+               "sinal": -60.0 - i * 1.5, "banda": "5.8 GHz"}
+              for i in range(24)]
+        sv = {"nome": "t", "inicio": 100.0, "fim": 124.0}
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        png = [n for n in z.namelist() if n.endswith(".png")][0]
+        img = mpimg.imread(_io.BytesIO(z.read(png)))
+        vis = img[img[..., 3] > 0.5][:, :3]
+        self.assertGreater(len(vis), 100, "raster saiu vazio")
+        achadas = {tuple(np.round(c * 255).astype(int)) for c in vis}
+        paleta = {tuple(int(cor[i:i+2], 16) for i in (0, 2, 4))
+                  for _, cor in rm.FAIXAS_KML["sinal"]}
+        fora = achadas - paleta
+        self.assertFalse(fora, f"cores fora da legenda no raster: "
+                               f"{sorted(fora)[:6]}")
+
+
 class TestLaudoDeTrajeto(unittest.TestCase):
     """O laudo que se usa todo dia, e só ele.
 
@@ -5666,6 +5842,71 @@ class TestColetaAoVivo(unittest.TestCase):
         c.parar(); th.join(10)
         self.assertGreater(len(c.amostras), 0,
                            "radio descartado nunca mais foi tentado")
+
+    def test_vizinho_sem_signal_nao_vira_0_dbm(self):
+        """O "nunca publicar 0" vazando no caminho AO VIVO.
+
+        `_i()` do parser devolve 0 quando o campo não existe. Um vizinho
+        sem `signal` chegava como 0 dBm e GANHAVA a eleição do melhor
+        sinal — o laudo saiu com "RSSI mediana 0,16 dBm, 100% dentro do
+        requisito", aprovado por uma medida que nunca existiu.
+        """
+        import time as _t, threading as _th
+        ST = ('configuration {\n  saved {\n    general {\n      name: "CA-1"\n'
+              '    }\n  }\n}\ngps {\n  gpsSwitch {\n    enabled: true\n  }\n'
+              '  gpsPos {\n    gpsTime: 143025.0\n    gpsLat: "1853.6443S"\n'
+              '    gpsLong: "04325.8538W"\n  }\n}\n'
+              'wireless {\n  name: "wlan0"\n  channel: 157\n  noise: -95\n'
+              '  peer {\n    ipv4Address: "10.0.0.90"\n    rssi: 27\n'
+              '    signal: -68\n    cost: 5000\n  }\n'
+              # este NÃO tem signal: é o que virava 0 dBm
+              '  peer {\n    ipv4Address: "10.0.0.91"\n    cost: 9000\n  }\n}\n')
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return ST
+        rm.Breadcrumb = F
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        self.assertTrue(c.amostras, "nada foi coletado")
+        self.assertEqual(c.amostras[0]["sinal"], -68,
+                         "o 0 dBm ganhou a eleição do melhor sinal")
+        self.assertFalse([v for v in c.peers if v["sinal"] == 0],
+                         "vizinho sem signal virou 0 dBm")
+
+    def test_coleta_traz_snr_e_ruido(self):
+        # Estavam fixos em None: as duas grandezas sumiam do KMZ e do PPT
+        # por falta de dado, não por não existirem no rádio.
+        import time as _t, threading as _th
+        ST = ('configuration {\n  saved {\n    general {\n      name: "CA-1"\n'
+              '    }\n  }\n}\ngps {\n  gpsSwitch {\n    enabled: true\n  }\n'
+              '  gpsPos {\n    gpsTime: 143025.0\n    gpsLat: "1853.6443S"\n'
+              '    gpsLong: "04325.8538W"\n  }\n}\n'
+              'wireless {\n  name: "wlan0"\n  channel: 157\n  noise: -95\n'
+              '  peer {\n    ipv4Address: "10.0.0.90"\n    rssi: 27\n'
+              '    signal: -68\n    cost: 5000\n    rate: 650\n  }\n}\n')
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return ST
+        rm.Breadcrumb = F
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        a = c.amostras[0]
+        self.assertEqual(a["ruido"], -95, "ruído do rádio não foi aproveitado")
+        self.assertIsNotNone(a["snr"], "SNR ficou None")
+        self.assertEqual(a["custo"], 5000)
+        # É o que faz SNR e ruído virarem aba no KMZ e slide no PPT.
+        self.assertEqual(set(rm.campos_com_medicao(c.amostras)),
+                         {"sinal", "snr", "ruido"})
 
     def test_motivo_da_falha_chega_a_tela(self):
         # Um contador de falhas subindo sem motivo escondeu a troca de

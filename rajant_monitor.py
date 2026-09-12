@@ -6131,18 +6131,52 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760, esc=None):
     return valor, alfa
 
 
-def _png_calor(valor, alfa, cmap, vmin, vmax, caminho):
+def _png_calor(valor, alfa, cmap, vmin, vmax, caminho, faixas=None):
     """Raster RGBA com transparência POR PIXEL.
 
     O `_png_overlay` usa alfa constante, que serve a heatmap de área
     inteira. Aqui a borda precisa esvanecer, senão o rastro vira uma
     salsicha de contorno duro.
+
+    `faixas` — [(limite_superior, "RRGGBB")] — pinta em DEGRAUS, com
+    exatamente as cores da legenda. É o padrão, e o motivo é que o
+    contrário estava errado:
+
+    Antes o raster interpolava um gradiente contínuo de 256 tons entre
+    `vmin` e `vmax`, enquanto a legenda do balão listava as faixas de
+    `FAIXAS_KML`. As duas réguas não coincidem em ponto nenhum. Um pixel
+    de −78 dBm caía em 34% do gradiente e saía laranja; a legenda diz que
+    −80 a −75 é vermelho. Quem conferisse cor contra legenda encontrava
+    outra coisa — e num laudo de aprovação isso é o bastante para
+    invalidar a leitura.
+
+    Com degraus, a cor do raster é a MESMA de `_bucket_cor()`, que já
+    pinta os pontos e as linhas. Uma régua só para o arquivo inteiro.
+
+    Sem `faixas`, mantém o gradiente contínuo — é o caminho de quem
+    desenha PNG fora do KML, onde não há legenda por faixa.
     """
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
-    norm = np.clip((valor - vmin) / max(vmax - vmin, 1e-9), 0, 1)
-    rgba = cmap(np.nan_to_num(norm, nan=0.0))
+
+    if faixas:
+        lims = np.array([f[0] for f in faixas], dtype=float)
+        cores = np.array(
+            [[int(c[i:i+2], 16) / 255.0 for i in (0, 2, 4)] + [1.0]
+             for _, c in faixas], dtype=float)
+        # `_bucket_cor` devolve a primeira faixa cujo limite SUPERA o
+        # valor: `v < lim`, com `<` estrito. O equivalente vetorizado é
+        # `side="right"` — com "left", o valor exatamente igual a um
+        # limite caía na faixa de BAIXO, e cada fronteira de faixa virava
+        # uma linha de cor errada no mapa.
+        v = np.nan_to_num(valor, nan=lims[-1])
+        idx = np.clip(np.searchsorted(lims, v, side="right"), 0, len(faixas) - 1)
+        rgba = cores[idx]
+    else:
+        norm = np.clip((valor - vmin) / max(vmax - vmin, 1e-9), 0, 1)
+        rgba = cmap(np.nan_to_num(norm, nan=0.0))
+    rgba = np.array(rgba, dtype=float, copy=True)
     rgba[..., 3] = np.where(np.isfinite(valor), alfa, 0.0)
     plt.imsave(caminho, np.flipud(rgba))     # KML espera norte no topo
     return caminho
@@ -6445,8 +6479,13 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             nome_png = f"calor_{campo}{sufixo}.png"
             import tempfile as _tf, os as _os
             cam = _os.path.join(_tf.mkdtemp(), nome_png)
-            _png_calor(valor, alfa, _cmap_rf(invertido=(esc.get("melhor") == "baixo")),
-                       float(esc["lo"]), float(esc["hi"]), cam)
+            # As MESMAS faixas da legenda do balão e das linhas. Ver a
+            # docstring de _png_calor: o gradiente contínuo daqui não
+            # batia com a legenda em ponto nenhum.
+            _png_calor(valor, alfa,
+                       _cmap_rf(invertido=(esc.get("melhor") == "baixo")),
+                       float(esc["lo"]), float(esc["hi"]), cam,
+                       faixas=FAIXAS_KML.get(campo))
             with open(cam, "rb") as fh:
                 extras.append((f"files/{nome_png}", fh.read()))
         except Exception as e:
@@ -7225,8 +7264,8 @@ def _mm_num(v):
     return f
 
 
-def _mm_enlace(sig, snr, custo):
-    """Limpa um trio (sinal, SNR, custo) vindo do MeshMapper.
+def limpar_enlace(sig, snr, custo):
+    """Limpa um trio (sinal, SNR, custo) — do arquivo OU do rádio.
 
     O arquivo usa 0 como "ainda nao medi este enlace", e 0 dBm nao existe
     num radio de malha — seria uma potencia recebida igual a 1 mW, colada
@@ -7238,6 +7277,13 @@ def _mm_enlace(sig, snr, custo):
 
     Vale para o enlace servidor E para cada vizinho da lista — o furo
     estava justamente na lista, que nao passava por aqui.
+
+    Vale tambem para a coleta AO VIVO, e o furo se repetiu ali: `_i()` do
+    parser devolve 0 quando o campo nao existe, entao um vizinho sem
+    `signal` chegava como 0 dBm e GANHAVA a eleicao do melhor sinal. O
+    laudo saiu com "RSSI mediana 0,16 dBm, 100% dentro do requisito" —
+    aprovado por uma medida que nunca existiu. Por isso a regra mora aqui,
+    num lugar so, e os dois caminhos passam por ela.
     """
     if sig == 0: sig = None
     if snr == 0 and sig is None: snr = None
@@ -7249,7 +7295,7 @@ def _mm_enlace(sig, snr, custo):
 
 def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
     """Uma amostra no formato interno, a partir do enlace servidor."""
-    sig, snr, custo, ruido = _mm_enlace(
+    sig, snr, custo, ruido = limpar_enlace(
         _mm_num(path.get("signal")),
         _mm_num(path.get("rssi")),            # sim: 'rssi' do arquivo é SNR
         _mm_num(path.get("cost")))
@@ -7323,7 +7369,7 @@ def _mm_do_json(d, rotulo):
                                     path, pt.get("numActivePeers")))
         for wlan, lista in (pt.get("wlanPeers") or {}).items():
             for q in (lista or []):
-                sig, snr, custo, ruido = _mm_enlace(
+                sig, snr, custo, ruido = limpar_enlace(
                     _mm_num(q.get("signal")), _mm_num(q.get("rssi")),
                     _mm_num(q.get("cost")))
                 freq = _mm_num(q.get("frequency"))
@@ -7397,7 +7443,7 @@ def _mm_dos_csv(p):
     peers = []
     if pinfo.exists():
         for r in _csv.DictReader(open(pinfo, encoding="utf-8", errors="replace")):
-            sig, snr, custo, ruido = _mm_enlace(
+            sig, snr, custo, ruido = limpar_enlace(
                 _mm_num(r.get("Signal")), _mm_num(r.get("RSSI (SNR)")),
                 _mm_num(r.get("Cost")))
             freq = _mm_num(r.get("Frequency"))
@@ -7924,6 +7970,29 @@ def cobertura_disponivel(amostras, peers, padrao=None):
 # duas ordens de grandeza abaixo de qualquer trajeto. Medido: a captura
 # da ERM-12 deu raio 0,4 m em 115 pontos; a do CA-1006 rodando, 890 m.
 RAIO_PARADO_M = 15.0
+
+
+def _passo_tipico(amostras):
+    """Mediana da distância entre amostras CONSECUTIVAS do mesmo rádio.
+
+    É o número que descreve a resolução de um survey — "intervalo
+    efetivo em segundos" não serve quando vários equipamentos medem ao
+    mesmo tempo: os carimbos se intercalam e a mediana dos intervalos
+    vira o tempo entre leituras de rádios DIFERENTES, que não significa
+    nada. O que o mapa precisa é densidade no espaço.
+    """
+    por = {}
+    for a in amostras:
+        if a.get("lat") is None or a.get("lon") is None: continue
+        por.setdefault(a.get("radio"), []).append(a)
+    ds = []
+    for pts in por.values():
+        pts = sorted(pts, key=lambda x: x.get("ts") or 0)
+        for p, q in zip(pts, pts[1:]):
+            ds.append(_dist_m(p["lat"], p["lon"], q["lat"], q["lon"]))
+    if not ds: return None
+    ds.sort()
+    return round(ds[len(ds) // 2], 1)
 
 
 def extensao_da_captura(amostras):
@@ -11663,16 +11732,88 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
                       ["Grandeza", "Requisito", "Dentro", "Mediana",
                        "Pior 5%"], linhas, destaques)
 
+    # Ping-pong saiu dos cartões: é diagnóstico de roteamento do
+    # InstaMesh, não de cobertura, e num sumário de survey puxava a
+    # conversa para outro assunto. Segue calculado e no texto das
+    # recomendações, onde tem contexto.
+    ext = extensao_da_captura(am)
+    _passo = _passo_tipico(am)
     cart = [("Amostras", f"{_milhar(len(am))}"),
             ("Rádios", str(len({a['radio'] for a in am}))),
-            ("Intervalo efetivo",
-             f"{sv.get('intervalo_efetivo_s') or sv.get('intervalo_s') or '—'} s"),
-            ("Handovers", str(srv.get("n_handovers", 0))),
-            ("Ping-pong", str(srv.get("n_pingpong", 0)))]
+            # `is not None`, nao truthy: passo 0 m e um RESULTADO — quer
+            # dizer que mais da metade das leituras saiu com o equipamento
+            # imovel —, e some se for tratado como ausente.
+            ("Passo entre amostras",
+             f"{_passo:g} m" if _passo is not None else "—"),
+            ("Área coberta",
+             f"{_milhar(round(ext['raio_m']))} m de raio" if ext else "—"),
+            ("Handovers", str(srv.get("n_handovers", 0)))]
     y = 1.45
     for rot, val in cart:
         _cartao_anglo(s, 8.35, y, 4.45, 0.72, rot, val)
         y += 0.82
+
+    # ── Metodologia: como o número saiu, antes de discuti-lo ──
+    # Vem logo depois do sumário porque toda página seguinte depende de
+    # duas coisas que ninguém adivinha olhando o mapa: de ONDE vem a cor
+    # (a melhor ERB/ERM do ponto, não o enlace que atendeu) e QUAL é a
+    # régua. Sem isso o leitor confere a cor contra a própria intuição.
+    s = slide_anglo(p, "Metodologia",
+                    "Como cada ponto foi medido e o que decide a cor")
+    passo = _passo_tipico(am)
+    fonte = "leitura direta do rádio" if any(
+        a.get("fonte") == "direto" for a in am) else "captura do MeshMapper"
+    linhas = [
+        ["Origem do dado", fonte],
+        ["Posição e sinal", "da MESMA leitura, no mesmo instante"],
+        ["Amostra repetida",
+         "descartada quando o GPS não atualizou a posição"],
+        ["Passo entre amostras",
+         (f"{passo:g} m (mediana, por equipamento)"
+          + ("  —  metade das leituras saiu com o equipamento parado"
+             if passo == 0 else ""))
+         if passo is not None else "—"],
+        ["Cor do ponto",
+         "melhor ERB/ERM visível ali — não o enlace que atendeu"],
+        ["Por que a melhor infra",
+         "outro veículo dá sinal ótimo e vai embora; não é cobertura"],
+        ["Bandas", "2,4 e 5,8 GHz em arquivos separados"],
+        ["Não medido", "latência e perda de pacotes"],
+    ]
+    _tabela_anglo(s, 0.55, 1.5, 7.5, ["Item", "Como é"], linhas, tam=10)
+
+    # A régua, com as cores DE VERDADE. É a mesma tabela que colore o
+    # raster, os pontos e as linhas do KMZ — uma régua só para tudo.
+    _txt_anglo(s, 8.15, 1.5, 4.65, 0.3, "Régua de cor — RSSI e cobertura",
+               10, True, ANGLO["texto"])
+    faixas_s = FAIXAS_KML["sinal"]
+    y = 1.85
+    req_m = float(ESCALAS["sinal"]["req"])
+    for k, (lim, cor) in enumerate(faixas_s):
+        ant = faixas_s[k - 1][0] if k else None
+        rot = (f"abaixo de {lim:g}" if ant is None else
+               f"acima de {ant:g}" if lim > 900 else
+               f"{ant:g} a {lim:g}")
+        try:
+            from pptx.util import Inches as _In, Pt as _Pt
+            from pptx.enum.shapes import MSO_SHAPE
+            cx = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, _In(8.15), _In(y),
+                                    _In(0.42), _In(0.24))
+            from pptx.dml.color import RGBColor as _RGB
+            cx.fill.solid(); cx.fill.fore_color.rgb = _RGB.from_string(cor)
+            cx.line.fill.background()
+            cx.shadow.inherit = False
+        except Exception:
+            pass
+        marca = "   ← requisito Modular" if ant == req_m else ""
+        _txt_anglo(s, 8.70, y - 0.03, 4.1, 0.3, f"{rot} dBm{marca}",
+                   9.5, bool(marca), ANGLO["texto"])
+        y += 0.30
+    _txt_anglo(s, 0.55, 6.75, 12.25, 0.5,
+               "A cor do mapa é a mesma desta tabela: o raster é pintado "
+               "em degraus por faixa, não em gradiente contínuo — assim a "
+               "cor conferida contra a legenda bate exatamente.",
+               9.5, False, ANGLO["suave"], italico=True)
 
     # ── Laudo das capturas feitas paradas ──
     # Uma por slide. Vem antes das paginas de area de proposito: quem

@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 512, em 75 classes |
+| testes | 524, em 77 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 512 testes e as âncoras de seção (§26).
+segura isso são os 524 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -633,6 +633,33 @@ Isso foi pego por teste próprio antes de chegar ao relatório.
 Com as posições dos fixos e o RSSI medido, ajusta `A` e `n` por banda e
 guarda `rms` e nº de amostras. Serve para estimar alcance — e a estimativa
 **nunca** é desenhada junto com a medição sem distinção visual (§23).
+
+### A cor do raster é a cor da legenda
+
+O rastro de calor era pintado com um **gradiente contínuo** de 256 tons
+entre `ESCALAS[campo]["lo"]` e `["hi"]`, enquanto a legenda do balão e os
+pontos usavam as faixas discretas de `FAIXAS_KML`. **As duas réguas não
+coincidem em ponto nenhum.**
+
+Um pixel de −78 dBm caía em 34% do gradiente e saía laranja; a legenda
+diz que −80 a −75 é vermelho. Quem conferisse cor contra legenda
+encontrava outra coisa — e num laudo de aprovação isso basta para
+invalidar a leitura.
+
+`_png_calor(..., faixas=FAIXAS_KML[campo])` pinta em **degraus**, com
+exatamente as cores da legenda. Raster, pontos, linhas e legenda passam a
+ter uma régua só.
+
+A vetorização precisa casar com `_bucket_cor()`, que usa `v < lim` com
+`<` **estrito**: o equivalente é `np.searchsorted(..., side="right")`.
+Com `"left"`, o valor exatamente igual a um limite cai na faixa de baixo
+e cada fronteira vira uma linha de cor errada no mapa. Há teste para os
+sete limites.
+
+**A régua em si** segue a prática dos surveys comerciais e o requisito do
+contrato: cortes em −85, −80, **−75 (requisito Modular)**, −70, −67, −60
+e −50 dBm. O −67 é o limiar clássico para voz e vídeo; o −70, para dados.
+SNR corta em 10, 15, 20 (requisito), 25, 30 e 40 dB.
 
 ### A pegada de cada repetidora
 
@@ -1228,14 +1255,23 @@ Zero é indistinguível de "medido e deu zero". Campo sem medição vira `None`
 e a série é **omitida**. Era o que fazia contador de erro de ethernet e CPU
 parecerem saudáveis num painel inteiro.
 
-A invariante vaza pelas bordas, e a borda mais recente foi a lista de
-vizinhos do MeshMapper. A limpeza existia para o enlace servidor e não
+A invariante vaza pelas bordas, e vazou DUAS vezes pela mesma porta.
+
+Primeiro na lista de vizinhos do MeshMapper. A limpeza existia para o enlace servidor e não
 para os peers: 0 dBm — potência recebida de 1 mW, impossível num rádio de
 malha — passava direto e **ganhava** a eleição de `cobertura_disponivel()`,
 que escolhe por `max(sinal)`. No arquivo real do CA-1006 isso pintava três
 pontos do trajeto de verde máximo, com "87 dB disponíveis e não usados" no
-laudo. Hoje `_mm_enlace()` é o único lugar onde a regra vive, e as duas
-listas passam por ele.
+laudo.
+
+Depois na coleta **ao vivo**, e pior: `_i()` do parser devolve 0 quando o
+campo não existe, então um vizinho sem `signal` chegava como 0 dBm e
+**ganhava a eleição do melhor sinal**. O laudo saiu com *"RSSI mediana
+0,16 dBm, 100% dentro do requisito"* — aprovado por uma medida que nunca
+existiu.
+
+Hoje `limpar_enlace()` é o único lugar onde a regra vive, e os dois
+caminhos — arquivo e rádio — passam por ele.
 
 ### 2. Nada se afirma sobre a BC API sem conferir o `.proto`
 
