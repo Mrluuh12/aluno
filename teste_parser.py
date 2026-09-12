@@ -2453,9 +2453,15 @@ class TestTodosOsKmz(unittest.TestCase):
         raiz = ET.fromstring(k)
         abas = [f.find(NS+"name").text
                 for f in raiz.find(NS+"Document").findall(NS+"Folder")]
-        for rot in ("RSSI", "SNR", "Ruído", "Latência", "Perda",
-                    "Interferência"):
+        # A aba de RSSI é a de `sinal_cob` — o rótulo vem da escala, para
+        # renomear a grandeza num lugar só.
+        for rot in (rm.ESCALAS["sinal_cob"]["rot"], "SNR", "Ruído",
+                    "Latência", "Perda", "Interferência"):
             self.assertIn(rot, abas)
+        # A aba do enlace escolhido saiu: era a mesma grandeza medida de
+        # outro jeito, e duas abas "RSSI" no painel de camadas obrigavam
+        # a lembrar qual era qual.
+        self.assertNotIn("RSSI", abas)
 
     def test_banda_no_nome_para_nao_sobrescrever(self):
         # Sem a banda no nome, o de 5.8 GHz sobrescreveria o de 2.4 GHz.
@@ -2473,6 +2479,13 @@ class TestTodosOsKmz(unittest.TestCase):
         self.assertIn("Intensidade de Sinal (RSSI)", txt)
         self.assertIn("Noise Floor", txt)
         self.assertIn("Interferência de Canal", txt)
+        # Nome de campo cru no LEIA-ME manda procurar um slide que nao
+        # existe: o deck fala "Intensidade de Sinal", nao "sinal_cob".
+        for campo in rm.CAMPOS_KMZ:
+            self.assertNotIn(f"slide: 5. Site Survey — {campo}", txt)
+        # A pasta ZONAS-PROBLEMA saiu do KMZ; a dica que mandava procurar
+        # por ela virou instrucao para uma camada inexistente.
+        self.assertNotIn("ZONAS-PROBLEMA", txt)
 
     def test_kml_filtra_por_banda(self):
         con = rm.banco()
@@ -3280,6 +3293,17 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertTrue(usados)
         self.assertEqual(usados - defin, set())
 
+    def test_estilo_da_zona_saiu_com_a_pasta(self):
+        # "zona" (o poligono) e "sugestao" (o alfinete do local
+        # recomendado) continuaram sendo emitidos depois de a pasta
+        # ZONAS-PROBLEMA sair do laudo: peso morto no arquivo, e um
+        # <Style id> vivo para o que nao existe mais convida a
+        # ressuscitar a pasta por engano.
+        _, txt, _ = self._arvore()
+        for sid in ("zona", "sugestao"):
+            self.assertNotIn(f'<Style id="{sid}">', txt)
+            self.assertNotIn(f"<styleUrl>#{sid}</styleUrl>", txt)
+
     def test_so_as_cores_usadas_viram_estilo(self):
         # Emitir as 40 do gradiente vezes seis grandezas encheria o
         # arquivo de estilo morto.
@@ -3292,6 +3316,12 @@ class TestKmlSurvey(unittest.TestCase):
     def test_rota_funde_trechos_de_mesma_cor(self):
         # Um Placemark por PAR de pontos dava mais de mil objetos por
         # radio, pesados de abrir e com emenda visivel entre segmentos.
+        # A linha vem DESLIGADA no padrao (o rastro e o calor), entao o
+        # teste liga: sem isso ele passava de carona nos poligonos das
+        # zonas-problema e parou de cobrir a fusao quando elas sairam.
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        cfg.set("relatorio", "kmz_com_rotas", "true")
+        self.cfg = cfg
         _, txt, _ = self._arvore()
         import re as _re
         comp = [len(c.split()) for c in
@@ -3996,8 +4026,17 @@ class TestMeshMapper(unittest.TestCase):
         self.assertIn("goodRSSI", self.sv["limiares_mm"])
 
     def test_campos_sem_medicao_sao_identificados(self):
+        # `ler_meshmapper` devolve a amostra crua; quem anexa o RSSI do
+        # laudo e `cobertura_disponivel`, um passo depois — e os tres
+        # caminhos de geracao (importar_meshmapper, survey_meshmapper.gerar
+        # e a coleta ao vivo) o chamam antes de montar KMZ e PPT.
+        rm.cobertura_disponivel(self.am, self.pr)
         campos = rm.campos_com_medicao(self.am)
-        self.assertIn("sinal", campos)
+        # O RSSI do laudo e `sinal_cob` — a melhor ERB/ERM do ponto. E
+        # ele que vira aba e slide; `sinal` (o enlace escolhido) segue
+        # nas amostras, mas nao abre camada propria.
+        self.assertIn("sinal_cob", campos)
+        self.assertNotIn("sinal", campos)
         self.assertIn("snr", campos)
         # O MeshMapper nao fornece nenhum destes.
         for c in ("rtt", "perda", "interf"):
@@ -4049,6 +4088,11 @@ class TestCoberturaDisponivel(unittest.TestCase):
     mediana -88 dBm e 81% fora do requisito, contra cobertura de -66 dBm
     e 100% dentro. Reportar so a primeira leva a conclusao errada de que
     falta radio na area.
+
+    Aquela apuracao e ANTERIOR ao recorte por banda e misturava 2,4 com
+    5,8 GHz; os -66 dBm sao de 2,4 GHz num ponto cuja amostra e de 5,8.
+    A regra vigente elege dentro da banda da amostra — ver
+    `test_a_eleicao_acontece_dentro_da_banda_da_amostra`.
     """
 
     def _dados(self):
@@ -4105,6 +4149,60 @@ class TestCoberturaDisponivel(unittest.TestCase):
         # Abrir pelo enlace entregue faz o leitor concluir "falta radio"
         # onde o problema e outro.
         self.assertEqual(rm.CAMPOS_KMZ[0], "sinal_cob")
+
+    def test_a_eleicao_acontece_dentro_da_banda_da_amostra(self):
+        # Medido no arquivo de exemplo: o mesmo ponto enxerga ERM-28 a
+        # -71 dBm em 2,4 GHz e ERM-09 a -86 dBm em 5,8 GHz. A amostra e
+        # de 5,8 GHz (a banda do enlace que atendeu) e sem recorte o -71
+        # ia para o mapa de 5,8 GHz — 15 dB, a diferenca entre aprovado e
+        # reprovado. Separar 2,4 e 5,8 em arquivos nao adianta se a
+        # leitura de uma banda entra no mapa da outra.
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -89.0, "banda": "5.8 GHz"}]
+        pr = [{"ponto": 1, "nome": "ERM-28", "sinal": -71.0, "snr": 22.0,
+               "banda": "2.4 GHz"},
+              {"ponto": 1, "nome": "ERM-09", "sinal": -86.0, "snr": 23.0,
+               "banda": "5.8 GHz"}]
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -86.0)
+        self.assertEqual(am[0]["servidor_cob"], "ERM-09")
+        self.assertEqual(am[0]["snr_cob"], 23.0)
+        self.assertAlmostEqual(am[0]["delta_cob"], 3.0, places=1)
+
+    def test_sem_vizinho_na_banda_fica_buraco_e_nao_a_outra_banda(self):
+        # Buraco no mapa se le como "nao medi". Pintado com a medida da
+        # outra banda, se le como medicao — e mente.
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -89.0, "banda": "5.8 GHz"}]
+        pr = [{"ponto": 1, "nome": "ERM-28", "sinal": -71.0, "snr": 22.0,
+               "banda": "2.4 GHz"}]
+        r = rm.cobertura_disponivel(am, pr)
+        self.assertIsNone(am[0].get("sinal_cob"))
+        self.assertEqual(r["sem_vizinho_na_banda"], 1)
+
+    def test_amostra_sem_banda_usa_todos_os_vizinhos(self):
+        # A sondagem por API nem sempre traz a banda. Sem ela nao ha o
+        # que recortar, e descartar tudo apagaria o mapa inteiro.
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -66.0)
+
+    def test_a_banda_do_arquivo_real_e_respeitada(self):
+        # O mesmo, contra o recorte do arquivo do cliente em vez de
+        # fixture inventada.
+        exemplo = (Path(__file__).resolve().parent / "exemplos"
+                   / "meshmapper_exemplo.json")
+        if not exemplo.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        _, am, pr = rm.ler_meshmapper(str(exemplo))
+        rm.cobertura_disponivel(am, pr)
+        for a in am:
+            if a.get("servidor_cob") is None: continue
+            banda = rm._norm_banda(a["banda"])
+            iguais = [p for p in pr
+                      if p.get("nome") == a["servidor_cob"]
+                      and rm._norm_banda(p.get("banda")) == banda]
+            self.assertTrue(iguais, f"{a['servidor_cob']} nao existe em {banda}")
 
     def test_cobertura_tem_escala_e_faixas_proprias_registradas(self):
         self.assertIn("sinal_cob", rm.ESCALAS)
@@ -4973,8 +5071,10 @@ class TestSlideDeMetodologia(unittest.TestCase):
         s = self._slide("Metodologia")
         texto = " ".join(c.text for sh in s.shapes if sh.has_table
                          for r in sh.table.rows for c in r.cells)
+        # A ficha diz QUAL enlace define o número, sem depender de uma
+        # frase específica: o que não pode faltar é o critério.
         self.assertIn("ERB/ERM", texto)
-        self.assertIn("não o enlace que atendeu", texto)
+        self.assertIn("maior intensidade", texto)
 
     def test_declara_o_que_nao_foi_medido(self):
         # Latência e perda ausentes precisam ser ditas, senão o leitor
@@ -5175,19 +5275,75 @@ class TestLaudoDeTrajeto(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_cor_vem_da_melhor_erb_ou_erm_do_ponto(self):
-        # `sinal_cob` e a primeira aba de proposito: e a pergunta do
-        # laudo — havia sinal servivel ali?
+        # UMA aba de RSSI, e ela é a do melhor ERB/ERM do ponto. Havia
+        # duas — "Cobertura disponível" e "RSSI" —, a mesma grandeza em
+        # dBm por dois critérios, e quem abria não sabia qual valia.
         import tempfile, shutil, zipfile
         tmp = Path(tempfile.mkdtemp())
         try:
             kmz = [f for f in self._gerar(tmp) if f.suffix == ".kmz"][0]
             kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
-            self.assertIn("Cobertura disponível", kml)
-            i = kml.index("Cobertura disponível")
-            for outra in ("RSSI", "SNR"):
+            # O rótulo sai de ESCALAS: afirmá-lo literal aqui envelheceria
+            # na primeira vez que ele mudasse.
+            rot = rm.ESCALAS["sinal_cob"]["rot"]
+            self.assertIn("ERB/ERM", rot,
+                          "o rótulo parou de dizer de onde vem o número")
+            self.assertIn(f"<name>{rot}</name>", kml)
+            self.assertNotIn("<name>Cobertura disponível</name>", kml,
+                             "a aba redundante voltou")
+            # É a primeira: é a pergunta do laudo.
+            i = kml.index(f"<name>{rot}</name>")
+            for outra in ("SNR", "Ruído"):
                 j = kml.find(f"<name>{outra}</name>")
                 if j > -1:
-                    self.assertLess(i, j, f"{outra} veio antes da cobertura")
+                    self.assertLess(i, j, f"{outra} veio antes do RSSI")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_zonas_problema_sairam_do_laudo(self):
+        # Elas sugeriam coordenada para avaliar rádio, que é decisão de
+        # projeto de RF e não conclusão de medição.
+        import tempfile, shutil, zipfile
+        from pptx import Presentation
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            feitos = self._gerar(tmp)
+            for kmz in (f for f in feitos if f.suffix == ".kmz"):
+                kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+                self.assertNotIn("ZONAS-PROBLEMA", kml)
+            p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+            for s in p.slides:
+                for sh in s.shapes:
+                    if sh.has_text_frame:
+                        self.assertNotIn("Zonas-Problema", sh.text_frame.text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_deck_termina_com_diagnostico_e_conclusoes_em_branco(self):
+        # O deck entrega o que foi MEDIDO; a leitura daquilo é de quem
+        # conhece a operação. As páginas entram estruturadas e vazias.
+        import tempfile, shutil
+        from pptx import Presentation
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            p = Presentation([f for f in self._gerar(tmp)
+                              if f.suffix == ".pptx"][0])
+            tit = []
+            for s in p.slides:
+                t = [sh.text_frame.text.strip().split("\n")[0]
+                     for sh in s.shapes
+                     if sh.has_text_frame and sh.text_frame.text.strip()]
+                tit.append(t[0] if t else "")
+            self.assertEqual(tit[-2:], ["Diagnóstico", "Conclusões e Ações"])
+            # A tabela de ações tem de sair VAZIA: preenchida por mim
+            # seria conclusão inventada.
+            s = list(p.slides)[-1]
+            tab = [sh.table for sh in s.shapes if sh.has_table][0]
+            corpo = [[c.text for c in r.cells] for r in list(tab.rows)[1:]]
+            self.assertTrue(corpo, "tabela de ações não foi criada")
+            for lin in corpo:
+                self.assertEqual([c for c in lin[1:] if c.strip()], [],
+                                 f"linha veio preenchida: {lin}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -5906,7 +6062,14 @@ class TestColetaAoVivo(unittest.TestCase):
         self.assertEqual(a["custo"], 5000)
         # É o que faz SNR e ruído virarem aba no KMZ e slide no PPT.
         self.assertEqual(set(rm.campos_com_medicao(c.amostras)),
-                         {"sinal", "snr", "ruido"})
+                         {"snr", "ruido"})
+        # O RSSI do laudo e `sinal_cob`, e na coleta ao vivo ele nasce do
+        # mesmo passo do arquivo: `cobertura_disponivel` sobre os
+        # vizinhos lidos. Sem esta chamada o mapa sai sem a camada
+        # principal, que foi como o KMZ ficou sem SNR e ruido antes.
+        rm.cobertura_disponivel(c.amostras, c.peers)
+        self.assertIn("sinal_cob", rm.campos_com_medicao(c.amostras))
+        self.assertEqual(c.amostras[0]["sinal_cob"], -68)
 
     def test_motivo_da_falha_chega_a_tela(self):
         # Um contador de falhas subindo sem motivo escondeu a troca de

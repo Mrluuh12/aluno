@@ -35,7 +35,7 @@ coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios
 |---|---|
 | `Survey_*_24GHz.kmz` | rastro de calor de 2,4 GHz, uma aba por grandeza |
 | `Survey_*_58GHz.kmz` | idem, 5,8 GHz |
-| `Site_Survey_*.pptx` | capa, índice, sumário, zonas-problema e uma página por grandeza/banda |
+| `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, uma página por grandeza/banda e duas páginas em branco para diagnóstico e conclusões |
 | `Survey_*.xlsx` | origens, resumo, por grandeza e amostras |
 
 **Juntar tudo num relatório só** (padrão) produz um conjunto com todas as
@@ -52,20 +52,29 @@ Dentro de cada arquivo, uma aba por grandeza medida:
 
 | aba | o que é |
 |---|---|
-| **Cobertura disponível** | a melhor ERB/ERM visível no ponto — é a **cor do laudo** |
-| RSSI | o enlace que o InstaMesh de fato escolheu |
+| **RSSI (melhor ERB/ERM do ponto)** | a **cor do laudo** |
 | SNR | relação sinal/ruído do enlace |
 | Ruído | piso de ruído, recuperado de `signal − snr` |
 
-**A cor de cada ponto vem da melhor ERB/ERM daquele ponto**, não do
-enlace que atendeu. Outro caminhão passando dá sinal ótimo e vai embora;
-só a infraestrutura caracteriza cobertura. Por isso a aba de cobertura
-disponível vem primeiro.
+**RSSI aqui é o da melhor ERB/ERM visível no ponto**, não o do enlace que
+o InstaMesh escolheu. Outro caminhão passando dá sinal ótimo e vai
+embora; só a infraestrutura caracteriza cobertura.
 
-As duas podem divergir muito. No arquivo do CA-1006 a diferença foi de
-**22 dB na mediana** — o enlace entregue a −88 dBm enquanto havia um ERB
-a −66 dBm no mesmo ponto, sem uso. Isso muda o laudo: a área tinha
-cobertura, o caminho escolhido é que era ruim.
+Havia uma segunda aba com o enlace escolhido. Saiu: duas abas chamadas
+RSSI no painel de camadas obrigavam a lembrar qual era qual, e o laudo
+responde uma pergunta só — *quanto sinal há neste ponto da mina*. O
+enlace escolhido continua na aba **Amostras** do Excel, na coluna
+*RSSI do enlace (dBm)*, ao lado da *Δ não usado (dB)*.
+
+**A eleição acontece dentro da banda.** O mapa de 5,8 GHz só considera
+vizinhos de 5,8 GHz. No arquivo do CA-1006 o mesmo ponto via uma ERM a
+−71 dBm em 2,4 GHz e outra a −86 dBm em 5,8 GHz; sem o recorte, o mapa de
+5,8 GHz saía pintado com os −71 dBm da outra banda — 15 dB, a distância
+entre aprovado e reprovado. Ponto sem vizinho na banda fica **sem cor**.
+
+Quanto o enlace escolhido deixou na mesa é a coluna *Δ não usado (dB)* do
+Excel. Vale conferi-la: delta grande com cobertura boa não é falta de
+rádio, é escolha de caminho, e repetidora nova não resolveria.
 
 **A cor do mapa é exatamente a da legenda.** O rastro é pintado em
 degraus por faixa, não em gradiente contínuo: um pixel de −78 dBm sai com
@@ -84,8 +93,29 @@ outra coisa.
 | −85 a −80 | muito fraco |
 | abaixo de −85 | inutilizável |
 
-O PPT traz um slide de **Metodologia** logo após o sumário, com essa
-mesma régua e com o que foi e o que não foi medido.
+O PPT traz um slide de **Metodologia** logo após o sumário: ficha técnica
+do levantamento — instrumento, número de equipamentos e amostras, a
+grandeza de referência, como a posição foi obtida e validada, as bandas,
+o requisito Modular Mining e o que **não** foi medido — mais essa mesma
+régua de cores com a classificação de cada faixa.
+
+## Diagnóstico e conclusões
+
+O deck termina com dois slides **em branco**, para o analista preencher:
+
+| slide | o que vai nele |
+|---|---|
+| **Diagnóstico** | áreas críticas identificadas e causa provável |
+| **Conclusões e Ações** | tabela de ação / local / responsável / prazo |
+
+Ficam em branco de propósito. A ferramenta mede; onde instalar rádio,
+qual o orçamento e quem executa são decisões de projeto, e sair impressa
+uma sugestão ao lado do que foi medido faz uma passar pela outra.
+
+Pelo mesmo motivo saiu a antiga seção de **zonas-problema**, que marcava
+regiões no mapa e propunha coordenada para rádio novo. A sub-pasta *Fora
+do requisito* continua dentro de cada grandeza no KMZ: ela mostra os
+pontos reprovados, que é medição, sem propor o que fazer com eles.
 
 ## As abas de vizinhança
 
@@ -111,7 +141,7 @@ arquivo, e entrega o produto certo para cada uma.
 | | veículo andando | MeshMapper ligado numa repetidora |
 |---|---|---|
 | o que o arquivo é | um **trajeto**: cada ponto é um lugar | uma **janela de tempo** num lugar só |
-| produto | rastro de calor + zonas-problema | censo de vizinhos + pino no mapa |
+| produto | rastro de calor + PPT + Excel | censo de vizinhos + pino no mapa |
 | pergunta que responde | como está a cobertura **nesta rota** | quem fala com **este rádio** e como |
 
 Captura parada **não vira rastro de calor**. Sairia uma mancha de um

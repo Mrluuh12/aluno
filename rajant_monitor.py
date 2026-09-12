@@ -6337,14 +6337,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         '<Style id="manual"><IconStyle><color>ffff00ff</color><scale>1.0</scale>'
         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/ruler.png'
         '</href></Icon></IconStyle></Style>')
-    # Zona: preenchimento vermelho translúcido para não esconder o terreno.
-    estilos.append(
-        '<Style id="zona"><LineStyle><color>ff2b39c0</color><width>3</width>'
-        '</LineStyle><PolyStyle><color>552b39c0</color></PolyStyle></Style>')
-    estilos.append(
-        '<Style id="sugestao"><IconStyle><color>ff00ffff</color>'
-        '<scale>1.3</scale><Icon><href>http://maps.google.com/mapfiles/kml/'
-        'shapes/target.png</href></Icon></IconStyle></Style>')
+    # Os estilos "zona" (polígono da zona-problema) e "sugestao" (alfinete
+    # do local recomendado) sairam junto com a pasta ZONAS-PROBLEMA. Estilo
+    # sem styleUrl que o use e peso morto no arquivo, e um <Style id> que
+    # sobrevive ao que ele estilizava convida a ressuscitar a pasta por
+    # engano.
 
     pastas = []
 
@@ -6604,40 +6601,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                     f"{un_a} ({len(ruins)})</name><open>0</open>"
                     f"<visibility>0</visibility>{''.join(itens)}</Folder>")
 
-        # zonas-problema: a camada que responde "o que fazer"
-        if lim_a is not None:
-            try:
-                zonas = zonas_problema(am, campo_a, grade_zonas)
-            except Exception as e:
-                log.warning(f"[kml] zonas-problema ({campo_a}): {e}"); zonas = []
-            if zonas:
-                itens_z = []
-                for i, z in enumerate(zonas, start=1):
-                    # Círculo aproximado, para a zona ter área no mapa em
-                    # vez de virar um alfinete solto.
-                    raio = max(40.0, z["extensao_m"] / 2.0)
-                    g_lat = raio / 111_320.0
-                    g_lon = g_lat / max(0.1, math.cos(math.radians(z["lat"])))
-                    anel = [(z["lat"] + g_lat*math.sin(k*math.pi/18),
-                             z["lon"] + g_lon*math.cos(k*math.pi/18))
-                            for k in range(37)]
-                    texto = _esc(texto_zona(z, campo_a))
-                    itens_z.append(_placemark(
-                        f"Zona {i} — {z['valor_mediano']:g} {un_a}",
-                        f"<![CDATA[<h3>Zona {i}</h3><p>{texto}</p>"
-                        f"<p><small>Equipamentos: "
-                        f"{_esc(', '.join(z['radios'][:12]))}</small></p>]]>",
-                        "zona", anel=anel))
-                    itens_z.append(_placemark(
-                        f"Zona {i} — avaliar rádio aqui",
-                        f"<![CDATA[{texto}]]>", "sugestao",
-                        ponto=(z["sugestao_lat"], z["sugestao_lon"])))
-                dentro.append(
-                    f"<Folder><name>ZONAS-PROBLEMA ({len(zonas)})</name>"
-                    f"<open>1</open><description><![CDATA[Regiões contíguas "
-                    f"fora do requisito. O alfinete marca o pior ponto — "
-                    f"sugestão de local para avaliar rádio, não veredito."
-                    f"]]></description>{''.join(itens_z)}</Folder>")
+        # A pasta ZONAS-PROBLEMA saiu a pedido: ela sugeria coordenada
+        # para avaliar radio, que e decisao de projeto de RF e nao
+        # conclusao de medicao. `zonas_problema()` segue no modulo e no
+        # relatorio semanal; o que mudou foi o laudo de survey parar de
+        # apresentar sugestao ao lado do que foi medido.
 
         req = (f" · requisito {op_a} {lim_a:g} {un_a}" if lim_a is not None
                else "")
@@ -7753,13 +7721,16 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     ws = wb.create_sheet("Amostras")
     _cab(ws, "Trajeto medido", f"{len(amostras)} pontos", 14)
     lin = 4
+    # Duas colunas de RSSI, e a diferenca entre elas e o diagnostico —
+    # entao cada uma diz de qual enlace fala. "RSSI (dBm)" sozinho ao
+    # lado de "Cobertura (dBm)" nao dizia, e o laudo (mapa e slides)
+    # reporta a SEGUNDA.
     _th(ws, lin, ["#", "Hora (UTC)", "Latitude", "Longitude", "Alt (m)",
-                  "Banda", "Canal", "RSSI (dBm)", "SNR (dB)", "Ruído (dBm)",
-                  "Custo", "Taxa (Mbps)", "Vizinhos", "Servidor",
-                  # As tres ultimas sao a outra pergunta: o que HAVIA
-                  # disponivel ali, e quanto disso nao foi usado.
-                  "Cobertura (dBm)", "Melhor infra", "Δ não usado (dB)"],
-        [6, 19, 12, 12, 9, 10, 8, 11, 10, 12, 10, 12, 10, 22, 14, 22, 15])
+                  "Banda", "Canal", "RSSI do enlace (dBm)", "SNR (dB)",
+                  "Ruído (dBm)", "Custo", "Taxa (Mbps)", "Vizinhos",
+                  "Servidor", "RSSI da melhor ERB/ERM (dBm)",
+                  "Melhor ERB/ERM", "Δ não usado (dB)"],
+        [6, 19, 12, 12, 9, 10, 8, 19, 10, 12, 10, 12, 10, 22, 24, 22, 15])
     lin += 1
     for i, a in enumerate(sorted(amostras, key=lambda x: x.get("ts") or 0), 1):
         lin = _td(ws, lin, [i, dt(a.get("ts")), a.get("lat"), a.get("lon"),
@@ -7897,6 +7868,20 @@ def cobertura_disponivel(amostras, peers, padrao=None):
     entregue tinha mediana -88 dBm e 81% fora do requisito, enquanto o
     melhor vizinho de infra dava -66 dBm e 100% dentro. Reportar so a
     primeira leva a conclusao errada de que falta radio na area.
+    (Aquela apuracao e anterior ao recorte por banda abaixo e misturava
+    as duas malhas; o numero da campanha precisa ser reapurado.)
+
+    A eleicao acontece DENTRO DA BANDA da amostra. No arquivo do cliente
+    o mesmo ponto enxerga ERM-28 a -71 dBm em 2,4 GHz e ERM-09 a -86 dBm
+    em 5,8 GHz; a amostra e de 5,8 GHz (e a banda do enlace que atendeu)
+    e sem o recorte ela levava o -71 para o mapa de 5,8 GHz. Os 15 dB de
+    diferenca sao justamente o que separa aprovado de reprovado, e a
+    razao de 2,4 e 5,8 sairem em arquivos separados: nao adianta separar
+    os arquivos se a leitura de uma banda entra no mapa da outra.
+
+    Ponto sem nenhum vizinho na banda da amostra fica SEM `sinal_cob` —
+    buraco no mapa, que se le como "nao medi", em vez de pintado com a
+    medida da outra banda.
 
     Os campos anexados sao `sinal_cob`, `snr_cob`, `servidor_cob` e
     `delta_cob` (quanto de RSSI ficou na mesa). Devolve um resumo com a
@@ -7909,9 +7894,16 @@ def cobertura_disponivel(amostras, peers, padrao=None):
         nome = (p.get("nome") or "")
         por_ponto.setdefault(p.get("ponto"), []).append((rx.search(nome) is not None, p))
 
-    n_infra = n_fallback = 0
+    n_infra = n_fallback = n_sem_banda = 0
     for i, a in enumerate(amostras, start=1):
         lista = por_ponto.get(i) or []
+        banda_a = _norm_banda(a.get("banda")) if a.get("banda") else None
+        if banda_a:
+            mesma = [(eh, p) for eh, p in lista
+                     if _norm_banda(p.get("banda")) == banda_a]
+            if lista and not mesma:
+                n_sem_banda += 1
+            lista = mesma
         infra = [p for eh, p in lista if eh]
         if infra:
             n_infra += 1
@@ -7934,6 +7926,7 @@ def cobertura_disponivel(amostras, peers, padrao=None):
             # falta de radio, e escolha de caminho.
             a["delta_cob"] = round(melhor["sinal"] - a["sinal"], 1)
     return {"com_infra": n_infra, "sem_infra": n_fallback,
+            "sem_vizinho_na_banda": n_sem_banda,
             "padrao": padrao or PADRAO_INFRA}
 
 
@@ -9132,7 +9125,14 @@ def _fixos_do_survey(amostras, limiar=0.0003):
 # que dimensiona repetidora; o enlace entregue e o que a aplicacao
 # enfrentou. Abrir pela segunda faz o leitor concluir "falta radio" onde
 # o problema e outro.
-CAMPOS_KMZ = ["sinal_cob", "sinal", "snr", "ruido", "rtt", "perda", "interf"]
+# UMA aba de RSSI, nao duas. "Cobertura disponivel" e "RSSI" mostravam a
+# mesma grandeza em dBm — uma pelo melhor ERB/ERM do ponto, a outra pelo
+# enlace que o InstaMesh escolheu. Lado a lado no mesmo arquivo viravam
+# duas leituras do mesmo mapa, e quem abria nao sabia qual valia.
+#
+# Fica a do melhor ERB/ERM: e ela que responde "ha cobertura aqui". O
+# enlace que atendeu continua gravado, coluna a coluna, na aba Amostras.
+CAMPOS_KMZ = ["sinal_cob", "snr", "ruido", "interf", "rtt", "perda"]
 
 
 def gerar_todos_kmz(sid, cfg=None, campos=None, bandas=None):
@@ -9221,15 +9221,18 @@ def _leiame_kmz(sv, gerados, pulados):
         for campo, banda, motivo in pulados:
             L.append(f"  {campo}{(' / ' + banda) if banda else ''}: {motivo}")
     L += ["",
-          "DICA: a pasta ZONAS-PROBLEMA marca as regioes fora do requisito,",
-          "e o alfinete traz a recomendacao. A pasta FORA DO REQUISITO vem",
-          "desligada de proposito: ligada, ela cobre os pontos bons.",
+          "DICA: dentro de cada grandeza ha a sub-pasta FORA DO REQUISITO,",
+          "com os pontos reprovados. Vem desligada de proposito: ligada,",
+          "ela cobre os pontos bons.",
           ""]
     return "\n".join(L)
 
 
 # Grandeza -> titulo do slide onde o print dela deve ser colado.
+# Sem a entrada, o LEIA-ME cai no `campo` cru e manda o operador procurar
+# um slide chamado "sinal_cob", que nao existe no deck.
 SLIDE_DE_CAMPO = {
+    "sinal_cob": "Intensidade de Sinal (RSSI)",
     "sinal": "Intensidade de Sinal (RSSI)",
     "snr":   "Relação Sinal/Ruído (SNR)",
     "ruido": "Noise Floor",
@@ -9587,7 +9590,7 @@ ESCALAS = {
     # servivel aqui?", que e outra pergunta de "a aplicacao funcionou
     # aqui?". Mesma escala e mesmo requisito do RSSI: e RSSI, medido de
     # outra fonte.
-    "sinal_cob": {"rot": "Cobertura disponível", "un": "dBm",
+    "sinal_cob": {"rot": "RSSI (melhor ERB/ERM do ponto)", "un": "dBm",
                   "lo": -90, "hi": -55, "req": -75, "melhor": "alto"},
 }
 
@@ -11715,7 +11718,11 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     resumo = survey_resumo(am)
     srv = analisar_servidores(am)
     linhas = []
-    for c in ("sinal", "snr", "rtt", "perda"):
+    # `sinal_cob` e nao `sinal`: o laudo reporta o RSSI do melhor ERB/ERM
+    # do ponto, que e o mesmo numero do mapa. Reportar aqui o enlace que
+    # atendeu e colorir o mapa pelo outro daria duas respostas para a
+    # mesma pergunta na mesma pagina.
+    for c in ("sinal_cob", "snr", "rtt", "perda"):
         r = (resumo or {}).get(c)
         if not r: continue
         rot = (limite_de(c) or (None, None, None, c))[3]
@@ -11753,67 +11760,80 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
         _cartao_anglo(s, 8.35, y, 4.45, 0.72, rot, val)
         y += 0.82
 
-    # ── Metodologia: como o número saiu, antes de discuti-lo ──
-    # Vem logo depois do sumário porque toda página seguinte depende de
-    # duas coisas que ninguém adivinha olhando o mapa: de ONDE vem a cor
-    # (a melhor ERB/ERM do ponto, não o enlace que atendeu) e QUAL é a
-    # régua. Sem isso o leitor confere a cor contra a própria intuição.
+    # ── Metodologia ──
+    # Ficha tecnica da medicao, nao texto explicativo: instrumento,
+    # grandeza, criterio de amostragem, regua e limitacoes. Vem antes das
+    # paginas de mapa porque duas coisas nao se leem no mapa — qual
+    # enlace define a cor e onde ficam os cortes da escala.
     s = slide_anglo(p, "Metodologia",
-                    "Como cada ponto foi medido e o que decide a cor")
+                    "Parâmetros da medição e critérios de classificação")
     passo = _passo_tipico(am)
-    fonte = "leitura direta do rádio" if any(
-        a.get("fonte") == "direto" for a in am) else "captura do MeshMapper"
-    linhas = [
-        ["Origem do dado", fonte],
-        ["Posição e sinal", "da MESMA leitura, no mesmo instante"],
-        ["Amostra repetida",
-         "descartada quando o GPS não atualizou a posição"],
-        ["Passo entre amostras",
-         (f"{passo:g} m (mediana, por equipamento)"
-          + ("  —  metade das leituras saiu com o equipamento parado"
-             if passo == 0 else ""))
-         if passo is not None else "—"],
-        ["Cor do ponto",
-         "melhor ERB/ERM visível ali — não o enlace que atendeu"],
-        ["Por que a melhor infra",
-         "outro veículo dá sinal ótimo e vai embora; não é cobertura"],
-        ["Bandas", "2,4 e 5,8 GHz em arquivos separados"],
-        ["Não medido", "latência e perda de pacotes"],
+    ao_vivo = any(a.get("fonte") == "direto" for a in am)
+    canais = sorted({int(a["canal"]) for a in am if a.get("canal")})
+    n_eq = len({a["radio"] for a in am})
+    req_s = float(ESCALAS["sinal_cob"]["req"])
+    req_n = float(ESCALAS["snr"]["req"])
+    ficha = [
+        ["Instrumento",
+         "BC API — leitura direta do State de cada rádio" if ao_vivo
+         else f"Rajant MeshMapper {sv.get('versao_bcc') or ''}".strip()],
+        ["Equipamentos",
+         f"{n_eq} rádio{'s' if n_eq != 1 else ''} · "
+         f"{_milhar(len(am))} amostras"],
+        ["Grandeza de referência",
+         "RSSI do enlace de maior intensidade com ERB/ERM visível no "
+         "ponto, na banda do mapa"],
+        ["Georreferenciamento",
+         "GPS do próprio equipamento, na mesma leitura do sinal"],
+        ["Validação de posição",
+         "amostra descartada quando o horário do fix não avançou"],
+        ["Espaçamento entre amostras",
+         (f"mediana {passo:g} m" + (" (equipamento parado em mais da metade "
+                                    "das leituras)" if passo == 0 else ""))
+         if passo is not None else "não aplicável"],
+        ["Bandas",
+         " · ".join(b for b in bandas if b) + " — arquivos separados"
+         + (f" · canais {', '.join(str(c) for c in canais)}" if canais else "")],
+        ["Requisitos (Modular Mining)",
+         f"RSSI > {req_s:g} dBm · SNR > {req_n:g} dB"],
+        ["Grandezas não medidas", "latência e perda de pacotes"],
     ]
-    _tabela_anglo(s, 0.55, 1.5, 7.5, ["Item", "Como é"], linhas, tam=10)
+    _tabela_anglo(s, 0.55, 1.5, 7.5, ["Parâmetro", "Especificação"],
+                  ficha, tam=10)
 
-    # A régua, com as cores DE VERDADE. É a mesma tabela que colore o
-    # raster, os pontos e as linhas do KMZ — uma régua só para tudo.
-    _txt_anglo(s, 8.15, 1.5, 4.65, 0.3, "Régua de cor — RSSI e cobertura",
+    # A regua, com as cores DE VERDADE, lidas de FAIXAS_KML. Desenhada a
+    # mao ela divergiria do mapa na primeira vez que as faixas mudassem.
+    _txt_anglo(s, 8.15, 1.5, 4.65, 0.3, "Escala de classificação — RSSI",
                10, True, ANGLO["texto"])
-    faixas_s = FAIXAS_KML["sinal"]
+    faixas_s = FAIXAS_KML["sinal_cob"]
+    leitura = ["inutilizável", "muito fraco", "fraco", "limite do requisito",
+               "aceitável", "bom", "muito bom", "excelente"]
     y = 1.85
-    req_m = float(ESCALAS["sinal"]["req"])
     for k, (lim, cor) in enumerate(faixas_s):
         ant = faixas_s[k - 1][0] if k else None
-        rot = (f"abaixo de {lim:g}" if ant is None else
-               f"acima de {ant:g}" if lim > 900 else
-               f"{ant:g} a {lim:g}")
+        rot = (f"< {lim:g}" if ant is None else
+               f"> {ant:g}" if lim > 900 else f"{ant:g} a {lim:g}")
         try:
-            from pptx.util import Inches as _In, Pt as _Pt
+            from pptx.util import Inches as _In
             from pptx.enum.shapes import MSO_SHAPE
+            from pptx.dml.color import RGBColor as _RGB
             cx = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, _In(8.15), _In(y),
                                     _In(0.42), _In(0.24))
-            from pptx.dml.color import RGBColor as _RGB
             cx.fill.solid(); cx.fill.fore_color.rgb = _RGB.from_string(cor)
-            cx.line.fill.background()
-            cx.shadow.inherit = False
+            cx.line.fill.background(); cx.shadow.inherit = False
         except Exception:
             pass
-        marca = "   ← requisito Modular" if ant == req_m else ""
-        _txt_anglo(s, 8.70, y - 0.03, 4.1, 0.3, f"{rot} dBm{marca}",
-                   9.5, bool(marca), ANGLO["texto"])
+        cls = leitura[k] if k < len(leitura) else ""
+        _txt_anglo(s, 8.70, y - 0.03, 4.1, 0.3,
+                   f"{rot} dBm   {cls}", 9.5,
+                   negrito=(ant == req_s), cor=ANGLO["texto"])
         y += 0.30
-    _txt_anglo(s, 0.55, 6.75, 12.25, 0.5,
-               "A cor do mapa é a mesma desta tabela: o raster é pintado "
-               "em degraus por faixa, não em gradiente contínuo — assim a "
-               "cor conferida contra a legenda bate exatamente.",
-               9.5, False, ANGLO["suave"], italico=True)
+    _txt_anglo(s, 8.15, y + 0.05, 4.65, 0.5,
+               f"Corte em {req_s:g} dBm: requisito contratual.", 9,
+               False, ANGLO["suave"])
+    _txt_anglo(s, 0.55, 6.8, 7.5, 0.4,
+               "O raster do KMZ usa esta mesma tabela, em degraus por "
+               "faixa.", 9, False, ANGLO["suave"])
 
     # ── Laudo das capturas feitas paradas ──
     # Uma por slide. Vem antes das paginas de area de proposito: quem
@@ -11869,48 +11889,15 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
                  f"{len(am)} amostras, {n_nav} atalhos")
         return buf.getvalue(), f"Site_Survey_{seguro}_{quando:%Y%m%d}.pptx"
 
-    # ── Zonas-problema por banda: a pagina acionavel ──
-    try:
-        grade = float(cfg.get("relatorio", "zonas_grade_m", fallback="50"))
-    except (ValueError, TypeError):
-        grade = 50.0
-    for b in bandas:
-        am_b = [a for a in am if _norm_banda(a.get("banda")) == b] or am
-        try:    zonas = zonas_problema(am_b, "sinal", grade)
-        except Exception: zonas = []
-        rot_b = f" — {b}" if b else ""
-        s = slide_anglo(p, f"Zonas-Problema{rot_b}",
-                        "Regiões contíguas fora do requisito, com o BC que "
-                        "as servia e sugestão de ponto para avaliação")
-        if zonas:
-            linhas = [[str(i), f"{_milhar(z['extensao_m'])} m",
-                       f"{_milhar(z['area_m2'])} m² · {z['pct_area']:g}%",
-                       z["servidor"] or "—",
-                       f"{z['valor_mediano']:g} dBm",
-                       f"{z['pior_valor']:g} dBm", str(z["n_radios"]),
-                       f"{z['sugestao_lat']:.5f}, {z['sugestao_lon']:.5f}"]
-                      for i, z in enumerate(zonas[:8], start=1)]
-            dest = {}
-            for i, z in enumerate(zonas[:8], start=1):
-                dest[(i, 4)] = "C0392B"; dest[(i, 5)] = "C0392B"
-                if z.get("sistemico"): dest[(i, 2)] = "E67E22"
-            _tabela_anglo(s, 0.55, 1.5, 12.25,
-                          ["#", "Extensão", "Área", "Servida por", "Mediana",
-                           "Pior", "Equip.", "Sugestão (lat, lon)"],
-                          linhas, dest, tam=9)
-            _txt_anglo(s, 0.55, 6.7, 12.25, 0.5,
-                       "A sugestão é ponto de partida para o projeto de RF, "
-                       "não veredito: confirmar linha de visada e energia no "
-                       "local.", 9.5, False, ANGLO["suave"], italico=True)
-        else:
-            _txt_anglo(s, 0.55, 1.6, 12.25, 0.5,
-                       "Nenhuma zona contígua fora do requisito no período.",
-                       13, True, "1E8449")
+    # Os slides de Zonas-Problema sairam junto, pelo mesmo motivo: a
+    # pagina listava coordenada sugerida para avaliar radio.
 
     # ── Molduras para o print do Google Earth ──
     for b in bandas:
-        for campo, rot in (("sinal_cob", "Cobertura Disponível (melhor infra)"),
-                           ("sinal", "Intensidade de Sinal (RSSI)"),
+        # UMA pagina de RSSI, a do melhor ERB/ERM do ponto. Duas paginas
+        # com o mesmo rotulo em dBm faziam o leitor procurar a diferenca
+        # entre elas em vez de ler o mapa.
+        for campo, rot in (("sinal_cob", "Intensidade de Sinal (RSSI)"),
                            ("snr", "Relação Sinal/Ruído (SNR)"),
                            ("ruido", "Noise Floor"),
                            ("interf", "Interferência de Canal"),
@@ -11953,6 +11940,32 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
             # do slide: sem ela o mapa é uma fita colorida sem significado
             # para quem não fez a medição.
             _escala_anglo(s, 8.05, 6.05, 4.75, campo)
+
+    # ── Diagnóstico e conclusões: em branco, para preencher ──
+    # O deck entrega o que foi MEDIDO. A leitura daquilo — o que explica
+    # o número e o que fazer a respeito — é de quem conhece a operação, e
+    # sai de uma reunião, não de um gerador de relatório. Estas páginas
+    # entram estruturadas e vazias.
+    s = slide_anglo(p, "Diagnóstico",
+                    "Leitura dos resultados — preencher")
+    _txt_anglo(s, 0.55, 1.5, 12.25, 0.32,
+               "Áreas críticas identificadas", 11, True, ANGLO["texto"])
+    y = 1.95
+    for _ in range(4):
+        _linha_anglo(s, 0.75, y + 0.26, 12.05)
+        y += 0.52
+    _txt_anglo(s, 0.55, y + 0.12, 12.25, 0.32,
+               "Causa provável", 11, True, ANGLO["texto"])
+    y += 0.55
+    for _ in range(3):
+        _linha_anglo(s, 0.75, y + 0.26, 12.05)
+        y += 0.52
+
+    s = slide_anglo(p, "Conclusões e Ações",
+                    "Encaminhamentos — preencher")
+    _tabela_anglo(s, 0.55, 1.5, 12.25,
+                  ["#", "Ação", "Local / equipamento", "Responsável", "Prazo"],
+                  [[str(i), "", "", "", ""] for i in range(1, 8)], tam=11)
 
     # ── Navegacao: indice + botoes em cada slide ──
     # Feita DEPOIS de tudo: os alvos precisam existir para o link nao
@@ -12125,7 +12138,12 @@ def _tabela_anglo(s, x, y, w, cab, linhas, destaques=None, tam=10):
                                            else ANGLO["fundo"])
             par = cel.text_frame.paragraphs[0]
             par.alignment = PP_ALIGN.LEFT if j == 0 else PP_ALIGN.CENTER
-            r = par.add_run(); r.text = "—" if v in (None, "") else str(v)
+            # None vira "—" (não medido); string vazia fica VAZIA. São
+            # coisas diferentes: a tabela de ações do fim do deck é um
+            # formulário para preencher, e "—" ali se lê como "não se
+            # aplica" em vez de "escreva aqui".
+            r = par.add_run()
+            r.text = "—" if v is None else str(v)
             r.font.name = ANGLO["fonte"]; r.font.size = Pt(tam)
             cor = (destaques or {}).get((i, j))
             r.font.color.rgb = _rgb(cor or ANGLO["texto"])
@@ -12146,6 +12164,22 @@ def _cartao_anglo(s, x, y, w, h, rotulo, valor):
                ANGLO["suave"])
     _txt_anglo(s, x + 0.18, y + 0.30, w - 0.36, 0.36, valor, 16, True,
                ANGLO["azul"])
+    return cx
+
+
+def _linha_anglo(s, x, y, w):
+    """Pauta fina, para o slide que vai ser preenchido a mão ou digitado.
+
+    Retângulo de 1 pt em vez de conector: conector no python-pptx nasce
+    com a cor e a espessura do tema do arquivo, que aqui é o padrão do
+    PowerPoint e sai preto e grosso no meio de um deck claro.
+    """
+    from pptx.util import Inches, Pt
+    from pptx.enum.shapes import MSO_SHAPE
+    cx = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y),
+                            Inches(w), Pt(0.75))
+    cx.fill.solid(); cx.fill.fore_color.rgb = _rgb(ANGLO["linha"])
+    cx.line.fill.background(); cx.shadow.inherit = False
     return cx
 
 

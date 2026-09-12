@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 524, em 77 classes |
+| testes | 531, em 77 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 524 testes e as âncoras de seção (§26).
+segura isso são os 531 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -582,19 +582,40 @@ As grandezas medidas e seus requisitos (Modular Mining):
 
 | campo | rótulo | unidade | escala | requisito | melhor |
 |---|---|---|---|---|---|
-| `sinal` | RSSI | dBm | −90 … −55 | > −75 | alto |
+| `sinal` | RSSI do enlace | dBm | −90 … −55 | > −75 | alto |
 | `snr` | SNR | dB | 5 … 45 | > 20 | alto |
 | `ruido` | Ruído | dBm | −100 … −70 | < −85 | baixo |
 | `rtt` | Latência | ms | 0 … 200 | < 100 | baixo |
 | `perda` | Perda | % | 0 … 10 | < 2 | baixo |
 | `interf` | Interferência | % | 0 … 60 | < 20 | baixo |
-| `sinal_cob` | Cobertura disponível | dBm | −90 … −55 | > −75 | alto |
+| `sinal_cob` | RSSI (melhor ERB/ERM do ponto) | dBm | −90 … −55 | > −75 | alto |
 
-`sinal_cob` não é requisito contratual: é o **mesmo RSSI lido de outra
-fonte** — o melhor vizinho de infraestrutura visível no ponto, em vez do
-enlace que o InstaMesh usou. Responde *"existe sinal servível aqui?"*,
-que é outra pergunta de *"a aplicação funcionou aqui?"*. No arquivo do
-cliente as duas divergiam em 22 dB de mediana.
+`sinal_cob` é o **mesmo RSSI lido de outra fonte** — o melhor vizinho de
+infraestrutura visível no ponto, em vez do enlace que o InstaMesh usou.
+Responde *"existe sinal servível aqui?"*, que é outra pergunta de *"a
+aplicação funcionou aqui?"*.
+
+A eleição é feita **dentro da banda da amostra**. Um ponto enxerga ERBs
+nas duas malhas, e a amostra carrega a banda do enlace que atendeu: sem o
+recorte, o melhor de 2,4 GHz ia parar no mapa de 5,8 GHz. No recorte do
+arquivo do cliente isso valia 15 dB (−71 em 2,4 contra −86 em 5,8), que
+é a distância entre aprovado e reprovado. Sem vizinho na banda, o ponto
+fica **sem `sinal_cob`** — buraco no mapa, não a medida da outra banda.
+`cobertura_disponivel()` devolve `sem_vizinho_na_banda` para o relatório
+poder contar quantos foram.
+
+**`sinal_cob` é o RSSI do laudo** e `sinal` não abre camada própria:
+`CAMPOS_KMZ` começa em `sinal_cob` e não lista `sinal`. Duas abas RSSI no
+painel de camadas do Google Earth obrigavam a lembrar qual era qual, e o
+survey responde uma pergunta só — *quanto sinal há neste ponto da mina*.
+`sinal` continua em cada amostra, na aba Amostras do Excel, ao lado do
+`delta_cob`, que é onde a divergência entre as duas vira diagnóstico.
+
+Consequência operacional: `sinal_cob` nasce em `cobertura_disponivel()`,
+um passo **depois** de `ler_meshmapper()`. Os três caminhos de geração
+(`importar_meshmapper`, `survey_meshmapper.gerar` e a coleta ao vivo em
+`coleta_rajant.gravar_e_gerar`) o chamam antes de montar KMZ e PPT. Um
+caminho novo que esqueça a chamada produz mapa sem a camada principal.
 
 Interferência: 20% é onde o CSMA começa a atrasar o acesso ao meio de forma
 perceptível; acima de 50% a banda útil despenca **mesmo com RSSI ótimo** —
@@ -616,6 +637,17 @@ perceptível; acima de 50% a banda útil despenca **mesmo com RSSI ótimo** —
 | `distribuicao` | % das amostras por faixa da escala |
 
 ### Zonas-problema
+
+**Fora do laudo de survey.** O KMZ e o PPT do site survey não trazem mais
+a seção: ela propunha coordenada para rádio novo, que é decisão de
+projeto de RF, e impressa ao lado do que foi medido uma passava pela
+outra. No lugar dela o deck termina em dois slides **em branco** —
+Diagnóstico e Conclusões e Ações — e o KMZ mantém, dentro de cada
+grandeza, a sub-pasta *Fora do requisito*: os pontos reprovados, sem
+proposta do que fazer com eles.
+
+`zonas_problema()` segue no módulo e no **relatório semanal**, que é
+outro produto e tem outro leitor. O que ela faz:
 
 O que transforma "23% fora do requisito" em ação. Uma zona é uma mancha
 contígua de células ruins; o texto sai por grandeza:
@@ -716,7 +748,7 @@ arquivos reais do cliente. O que muda é o significado:
 |---|---|---|
 | o arquivo é | um trajeto: cada ponto é um lugar | uma janela de tempo num lugar só |
 | medido | 146 m de raio em 55 pontos | **0,5 m** de raio em 115 pontos |
-| produto | rastro de calor, zonas-problema | censo de vizinhos, pino, enlaces |
+| produto | rastro de calor, PPT, Excel | censo de vizinhos, pino, enlaces |
 
 `captura_parada()` decide pelo **dado**, não pelo nome do rádio: um ERM
 rebocado é trajeto, e um caminhão estacionado a manhã inteira não é. O

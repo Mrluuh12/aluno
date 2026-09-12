@@ -232,7 +232,13 @@ dois vieses:
 
 **Zonas-problema.** As células reprovadas contíguas viram zonas, com extensão,
 área, servidor dominante, equipamentos afetados e o pior ponto como sugestão de
-local para avaliar rádio. Vira slide próprio e camada no KML.
+local para avaliar rádio.
+
+> **Fora do laudo de site survey.** Não vira mais slide nem camada no KML:
+> a sugestão de coordenada para rádio novo é decisão de projeto de RF, e
+> impressa ao lado do que foi medido uma passava pela outra. `zonas_problema()`
+> segue no módulo e no **relatório semanal**, que é outro produto e tem outro
+> leitor. Ver "Diagnóstico e conclusões", adiante.
 
 A ação recomendada **depende da grandeza** — recomendar "mais um rádio" para
 zona de interferência estaria errado, porque adensar não tira do ar quem ocupa
@@ -427,6 +433,28 @@ O slide de **Análise, Recomendações e Conclusão** deixou de sair em branco: 
 preenchido com o que já era calculado — percentual dentro de cada requisito,
 cobertura por BC, handovers e ping-pong, e as zonas com a ação recomendada.
 
+### Diagnóstico e conclusões
+
+O deck de site survey (`--ppt-survey`, e o que a ferramenta de campo gera)
+**termina em dois slides em branco**: *Diagnóstico* — áreas críticas e causa
+provável — e *Conclusões e Ações* — uma tabela de ação, local, responsável e
+prazo, com sete linhas vazias.
+
+Em branco de propósito. Medição e recomendação são coisas diferentes, e sair
+impressa uma proposta de coordenada para rádio novo ao lado do que foi medido
+faz uma passar pela outra: quem lê o deck não distingue mais o que o
+equipamento mediu do que a ferramenta supôs. Onde instalar rádio, com que
+orçamento e quem executa são decisões de projeto de RF, do analista.
+
+Foi por isso que a seção de zonas-problema saiu deste deck e a pasta
+correspondente saiu do KMZ. O que sobrou é medição: a sub-pasta *Fora do
+requisito* dentro de cada grandeza mostra os pontos reprovados, sem dizer o
+que fazer com eles.
+
+Uma consequência prática: célula vazia numa tabela do deck fica **vazia**.
+Só `None` vira "—". São coisas diferentes — a tabela de ações é formulário
+para preencher, e "—" ali se lê como "não se aplica" em vez de "escreva aqui".
+
 ### Montar os slides à mão
 
 Enquanto a rede da mina bloquear os tiles, o PNG sai sem satélite. O caminho
@@ -457,14 +485,21 @@ A linha leva um **contorno escuro discreto** por baixo, que a mantém legível
 sobre satélite claro e escuro sem virar malha preta onde uma dezena de
 equipamentos cruza a mesma pista. Início e fim de cada trajeto vêm marcados.
 
-Cada aba abre assim:
+O KMZ tem **uma pasta por grandeza** e só a primeira — o RSSI — nasce
+visível: ligadas juntas, os pontos de todas se empilham no mesmo lugar e
+o mapa não diz nada. Dentro de cada uma:
 
 | camada | estado inicial |
 |---|---|
-| **Rotas** | ligada |
-| **Medições** (pontos) | ligada |
-| **Zonas-problema** | ligada |
+| **Calor** (o rastro) | ligada |
 | Fora do requisito | desligada — ligada, cobre os pontos bons |
+
+A **linha** do trajeto vem desligada: era ela que produzia arestas retas
+ligando pontos por onde ninguém passou. Quem quiser o traço cru liga em
+`[relatorio] kmz_com_rotas = true`.
+
+A pasta **Zonas-problema** saiu do laudo de survey — ver "Diagnóstico e
+conclusões", adiante.
 
 ### Cores
 
