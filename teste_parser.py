@@ -4717,7 +4717,9 @@ class TestSaidasDaCapturaParada(unittest.TestCase):
             z.writestr("data.json", _json.dumps(d))
         return str(alvo)
 
-    def test_repetidora_gera_vizinhanca_e_nao_rastro(self):
+    def test_repetidora_nunca_gera_rastro_de_calor(self):
+        # A regra que nao depende de chave nenhuma: 115 leituras
+        # empilhadas em meio metro NAO viram mapa de area.
         import tempfile, shutil, sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parent))
         import survey_meshmapper as sm
@@ -4726,11 +4728,32 @@ class TestSaidasDaCapturaParada(unittest.TestCase):
             arq = self._kmz(tmp, parado=True)
             feitos = sm.gerar([arq], str(tmp / "out"), aviso=lambda t: None)
             nomes = [f.name for f in feitos]
-            self.assertTrue(any(n.startswith("Vizinhanca_") for n in nomes),
-                            f"sem KMZ de vizinhanca: {nomes}")
             self.assertFalse(any(n.startswith("Survey_2") and n.endswith(".kmz")
                                  for n in nomes),
                              f"captura parada gerou rastro de calor: {nomes}")
+            # Sem a chave, tambem nao sai o KMZ de vizinhanca: o laudo do
+            # dia a dia e o de trajeto.
+            self.assertFalse(any(n.startswith("Vizinhanca_") for n in nomes),
+                             f"vizinhanca saiu sem a chave: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_vizinhanca_sai_quando_a_chave_esta_ligada(self):
+        import tempfile, shutil, sys as _sys, configparser
+        from unittest import mock
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            arq = self._kmz(tmp, parado=True)
+            cfg = rm.cfg_relatorio(configparser.ConfigParser())
+            cfg.set("relatorio", "vizinhanca", "true")
+            with mock.patch.object(rm, "carregar_config", lambda *a, **k: cfg):
+                feitos = sm.gerar([arq], str(tmp / "out"),
+                                  aviso=lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertTrue(any(n.startswith("Vizinhanca_") for n in nomes),
+                            f"sem KMZ de vizinhanca: {nomes}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -4753,14 +4776,22 @@ class TestSaidasDaCapturaParada(unittest.TestCase):
         from openpyxl import load_workbook
         tmp = Path(tempfile.mkdtemp())
         try:
+            import configparser
             sv, am, pr = rm.ler_meshmapper(self._kmz(tmp, parado=True))
             sv["cobertura"] = rm.cobertura_disponivel(am, pr)
+            # O tipo de captura fica no Resumo SEMPRE: e o que impede ler
+            # um laudo de ponto fixo como se fosse de area.
             dados, _ = rm.excel_do_meshmapper(sv, am, pr)
             wb = load_workbook(_io.BytesIO(dados))
-            self.assertIn("Censo de Vizinhos", wb.sheetnames)
             texto = " ".join(str(c.value) for c in
                              wb["Resumo"]["B"][:20] if c.value)
             self.assertIn("PARADA", texto)
+            self.assertNotIn("Censo de Vizinhos", wb.sheetnames)
+            cfg = rm.cfg_relatorio(configparser.ConfigParser())
+            cfg.set("relatorio", "vizinhanca", "true")
+            dados, _ = rm.excel_do_meshmapper(sv, am, pr, cfg)
+            self.assertIn("Censo de Vizinhos",
+                          load_workbook(_io.BytesIO(dados)).sheetnames)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -4896,6 +4927,139 @@ wireless {
                             f"encap {enc} nao e sufixo de {ser}")
 
 
+class TestLaudoDeTrajeto(unittest.TestCase):
+    """O laudo que se usa todo dia, e só ele.
+
+    RSSI, SNR e ruído por banda, coloridos pela MELHOR ERB/ERM visível em
+    cada ponto. Latência, perda e interferência não saem porque o
+    MeshMapper não as mede — e página vazia com escala e requisito lê-se
+    como "medi e deu tudo fora", que é o oposto.
+
+    As abas de vizinhança respondem outra pergunta; misturadas com estas,
+    confundem. Ficaram atrás de [relatorio] vizinhanca, desligada.
+    """
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def _gerar(self, destino, cfg=None):
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        from unittest import mock
+        if cfg is None:
+            return sm.gerar([str(self.EXEMPLO)], str(destino),
+                            aviso=lambda t: None)
+        with mock.patch.object(rm, "carregar_config", lambda *a, **k: cfg):
+            return sm.gerar([str(self.EXEMPLO)], str(destino),
+                            aviso=lambda t: None)
+
+    def test_um_kmz_por_banda(self):
+        # 2,4 e 5,8 GHz sao malhas diferentes no mesmo terreno: num
+        # arquivo so, a banda boa tapa a ruim e o mapa deixa de dizer qual
+        # das duas esta servindo.
+        import tempfile, shutil
+        _sv, am, _pr = rm.ler_meshmapper(str(self.EXEMPLO))
+        bandas = sorted({rm._norm_banda(a.get("banda")) for a in am
+                         if a.get("banda")})
+        self.assertTrue(bandas, "o exemplo perdeu a banda")
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            nomes = [f.name for f in self._gerar(tmp) if f.suffix == ".kmz"]
+            self.assertEqual(len(nomes), len(bandas),
+                             f"{len(bandas)} banda(s), {len(nomes)} arquivo(s)")
+            for b in bandas:
+                suf = b.replace(" ", "").replace(".", "")
+                self.assertTrue(any(suf in n for n in nomes),
+                                f"{b} sem arquivo proprio: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_duas_bandas_dao_dois_arquivos(self):
+        # A regra com as duas bandas presentes, que o exemplo de 8 pontos
+        # nao tem: sem isso o teste acima passaria com um arquivo so.
+        import tempfile, shutil
+        am = [{"radio": "CA-1", "ts": 100.0 + i,
+               "lat": -18.90 + i * 0.0004, "lon": -43.43,
+               "sinal": -70.0, "snr": 25.0,
+               "banda": "2.4 GHz" if i % 2 else "5.8 GHz"}
+              for i in range(20)]
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            import sys as _s
+            _s.path.insert(0, str(Path(__file__).resolve().parent))
+            import survey_meshmapper as sm
+            feitos = sm._kmz_por_banda(sv, am, [], tmp, None, ["sinal"],
+                                       lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertEqual(len(nomes), 2, nomes)
+            self.assertTrue(any("24GHz" in n for n in nomes), nomes)
+            self.assertTrue(any("58GHz" in n for n in nomes), nomes)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_cor_vem_da_melhor_erb_ou_erm_do_ponto(self):
+        # `sinal_cob` e a primeira aba de proposito: e a pergunta do
+        # laudo — havia sinal servivel ali?
+        import tempfile, shutil, zipfile
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            kmz = [f for f in self._gerar(tmp) if f.suffix == ".kmz"][0]
+            kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+            self.assertIn("Cobertura disponível", kml)
+            i = kml.index("Cobertura disponível")
+            for outra in ("RSSI", "SNR"):
+                j = kml.find(f"<name>{outra}</name>")
+                if j > -1:
+                    self.assertLess(i, j, f"{outra} veio antes da cobertura")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_sem_vizinhanca_no_laudo_padrao(self):
+        import tempfile, shutil, zipfile
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            feitos = self._gerar(tmp)
+            nomes = [f.name for f in feitos]
+            self.assertFalse(any(n.startswith("Vizinhanca_") for n in nomes),
+                             nomes)
+            xls = [f for f in feitos if f.suffix == ".xlsx"][0]
+            abas = load_workbook(xls).sheetnames
+            for proibida in ("Censo de Vizinhos", "Por Repetidora", "Vizinhos"):
+                self.assertNotIn(proibida, abas)
+            for kmz in (f for f in feitos if f.suffix == ".kmz"):
+                kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+                self.assertNotIn("Por repetidora", kml)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_latencia_e_perda_nao_viram_pagina_vazia(self):
+        # O MeshMapper nao mede. Pagina com escala e grafico vazio le-se
+        # como "medi e deu tudo fora".
+        import tempfile, shutil, zipfile
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            for kmz in (f for f in self._gerar(tmp) if f.suffix == ".kmz"):
+                kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+                for ausente in ("Latência", "Packet Loss", "Interferência"):
+                    self.assertNotIn(f"<name>{ausente}", kml)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_chave_devolve_a_vizinhanca(self):
+        import tempfile, shutil, configparser
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cfg = rm.cfg_relatorio(configparser.ConfigParser())
+            cfg.set("relatorio", "vizinhanca", "true")
+            xls = [f for f in self._gerar(tmp, cfg) if f.suffix == ".xlsx"][0]
+            self.assertIn("Censo de Vizinhos", load_workbook(xls).sheetnames)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestPegadaPorRepetidora(unittest.TestCase):
     """A pegada MEDIDA de cada ERB/ERM.
 
@@ -5024,7 +5188,12 @@ class TestPegadaPorRepetidora(unittest.TestCase):
         from openpyxl import load_workbook
         am, pr = self._dados(12)
         sv = {"nome": "t", "movel": "CA-1", "inicio": 100.0, "fim": 112.0}
-        dados, _ = rm.excel_do_meshmapper(sv, am, pr)
+        # Recurso OPCIONAL desde que o laudo do dia a dia foi enxugado:
+        # sem a chave, as abas de vizinhanca nao entram.
+        import configparser
+        cfg = rm.cfg_relatorio(configparser.ConfigParser())
+        cfg.set("relatorio", "vizinhanca", "true")
+        dados, _ = rm.excel_do_meshmapper(sv, am, pr, cfg)
         wb = load_workbook(_io.BytesIO(dados))
         self.assertIn("Por Repetidora", wb.sheetnames)
         ws = wb["Por Repetidora"]

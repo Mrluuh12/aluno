@@ -381,12 +381,15 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
 
     cfg = rm.cfg_relatorio(rm.carregar_config())
     campos = rm.campos_com_medicao(am)
-    sitios = rm.sitios_parados(am, pr)
+    com_viz = rm._cfg_bool(cfg, "relatorio", "vizinhanca", False)
+    sitios = rm.sitios_parados(am, pr) if com_viz else []
     feitos = []
     if fazer_kmz and campos:
-        dados, nome = rm.gerar_kml_survey(sv, am, cfg=cfg, campos=campos,
-                                          peers=pr)
-        alvo = destino / nome; alvo.write_bytes(dados); feitos.append(alvo)
+        # Um arquivo por banda — ver `_kmz_por_banda` no survey_meshmapper,
+        # que é a mesma regra: 2,4 e 5,8 GHz são malhas diferentes no
+        # mesmo terreno e num arquivo só uma tapa a outra.
+        import survey_meshmapper as _smm
+        feitos += _smm._kmz_por_banda(sv, am, pr, destino, cfg, campos, aviso)
     if fazer_kmz and sitios:
         try:
             dados, nome = rm.gerar_kml_pontos_fixos(sitios, cfg=cfg)

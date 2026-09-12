@@ -7563,6 +7563,7 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     import io as _io
 
     movel = sv.get("movel") or "movel"
+    com_vizinhanca = _cfg_bool(cfg, "relatorio", "vizinhanca", False)
     wb = Workbook(); wb.remove(wb.active)
 
     def dt(ts):
@@ -7724,11 +7725,18 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                             a.get("delta_cob")], estilo=False)
     ws.freeze_panes = "A5"
 
-    # ── 4. Censo de vizinhos ──
-    # Uma linha por VIZINHO, nao por leitura. E a aba que responde "quem
-    # fala com este radio e como" — a pergunta de uma captura parada, e
-    # tambem util na de trajeto para saber quem apareceu no percurso.
-    censo = censo_vizinhos(peers, len(amostras))
+    # ── 4. Censo de vizinhos (opcional) ──
+    # DESLIGADO por padrão. O laudo que se usa é o de trajeto — RSSI, SNR
+    # e ruído por banda, coloridos pela melhor ERB/ERM do ponto. As abas
+    # de vizinhança respondem outra pergunta e, misturadas com aquelas,
+    # confundem mais do que informam. Ligue com
+    #
+    #   [relatorio]
+    #   vizinhanca = true
+    #
+    # quando a pergunta for "quem fala com este rádio", que é o caso de
+    # uma captura feita parada.
+    censo = censo_vizinhos(peers, len(amostras)) if com_vizinhanca else []
     if censo:
         rc = resumo_do_censo(censo)
         ws = wb.create_sheet("Censo de Vizinhos")
@@ -7761,7 +7769,7 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     # Responde "até onde a ERM-28 alcança", que o censo e a cobertura
     # disponível não respondem: o censo agrega por vizinho sem lugar, e a
     # cobertura mistura todas as repetidoras num valor por ponto.
-    pegada = amostras_por_repetidora(amostras, peers)
+    pegada = amostras_por_repetidora(amostras, peers) if com_vizinhanca else {}
     if pegada:
         ws = wb.create_sheet("Por Repetidora")
         req_r = float(ESCALAS["sinal"]["req"])
@@ -7787,9 +7795,15 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                 zebra=(lin % 2 == 0))
         ws.freeze_panes = "A5"
 
-    # ── 5. Vizinhos, leitura a leitura ──
-    # A aba que so existe com dado do MeshMapper: a sondagem pela BC API
-    # devolve o enlace que atendeu, nao a vizinhanca inteira.
+    # ── 5. Vizinhos, leitura a leitura (opcional) ──
+    # Mesma chave: e o dado BRUTO por tras da cobertura disponivel. Util
+    # para auditar um numero, ruidoso no laudo do dia a dia.
+    if not com_vizinhanca:
+        buf = _io.BytesIO(); wb.save(buf)
+        quando = (datetime.utcfromtimestamp(sv["inicio"]) if sv.get("inicio")
+                  else datetime.now())
+        return buf.getvalue(), (f"Survey_{_slug_arquivo(movel)}_"
+                                f"{quando:%Y%m%d_%H%M}.xlsx")
     ws = wb.create_sheet("Vizinhos")
     _cab(ws, "Todos os vizinhos visíveis, ponto a ponto",
          "O que a sondagem por API não mostra: quem mais estava ao alcance "

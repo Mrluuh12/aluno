@@ -8,7 +8,7 @@ de campo:
 
     python autoteste_survey.py
 
-A suíte completa (505 testes) fica no projeto principal; aqui o objetivo
+A suíte completa (512 testes) fica no projeto principal; aqui o objetivo
 é outro — provar que ESTA cópia, nesta máquina, gera o que promete.
 """
 import sys, io, zipfile, tempfile, shutil
@@ -142,12 +142,25 @@ def main():
             n = len(list(p.slides))
             checa(n >= 4, f"PPT com {n} slides")
 
+        # Um KMZ por banda presente: 2,4 e 5,8 GHz são malhas diferentes
+        # no mesmo terreno, e num arquivo só a banda boa tapa a ruim.
+        bandas = sorted({rm._norm_banda(a.get("banda")) for a in am
+                         if a.get("banda")})
+        checa(len(kmz) == len(bandas),
+              f"um KMZ por banda ({len(bandas)}: {', '.join(bandas)})",
+              f"{len(kmz)} arquivo(s)")
+
         xls = [f for f in feitos if f.suffix == ".xlsx"]
         if xls:
             from openpyxl import load_workbook
             wb = load_workbook(str(xls[0]))
-            checa("Vizinhos" in wb.sheetnames,
+            checa({"Resumo", "Por Grandeza", "Amostras"} <= set(wb.sheetnames),
                   f"Excel com as abas {wb.sheetnames}")
+            # As abas de vizinhança ficaram atrás de [relatorio]
+            # vizinhanca, desligada: o laudo do dia a dia é o de trajeto.
+            checa(not ({"Censo de Vizinhos", "Por Repetidora", "Vizinhos"}
+                       & set(wb.sheetnames)),
+                  "sem abas de vizinhança no laudo padrão")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

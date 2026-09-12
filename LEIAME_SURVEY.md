@@ -1,23 +1,24 @@
-# Site Survey — relatórios a partir do MeshMapper
+# Site Survey — Rajant
 
-Gera o KMZ com rastro de calor, o PPT na identidade Anglo e o Excel, a
-partir das capturas que o MeshMapper grava.
+Gera os KMZ com rastro de calor, o PPT na identidade Anglo e o Excel.
 
-Não fala com rádio, não precisa de rede, não precisa da `rajant-api`.
+**Duplo clique** no `site_survey.exe`. A janela tem duas abas:
 
-## Usar
+| aba | o que faz |
+|---|---|
+| **Coleta** | fala com os rádios, descobre a malha, você marca os equipamentos e coleta ao vivo |
+| **Arquivos do MeshMapper** | lê capturas que alguém já trouxe |
 
-**Duplo clique** no `survey_meshmapper.exe`. Abre a janela:
+A aba Coleta precisa de rede até a malha e da `rajant-api`. Sem elas, ela
+se explica em vez de falhar e a de Arquivos continua funcionando — o
+mesmo executável serve as duas máquinas.
 
-1. **Escolher arquivos…** — pode selecionar quantos quiser
-2. **Onde salvar**
-3. **Gerar relatórios**
-
-Por linha de comando também funciona:
+Pela linha de comando, os módulos funcionam soltos:
 
 ```
-survey_meshmapper.exe captura1.kmz captura2.kmz -o relatorios
-survey_meshmapper.exe *.kmz --separado        # um relatório por arquivo
+survey_meshmapper captura1.kmz captura2.kmz -o relatorios
+survey_meshmapper *.kmz --separado          # um relatório por arquivo
+coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios
 ```
 
 ## Entradas aceitas
@@ -32,48 +33,55 @@ survey_meshmapper.exe *.kmz --separado        # um relatório por arquivo
 
 | arquivo | o que tem |
 |---|---|
-| `Survey_*.kmz` | rastro de calor por grandeza, uma aba cada, para o Google Earth |
-| `Vizinhanca_*.kmz` | pino de cada rádio capturado parado e os enlaces medidos entre eles |
+| `Survey_*_24GHz.kmz` | rastro de calor de 2,4 GHz, uma aba por grandeza |
+| `Survey_*_58GHz.kmz` | idem, 5,8 GHz |
 | `Site_Survey_*.pptx` | capa, índice, sumário, zonas-problema e uma página por grandeza/banda |
-| `Survey_*.xlsx` | origens, resumo, por grandeza, amostras, **censo de vizinhos**, **por repetidora** e todos os vizinhos ponto a ponto |
+| `Survey_*.xlsx` | origens, resumo, por grandeza e amostras |
 
 **Juntar tudo num relatório só** (padrão) produz um conjunto com todas as
 capturas — é o caso da campanha cobrindo a mina. Desmarcado, sai um
 conjunto por arquivo, cada um em sua subpasta.
 
-## As três camadas do mapa
+## O laudo: um arquivo por banda
 
-Todas medidas. Nenhuma estimada.
+**2,4 e 5,8 GHz saem em KMZs separados.** São malhas diferentes no mesmo
+terreno — num arquivo só, a banda boa tapa a ruim e o mapa deixa de dizer
+qual das duas está servindo.
 
-| camada | o que mostra | pergunta que responde |
-|---|---|---|
-| **Serviço entregue** | o enlace que o InstaMesh escolheu | a aplicação funcionou aqui? |
-| **Cobertura disponível** | o melhor ERB/ERM visível no ponto | existe sinal servível aqui? |
-| **Por repetidora** | a pegada de cada ERB/ERM | até onde a ERM-28 alcança? |
+Dentro de cada arquivo, uma aba por grandeza medida:
 
-As duas primeiras podem divergir muito. No arquivo do CA-1006 a diferença
-foi de **22 dB na mediana** — o enlace entregue a −88 dBm enquanto havia
-um ERB a −66 dBm no mesmo ponto, sem uso. Isso muda o laudo: a área tinha
-cobertura, o caminho escolhido é que era ruim. Repetidora nova não
-resolveria.
+| aba | o que é |
+|---|---|
+| **Cobertura disponível** | a melhor ERB/ERM visível no ponto — é a **cor do laudo** |
+| RSSI | o enlace que o InstaMesh de fato escolheu |
+| SNR | relação sinal/ruído do enlace |
+| Ruído | piso de ruído, recuperado de `signal − snr` |
 
-A terceira existe porque as outras duas misturam as repetidoras. A
-cobertura disponível é *o melhor de cada ponto* — não dá para perguntar
-por uma em específico.
+**A cor de cada ponto vem da melhor ERB/ERM daquele ponto**, não do
+enlace que atendeu. Outro caminhão passando dá sinal ótimo e vai embora;
+só a infraestrutura caracteriza cobertura. Por isso a aba de cobertura
+disponível vem primeiro.
 
-**Como ela é montada:** cada leitura de um veículo traz a posição dele **e
-o sinal para todas as repetidoras que ele ouve** — 18 na mediana, medido
-no trajeto real. Uma passagem de um caminhão alimenta 18 mapas ao mesmo
-tempo. A posição é a do veículo, o sinal é o dele para aquela repetidora,
-os dois da mesma leitura.
+As duas podem divergir muito. No arquivo do CA-1006 a diferença foi de
+**22 dB na mediana** — o enlace entregue a −88 dBm enquanto havia um ERB
+a −66 dBm no mesmo ponto, sem uso. Isso muda o laudo: a área tinha
+cobertura, o caminho escolhido é que era ruim.
 
-A pasta nasce recolhida e desligada: dezoito rastros ligados juntos se
-empilham e o mapa não diz nada.
+## As abas de vizinhança
 
-> Duas repetidoras inteiramente abaixo de −90 dBm saem com a **mesma cor**,
-> porque toda essa faixa satura no fundo da escala. É correto — no mapa as
-> duas são "não serve aqui". Os números que as separam estão na descrição
-> da pasta e na aba **Por Repetidora**.
+Ficam **desligadas**. Censo de vizinhos, pegada por repetidora e o KMZ de
+vizinhança respondem outra pergunta — *"quem fala com este rádio"* — e
+misturadas com o laudo de trajeto atrapalham mais do que informam.
+
+Para ligar, no `config.ini`:
+
+```ini
+[relatorio]
+vizinhanca = true
+```
+
+Vale quando a pergunta for mesmo essa, que é o caso de uma captura feita
+com o MeshMapper parado numa repetidora.
 
 ## Captura de veículo e captura de repetidora
 
@@ -123,25 +131,34 @@ como *"medi e deu tudo fora"*, que é o oposto de *"não medi"*.
 ## Instalação
 
 ```
-build\gerar_exe_survey.bat
+build\gerar_exe_site_survey.bat
 ```
 
-Gera `dist\survey_meshmapper\survey_meshmapper.exe`. A pasta `marca/` fica
-ao lado do executável — sem ela o deck sai sem logo, em vez de falhar.
+Gera `dist\site_survey\site_survey.exe`. A pasta `marca/` fica ao lado do
+executável — sem ela o deck sai sem logo, em vez de falhar.
+
+O build **falha se o exe não for abrir**: o último passo roda
+`site_survey.exe --verificar`, que confere módulos, tcl/tk e dependências
+sem abrir janela. Se algo der errado depois, rode isso no Prompt e mande
+a saída; o erro também fica em `site_survey_erro.txt`, ao lado do exe.
 
 Para rodar direto pelo Python:
 
 ```
 pip install matplotlib numpy scipy python-pptx openpyxl lxml
-python survey_meshmapper.py
+pip install rajant-api --no-deps && pip install "protobuf==4.23.4"
+python site_survey.py
 ```
 
 ## Arquivos
 
 | | |
 |---|---|
-| `survey_meshmapper.py` | a ferramenta: interface e linha de comando |
+| `site_survey.py` | a janela: só a interface |
+| `coleta_rajant.py` | a coleta ao vivo dos rádios |
+| `survey_meshmapper.py` | a leitura de arquivos do MeshMapper |
 | `rajant_monitor.py` | o motor de KMZ, PPT e Excel |
+| `bcapi-ref/proto/` | os `.proto` do bcapi: fonte de tudo que se afirma sobre a API |
 | `marca/` | logos usados nos decks |
 | `exemplos/` | uma captura de veículo e uma de repetidora, usadas pelos testes |
 | `build/` | spec do PyInstaller e o `.bat` |

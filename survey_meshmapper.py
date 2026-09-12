@@ -95,6 +95,36 @@ def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso):
                    kmz, ppt, xls, aviso)
 
 
+def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso):
+    """Um KMZ por banda. Devolve os arquivos gravados.
+
+    2,4 e 5,8 GHz são malhas diferentes no mesmo terreno: num arquivo só,
+    a banda boa tapa a ruim e o mapa deixa de dizer qual das duas está
+    servindo. Separadas, dá para ligar uma de cada vez no Google Earth.
+
+    A cor de cada ponto continua saindo da MELHOR ERB/ERM visível ali —
+    `sinal_cob`, a primeira aba de cada arquivo.
+
+    `peers` só vai adiante quando [relatorio] vizinhanca está ligado; sem
+    isso o arquivo não ganha a pasta por repetidora.
+    """
+    com_viz = rm._cfg_bool(cfg, "relatorio", "vizinhanca", False)
+    bandas_pres = sorted({rm._norm_banda(a.get("banda")) for a in amostras
+                          if a.get("banda")}) or [None]
+    feitos = []
+    for b in bandas_pres:
+        try:
+            dados, nome = rm.gerar_kml_survey(
+                sv, amostras, cfg=cfg, campos=campos, banda=b,
+                peers=(peers if com_viz else None))
+        except Exception as e:
+            aviso(f"  ! KMZ de {b or 'todas as bandas'} não gerado: {e}")
+            continue
+        alvo = destino / nome
+        alvo.write_bytes(dados); feitos.append(alvo)
+    return feitos
+
+
 def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
             fazer_kmz, fazer_ppt, fazer_excel, aviso):
     campos = rm.campos_com_medicao(amostras)
@@ -126,16 +156,14 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
     feitos = []
     if fazer_kmz:
         if campos and andando:
-            dados, nome_kmz = rm.gerar_kml_survey(sv, amostras, cfg=cfg,
-                                                  campos=campos, peers=peers)
-            alvo = destino / nome_kmz
-            alvo.write_bytes(dados); feitos.append(alvo)
+            feitos += _kmz_por_banda(sv, amostras, peers, destino, cfg,
+                                     campos, aviso)
         elif not campos:
             aviso("  ! sem grandeza medida: KMZ do trajeto não gerado")
         else:
             aviso("  · nenhum equipamento em deslocamento: "
                   "sem rastro de calor")
-        if sitios:
+        if sitios and rm._cfg_bool(cfg, "relatorio", "vizinhanca", False):
             try:
                 dados, nome_f = rm.gerar_kml_pontos_fixos(sitios, cfg=cfg)
                 alvo = destino / nome_f
