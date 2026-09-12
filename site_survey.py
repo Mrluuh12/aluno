@@ -54,20 +54,32 @@ def _morrer(titulo, detalhe):
     print("=" * 68)
     print(txt + onde)
     print("=" * 68)
-    try:
-        input("\nPressione ENTER para fechar...")
-    except Exception:
-        pass
+    # A pausa é para o duplo clique, onde o console fecharia sozinho. Ela
+    # NÃO pode acontecer quando ninguém está lá para apertar a tecla: o
+    # passo de verificação do build roda `--verificar` de dentro do .bat,
+    # e um input() ali penduraria a compilação para sempre.
+    if "--verificar" not in sys.argv[1:] and sys.stdin and sys.stdin.isatty():
+        try:
+            input("\nPressione ENTER para fechar...")
+        except Exception:
+            pass
     sys.exit(1)
 
 
+# BaseException, não Exception: os módulos chamam `sys.exit(1)` quando
+# falta uma dependência, e SystemExit NÃO é Exception. Com `except
+# Exception` o processo morria antes de gravar o arquivo de erro — foi
+# assim que um `prometheus_client` faltando no exe virou "não abre".
 try:
     import rajant_monitor as rm
     import survey_meshmapper as smm
     import coleta_rajant as col
-except Exception as e:
-    _morrer("Faltou um módulo ao lado deste programa.",
-            f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
+except BaseException as e:
+    _morrer("O programa não conseguiu carregar um módulo de que precisa.",
+            f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}\n"
+            "Se a mensagem acima pede um `pip install`, o pacote não está "
+            "DENTRO do executável — instalá-lo na máquina não resolve.\n"
+            "Gere o executável de novo com build\\gerar_exe_site_survey.bat.")
 
 TITULO = "Site Survey — Rajant"
 EXTENSOES = [("Captura do MeshMapper", "*.kmz *.json *.csv"),

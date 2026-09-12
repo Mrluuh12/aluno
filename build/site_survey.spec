@@ -46,14 +46,24 @@ a = Analysis(
                    "tkinter.messagebox", "tkinter.constants"],
     hookspath=[],
     runtime_hooks=[],
+    # ATENÇÃO ao mexer aqui: excluir um módulo que o rajant_monitor importa
+    # NO TOPO quebra o executável inteiro, e o sintoma não parece um erro
+    # de empacotamento — o exe abre e fecha sozinho.
+    #
+    # Foi o que aconteceu com `prometheus_client`: excluí por raciocinar
+    # que este exe não expõe /metrics, mas o rajant_monitor o importa no
+    # import do módulo e SAI se faltar. Resultado no cliente:
+    #   ERRO: pip install prometheus-client
+    # com o pacote instalado na máquina — ele só não estava DENTRO do exe.
+    #
+    # Há teste que bloqueia cada nome desta lista e confere que o
+    # site_survey ainda importa.
     excludes=["PyQt5", "PyQt6", "PySide2", "PySide6",
               "IPython", "jupyter", "notebook", "pytest", "sphinx",
               # A rajant-api DECLARA grpcio e NUNCA o importa. Sem este
               # exclude o PyInstaller tenta empacotar uma dependência que
               # nem sequer instala em Python 3.12+.
-              "grpc", "grpcio", "grpcio_tools",
-              # Este exe não expõe /metrics.
-              "prometheus_client"],
+              "grpc", "grpcio", "grpcio_tools"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

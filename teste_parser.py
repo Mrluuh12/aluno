@@ -5307,6 +5307,123 @@ class TestJanelaUnica(unittest.TestCase):
         # tem de ir para a pasta do EXE, que é a que o usuário enxerga.
         self.assertTrue('"frozen"' in fonte or "'frozen'" in fonte,
                         "erro iria para a pasta errada quando congelado")
+        # Os módulos chamam sys.exit(1) quando falta dependência, e
+        # SystemExit não é Exception: com `except Exception` o processo
+        # morria antes de gravar o arquivo. Foi assim que um
+        # prometheus_client faltando no exe virou "não abre".
+        self.assertIn("except BaseException", fonte,
+                      "sys.exit no import escaparia do tratamento de erro")
+
+    def test_verificar_nunca_espera_tecla(self):
+        # O build roda `--verificar` de dentro do .bat. Um input() ali
+        # penduraria a compilação para sempre, sem ninguém para apertar.
+        import subprocess, sys as _s, tempfile, shutil
+        aqui = Path(__file__).resolve().parent
+        tmp = Path(tempfile.mkdtemp())
+        erro = aqui / "site_survey_erro.txt"
+        if erro.exists(): erro.unlink()
+        try:
+            cod = (
+                "import sys\n"
+                "class _Nao:\n"
+                "    def find_spec(self, n, c=None, a=None):\n"
+                "        if n == 'prometheus_client':\n"
+                "            raise ImportError('bloqueado')\n"
+                "        return None\n"
+                "sys.meta_path.insert(0, _Nao())\n"
+                f"sys.path.insert(0, {str(aqui)!r})\n"
+                "sys.argv = ['site_survey', '--verificar']\n"
+                "import site_survey\n")
+            # Sem timeout generoso isto passaria por engano num ambiente
+            # onde stdin já não é tty; o que se testa é que NÃO pendura.
+            r = subprocess.run([_s.executable, "-c", cod],
+                               capture_output=True, text=True, timeout=60,
+                               cwd=str(tmp))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("Pressione ENTER", r.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if erro.exists(): erro.unlink()
+
+    def test_sys_exit_no_import_ainda_grava_o_erro(self):
+        import subprocess, sys as _s, tempfile, shutil
+        aqui = Path(__file__).resolve().parent
+        tmp = Path(tempfile.mkdtemp())
+        # Rodando como script o arquivo vai para a pasta do .py; dentro do
+        # exe, para a pasta do executável (ver _pasta_do_exe). O que se
+        # afirma aqui é que ele é GRAVADO, não onde.
+        erro = aqui / "site_survey_erro.txt"
+        if erro.exists(): erro.unlink()
+        try:
+            # Bloqueia prometheus_client: o rajant_monitor faz sys.exit(1).
+            cod = (
+                "import sys\n"
+                "class _Nao:\n"
+                "    def find_spec(self, n, c=None, a=None):\n"
+                "        if n == 'prometheus_client':\n"
+                "            raise ImportError('bloqueado')\n"
+                "        return None\n"
+                "sys.meta_path.insert(0, _Nao())\n"
+                f"sys.path.insert(0, {str(aqui)!r})\n"
+                "import site_survey\n")
+            r = subprocess.run([_s.executable, "-c", cod],
+                               capture_output=True, text=True, timeout=120,
+                               cwd=str(tmp), input="\n")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertTrue(erro.exists(),
+                            f"nao gravou o motivo:\n{(r.stdout+r.stderr)[-400:]}")
+            self.assertIn("pip install", erro.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if erro.exists(): erro.unlink()
+
+    def test_nenhum_exclude_do_spec_quebra_o_programa(self):
+        """Excluir do exe um módulo que é importado no topo quebra tudo.
+
+        Aconteceu de verdade: `prometheus_client` entrou nos excludes
+        porque este exe não expõe /metrics — mas o rajant_monitor o
+        importa no import do módulo e SAI se faltar. O cliente recebeu
+
+            ERRO: pip install prometheus-client
+
+        com o pacote instalado na máquina; ele só não estava DENTRO do
+        exe. E como o console fecha sozinho, o sintoma foi "não abre".
+
+        Aqui cada nome da lista de excludes é bloqueado de verdade e se
+        confere que o site_survey ainda importa.
+        """
+        import ast, subprocess, sys as _s
+        aqui = Path(__file__).resolve().parent
+        spec = (aqui / "build" / "site_survey.spec").read_text(encoding="utf-8")
+        # O .spec não é importável (o PyInstaller injeta Analysis e cia.),
+        # então lê-se a lista pelo AST em vez de executar o arquivo.
+        alvo = None
+        for no in ast.walk(ast.parse(spec)):
+            if isinstance(no, ast.keyword) and no.arg == "excludes":
+                alvo = [e.value for e in no.value.elts
+                        if isinstance(e, ast.Constant)]
+        self.assertTrue(alvo, "não achei a lista de excludes no .spec")
+
+        bloqueio = (
+            "import sys\n"
+            "class _Nao:\n"
+            "    def find_module(self, nome, caminho=None):\n"
+            "        if nome == %r or nome.startswith(%r + '.'):\n"
+            "            raise ImportError('bloqueado pelo teste: ' + nome)\n"
+            "        return None\n"
+            "    def find_spec(self, nome, caminho=None, alvo=None):\n"
+            "        return self.find_module(nome, caminho)\n"
+            "sys.meta_path.insert(0, _Nao())\n"
+            "sys.path.insert(0, %r)\n"
+            "import site_survey\n"
+            "print('IMPORTOU')\n")
+        for nome in alvo:
+            r = subprocess.run(
+                [_s.executable, "-c", bloqueio % (nome, nome, str(aqui))],
+                capture_output=True, text=True, timeout=120, cwd=str(aqui))
+            self.assertIn("IMPORTOU", r.stdout,
+                          f"excluir '{nome}' do exe impede o programa de "
+                          f"abrir:\n{(r.stdout + r.stderr)[-400:]}")
 
     def test_ha_um_unico_gerador_de_executavel(self):
         # Dois .bat e dois .spec na mesma pasta geravam dois exes, e a
