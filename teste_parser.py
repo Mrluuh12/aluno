@@ -5598,6 +5598,47 @@ class TestJanelaUnica(unittest.TestCase):
                           f"excluir '{nome}' do exe impede o programa de "
                           f"abrir:\n{(r.stdout + r.stderr)[-400:]}")
 
+    def test_janela_nasce_cabendo_na_tela(self):
+        # 820 px de altura fixa numa tela de 768 jogou o rodapé — com os
+        # botões de Iniciar e Parar — para fora do monitor, e o programa
+        # ficou sem como ser usado.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn("winfo_screenheight", fonte,
+                      "a janela voltou a ter altura fixa")
+        self.assertNotIn('jan.geometry("1200x820")', fonte)
+        self.assertIn("jan.minsize", fonte)
+
+    def test_rodape_e_reservado_antes_do_notebook_expandir(self):
+        """`pack` serve quem chega primeiro.
+
+        Um Notebook com expand=True empacotado antes do rodapé toma a
+        janela inteira e espreme o resto até sumir. A ordem no código é
+        a garantia — não há como afirmar isso sem display.
+        """
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        for antes, depois, oquê in (
+                ('rod.pack(side="bottom"', 'nb.pack(fill="both", expand=True',
+                 "rodapé (Salvar em / KMZ / PPT / Excel)"),
+                ('txt.pack(side="bottom"', 'nb.pack(fill="both", expand=True',
+                 "registro de andamento"),
+                ('baixo.pack(side="bottom"', 'qd.pack(fill="both", expand=True',
+                 "botões de Iniciar e Parar")):
+            i, j = fonte.find(antes), fonte.find(depois)
+            self.assertGreater(i, -1, f"sumiu: {antes}")
+            self.assertGreater(j, -1, f"sumiu: {depois}")
+            self.assertLess(i, j, f"{oquê} pode ser empurrado para fora da tela")
+
+    def test_controles_da_coleta_ficam_no_bloco_reservado(self):
+        # Se voltarem para `ab_col`, a lista de equipamentos volta a poder
+        # empurrá-los para fora.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn("lf = ttk.Frame(baixo)", fonte,
+                      "os botões de Iniciar/Parar sairam do bloco reservado")
+        self.assertIn("lc = ttk.Frame(baixo)", fonte)
+
     def test_ha_um_unico_gerador_de_executavel(self):
         # Dois .bat e dois .spec na mesma pasta geravam dois exes, e a
         # duvida de qual abrir.

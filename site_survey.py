@@ -177,7 +177,14 @@ def main():
     cfg = rm.carregar_config()
     jan = tk.Tk()
     jan.title(TITULO)
-    jan.geometry("1200x820")
+    # Altura fixa de 820 px numa tela de 768 joga o rodapé — com os
+    # botões de Iniciar e Parar — para fora do monitor, e o programa fica
+    # sem como ser usado. A janela nasce cabendo na tela, com margem para
+    # a barra de tarefas.
+    larg = max(900, min(1200, jan.winfo_screenwidth() - 80))
+    alt = max(600, min(860, jan.winfo_screenheight() - 90))
+    jan.geometry(f"{larg}x{alt}")
+    jan.minsize(900, 560)
     jan.configure(bg=FUNDO)
     fila = queue.Queue()
     est = {"coleta": None, "achados": {}, "arquivos": [], "lista": {}}
@@ -211,12 +218,18 @@ def main():
     tk.Label(topo, text="Rajant", bg=AZUL, fg="#C7D2F0",
              font=("Segoe UI", 10)).pack(side="left", pady=(6, 0))
 
-    nb = ttk.Notebook(jan); nb.pack(fill="both", expand=True, padx=12, pady=10)
+    # ORDEM DE EMPACOTAMENTO, e não é detalhe: o `pack` serve quem chega
+    # primeiro. Um Notebook com expand=True empacotado antes do rodapé
+    # toma a janela inteira e espreme o resto até sumir — foi assim que
+    # os botões de Iniciar e Parar saíram da tela. Rodapé e registro são
+    # reservados AGORA, presos ao fundo; o Notebook fica com a sobra.
+    nb = ttk.Notebook(jan)
     ab_col = ttk.Frame(nb, padding=12); nb.add(ab_col, text="Coleta")
     ab_arq = ttk.Frame(nb, padding=12); nb.add(ab_arq, text="Arquivos do MeshMapper")
 
     # ═══════════ comum às duas abas: destino e o que gerar ═══════════
-    rod = ttk.Frame(jan, padding=(14, 0, 14, 12)); rod.pack(fill="x")
+    rod = ttk.Frame(jan, padding=(14, 0, 14, 12))
+    rod.pack(side="bottom", fill="x")
     ttk.Label(rod, text="Salvar em").pack(side="left")
     v_saida = tk.StringVar(value=str(Path.home() / "Documents"))
     ttk.Entry(rod, textvariable=v_saida, width=46).pack(side="left", padx=8)
@@ -276,9 +289,17 @@ def main():
                             text="nenhum equipamento encontrado ainda")
         lbl_sel.pack(anchor="w")
 
+        # Mesma regra de dentro da aba: tudo que fica ABAIXO da lista é
+        # reservado antes dela. A lista cresce com a janela; os botões
+        # não podem encolher até sumir por causa disso.
+        baixo = ttk.Frame(ab_col)
+        baixo.pack(side="bottom", fill="x")
+
         qd = ttk.Frame(ab_col); qd.pack(fill="both", expand=True, pady=(4, 6))
+        # height=8, não 12: com a janela cabendo em 768 px, uma lista alta
+        # demais empurra o resto. Ela cresce sozinha quando há espaço.
         cols = ("sel", "nome", "ip", "gps", "vizinhos", "obs")
-        arv = ttk.Treeview(qd, columns=cols, show="headings", height=12,
+        arv = ttk.Treeview(qd, columns=cols, show="headings", height=8,
                            style="Tr.Treeview", selectmode="extended")
         for c, t, w, an in (("sel", "", 34, "center"),
                             ("nome", "Equipamento", 230, "w"),
@@ -331,15 +352,15 @@ def main():
             for ip in est["achados"]: _pinta(ip)
             _conta()
 
-        lb = ttk.Frame(ab_col); lb.pack(fill="x")
+        lb = ttk.Frame(baixo); lb.pack(fill="x")
         for txt, q in (("Marcar todos", "todos"), ("Só com GPS", "gps"),
                        ("Só veículos", "moveis"), ("Desmarcar", "nenhum")):
             ttk.Button(lb, text=txt,
                        command=lambda q=q: marcar(q)).pack(side="left", padx=(0, 6))
 
-        ttk.Label(ab_col, text="3. Coleta",
-                  style="Sec.TLabel").pack(anchor="w", pady=(10, 0))
-        lc = ttk.Frame(ab_col); lc.pack(fill="x", pady=(4, 6))
+        ttk.Label(baixo, text="3. Coleta",
+                  style="Sec.TLabel").pack(anchor="w", pady=(8, 0))
+        lc = ttk.Frame(baixo); lc.pack(fill="x", pady=(4, 6))
         ttk.Label(lc, text="Uma amostra a cada").pack(side="left")
         v_passo = tk.StringVar(value=str(int(col.PASSO_M_PADRAO)))
         ttk.Entry(lc, textvariable=v_passo, width=6).pack(side="left", padx=6)
@@ -350,14 +371,14 @@ def main():
         ttk.Label(lc, text="minutos  (0 = até mandar parar)",
                   style="Fraco.TLabel").pack(side="left")
 
-        pn = tk.Frame(ab_col, bg=CARTAO, highlightbackground=LINHA,
+        pn = tk.Frame(baixo, bg=CARTAO, highlightbackground=LINHA,
                       highlightthickness=1)
         pn.pack(fill="x", pady=(4, 6))
         v_stat = tk.StringVar(value="parado")
         tk.Label(pn, textvariable=v_stat, bg=CARTAO, fg=TEXTO, anchor="w",
                  font=("Consolas", 10)).pack(fill="x", padx=10, pady=7)
 
-        lf = ttk.Frame(ab_col); lf.pack(fill="x")
+        lf = ttk.Frame(baixo); lf.pack(fill="x", pady=(2, 2))
         b_ini = ttk.Button(lf, text="Iniciar coleta", style="Azul.TButton")
         b_ini.pack(side="left")
         b_par = ttk.Button(lf, text="Parar e gerar relatórios", state="disabled")
@@ -413,10 +434,15 @@ def main():
     b_ger.pack(anchor="w", pady=(10, 0))
 
     # ═══════════════════════ andamento ═══════════════════════════
-    ttk.Label(jan, text="Andamento", style="Sec.TLabel").pack(anchor="w", padx=14)
-    txt = tk.Text(jan, height=8, bg=CARTAO, fg=TEXTO, relief="flat",
+    # Altura menor e sem expand: numa tela de 768 px o registro roubava o
+    # espaço da lista de equipamentos, que é onde se trabalha.
+    txt = tk.Text(jan, height=5, bg=CARTAO, fg=TEXTO, relief="flat",
                   font=("Consolas", 9), wrap="word")
-    txt.pack(fill="both", expand=False, padx=14, pady=(2, 6))
+    txt.pack(side="bottom", fill="x", expand=False, padx=14, pady=(2, 6))
+    ttk.Label(jan, text="Andamento",
+              style="Sec.TLabel").pack(side="bottom", anchor="w", padx=14)
+    # Só agora, com o fundo já reservado: o Notebook fica com a sobra.
+    nb.pack(fill="both", expand=True, padx=12, pady=(10, 4))
 
     def escreve(t):
         txt.insert("end", str(t) + "\n"); txt.see("end")
