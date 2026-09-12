@@ -16,7 +16,7 @@ quem vai **mexer** nele.
 4. [Transporte e parsing](#4-transporte-e-parsing)
 5. [Estado e confiabilidade](#5-estado-e-confiabilidade)
 6. [Descoberta e coleta](#6-descoberta-e-coleta)
-7. [As 100 métricas](#7-as-100-métricas)
+7. [As 101 métricas](#7-as-101-métricas)
 8. [Modelo de execução](#8-modelo-de-execução)
 9. [Armazenamento](#9-armazenamento)
 10. [Survey: captura](#10-survey-captura)
@@ -47,7 +47,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 
 | papel | saída |
 |---|---|
-| **Exportador Prometheus** | 100 famílias de métrica em `/metrics` |
+| **Exportador Prometheus** | 101 famílias de métrica em `/metrics` |
 | **Gerador de relatórios** | Excel (13 abas) e PowerPoint, semanal e de survey |
 | **Ferramenta de site survey** | captura ao vivo, KMZ para Google Earth, deck próprio |
 
@@ -59,10 +59,10 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | funções no topo | 243 |
 | métodos | 105 |
 | classes | 7 |
-| famílias de métrica | 100 |
+| famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 438, em 63 classes |
+| testes | 452, em 66 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 438 testes e as âncoras de seção (§26).
+segura isso são os 452 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -136,7 +136,7 @@ autoassinado.
 flowchart TD
     BC["BreadCrumb<br/>BC API sobre TLS"] -->|texto protobuf| P[parse_state]
     P --> E["EstadoBC<br/>último bom + falhas"]
-    E --> M["publicar()<br/>100 Gauges"]
+    E --> M["publicar()<br/>101 Gauges"]
     M --> PR[(Prometheus)]
     PR --> OD["obter_dados()<br/>PromQL agregado"]
     OD --> XL["Excel<br/>13 abas"]
@@ -303,7 +303,7 @@ estiver vazio, o filtro se desliga sozinho em vez de descartar tudo.
 
 ---
 
-## 7. As 100 métricas
+## 7. As 101 métricas
 
 Prefixo `rajant_`. Agrupadas como aparecem no código:
 

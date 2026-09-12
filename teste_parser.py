@@ -4765,5 +4765,136 @@ class TestSaidasDaCapturaParada(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestCamposDescartados(BaseParser):
+    """Campos que o rádio mandava e o parser jogava fora.
+
+    Os três primeiros são o que permite medir sinal na posição certa em
+    vez de na posição de antes. Conferidos contra `bcapi-ref/proto/`.
+    """
+
+    def test_gpstime_e_lido(self):
+        # Gps.proto: GPSPositionReport.gpsTime = 1 (float).
+        self.assertEqual(self.s["gps_time"], 143025.0)
+
+    def test_gpstime_vira_segundos_do_dia(self):
+        # 14:30:25 = 14*3600 + 30*60 + 25
+        self.assertEqual(self.s["gps_time_s"], 52225.0)
+
+    def test_gpsquality_e_lido(self):
+        # NMEA GGA: 0 inválido, 1 GPS, 2 DGPS, 4/5 RTK.
+        self.assertEqual(self.s["gps_qual"], 1.0)
+
+    def test_sem_gpstime_fica_none_nao_zero(self):
+        st = STATE.replace("    gpsTime: 143025.0\n", "")
+        d = rm.parse_state(st)["sistema"]
+        self.assertIsNone(d["gps_time"])
+        self.assertIsNone(d["gps_time_s"])
+
+
+class TestGpsTimeParaSegundos(unittest.TestCase):
+    """`Gps.proto` declara `optional float gpsTime = 1;` e NÃO diz a
+    unidade. Por isso a conversão discrimina em vez de supor — e devolve
+    None no que não encaixa, em vez de inventar uma hora."""
+
+    def test_hora_nmea_hhmmss(self):
+        self.assertEqual(rm.gps_time_para_segundos(174551.25), 63951.25)
+        self.assertEqual(rm.gps_time_para_segundos(235959.99), 86399.99)
+
+    def test_epoca_unix_e_reconhecida(self):
+        # Improvável num float de 32 bits, mas reconhecida em vez de
+        # virar hora absurda.
+        self.assertEqual(rm.gps_time_para_segundos(1789148756.0), 63956.0)
+
+    def test_valor_sem_unidade_conhecida_nao_vira_hora(self):
+        for v in (999999.0, 126000.0, 246000.0):
+            self.assertIsNone(rm.gps_time_para_segundos(v), f"aceitou {v}")
+
+    def test_ausencia_e_zero_nao_viram_medida(self):
+        for v in (None, 0, 0.0, "", "abc"):
+            self.assertIsNone(rm.gps_time_para_segundos(v), f"aceitou {v!r}")
+
+    def test_comparar_o_bruto_dispensa_a_conversao(self):
+        # O uso principal — "a posição mudou?" — compara o valor bruto e
+        # funciona em qualquer formato. Se esta invariante cair, a captura
+        # passa a depender de adivinhar a unidade.
+        a = rm.parse_state(STATE)["sistema"]["gps_time"]
+        b = rm.parse_state(STATE.replace("gpsTime: 143025.0",
+                                         "gpsTime: 143026.0"))["sistema"]["gps_time"]
+        self.assertNotEqual(a, b)
+
+
+class TestIdentidadeDoVizinho(unittest.TestCase):
+    """State.Peer NÃO tem name nem serialNumber — conferido no
+    `State.proto`: mac, enabled, cost, rate, rssi, signal, age, stats,
+    encapId, ipv4Address. Quem fecha o nome é o `encapId`, que é a parte
+    numérica do número de série.
+
+    Verificado nos 40 vizinhos da captura real da ERM-12: 40 de 40.
+    """
+
+    ST = """
+manufacturer {
+  model: "ES1-2450CS"
+  serial: 113345
+}
+wireless {
+  name: "wlan0"
+  channel: 157
+  noise: -109
+  peer {
+    mac: "aa"
+    enabled: true
+    cost: 8523
+    rate: 650
+    rssi: 21
+    signal: -88
+    age: 3
+    encapId: 97128
+    ipv4Address: "10.188.97.170"
+  }
+}
+"""
+
+    def test_encapid_do_vizinho_e_lido(self):
+        d = rm.parse_state(self.ST)
+        self.assertEqual(d["radios"][0]["peers"][0]["encap"], 97128)
+
+    def test_serial_numerico_do_proprio_radio_e_lido(self):
+        d = rm.parse_state(self.ST)["sistema"]
+        self.assertEqual(d["serial_num"], 113345)
+        self.assertEqual(d["modelo_fab"], "ES1-2450CS")
+
+    def test_sem_encapid_fica_none_nao_zero(self):
+        st = self.ST.replace("    encapId: 97128\n", "")
+        self.assertIsNone(rm.parse_state(st)["radios"][0]["peers"][0]["encap"])
+
+    def test_coleta_filtrada_nao_traz_manufacturer(self):
+        # `manufacturer` é o campo 190 do State, fora de gps/wireless/
+        # system. Numa coleta filtrada ele não vem — e o certo é None,
+        # não 0: serial 0 seria um rádio existente e errado.
+        st = self.ST[self.ST.index("wireless {"):]
+        d = rm.parse_state(st)["sistema"]
+        self.assertIsNone(d["serial_num"])
+        self.assertIsNone(d["modelo_fab"])
+
+    def test_encapid_bate_com_o_serial_no_arquivo_real(self):
+        # A prova que sustenta a chave. Se um firmware mudar isso, este
+        # teste cai antes de o relatório sair com nome trocado.
+        exemplo = (Path(__file__).resolve().parent / "exemplos"
+                   / "meshmapper_repetidora.json")
+        if not exemplo.exists():
+            self.skipTest("exemplos/meshmapper_repetidora.json ausente")
+        d = json.loads(exemplo.read_text(encoding="utf-8"))
+        vistos = {}
+        for p in d["points"]:
+            for lst in p["wlanPeers"].values():
+                for q in lst:
+                    vistos[q["serialNumber"]] = q["encap"]
+        self.assertGreater(len(vistos), 10)
+        for ser, enc in vistos.items():
+            self.assertTrue(ser.endswith(str(enc)),
+                            f"encap {enc} nao e sufixo de {ser}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

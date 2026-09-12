@@ -327,6 +327,11 @@ m_gps_rumo      = Gauge("rajant_gps_rumo_graus",    "Rumo verdadeiro (gpsTrackDe
 m_gps_sats      = Gauge("rajant_gps_satelites",     "Satelites a vista (gpsSatsInView)",  LBC)
 m_gps_alt       = Gauge("rajant_gps_altitude_m",    "Altitude m (gpsPos.gpsAlt)",         LBC)
 m_gps_hdop      = Gauge("rajant_gps_precisao_h",    "Precisao horizontal (gpsPrecisionH)",LBC)
+# Indicador de fix do NMEA GGA, em gpsPos.gpsQuality: 0 invalido, 1 GPS,
+# 2 DGPS, 4/5 RTK. Estava no proto e era descartado. Separa "sem GPS" de
+# "GPS degradado", que no mapa e a diferenca entre ponto ausente e ponto
+# no lugar errado.
+m_gps_qual      = Gauge("rajant_gps_qualidade",     "Indicador de fix (gpsPos.gpsQuality)",LBC)
 
 m_bc_primario   = Gauge("rajant_bc_primario",       "1=IP primario do no fisico, 0=interface secundaria", LBC)
 m_bc_ifaces     = Gauge("rajant_bc_interfaces",     "Qtd de IPs (interfaces) do mesmo no fisico", LBC)
@@ -668,6 +673,47 @@ def nmea_para_graus(coord):
     except (ValueError, IndexError):
         return None
 
+def gps_time_para_segundos(v):
+    """`GPS.GPSPositionReport.gpsTime` -> segundos desde a meia-noite UTC.
+
+    O `Gps.proto` declara `optional float gpsTime = 1;` e **não diz a
+    unidade**. Por isso aqui se DISCRIMINA em vez de supor:
+
+      • 0 a 240000  -> hora NMEA `hhmmss.ss` (o resto do bloco é NMEA:
+                       gpsLat e gpsLong vêm em DDMM.mmmm). 174551.25 são
+                       17h45m51,25s.
+      • > 1e9       -> época Unix. Improvável num float de 32 bits — não
+                       sobra precisão para segundos — mas se um firmware
+                       publicar assim, é reconhecido em vez de virar hora
+                       absurda.
+
+    Devolve None quando não encaixa em nenhum dos dois: número sem
+    unidade conhecida não vira medida de tempo por conveniência.
+
+    ATENÇÃO — o uso principal de `gpsTime` NÃO depende desta conversão.
+    Para saber se a posição é nova basta comparar o valor bruto com o da
+    leitura anterior, e isso funciona em qualquer formato. Esta função
+    serve para exibir e para medir o intervalo de atualização.
+    """
+    if v is None: return None
+    try: f = float(v)
+    except (TypeError, ValueError): return None
+    if f <= 0: return None
+    if f >= 1e9:                       # época Unix
+        return f % 86400.0
+    # UMA validação, aqui: hh/mm/ss fora de faixa cobre tudo que não é
+    # hora NMEA. Havia antes um `if f >= 240000: return None` por cima
+    # disto — teste de mutação mostrou que removê-lo não quebrava nada,
+    # porque 240000 já sai por `hh > 23`. Guarda que não guarda nada só
+    # dá a impressão de que a faixa é checada em dois lugares.
+    hh = int(f // 10000)
+    mm = int((f // 100) % 100)
+    ss = f - hh * 10000 - mm * 100
+    if hh > 23 or mm > 59 or ss >= 60.0:
+        return None
+    return round(hh * 3600 + mm * 60 + ss, 3)
+
+
 def _mbps(delta, dt):
     if dt <= 0 or delta <= 0: return 0.0
     return round((delta * 8)/1_000_000/dt, 4)
@@ -871,6 +917,37 @@ def parse_state(raw):
     gps_alt  = round(float(_alt), 1)  if _alt  else None
     gps_hdop = round(float(_hdop), 2) if _hdop else None
 
+    # ── Hora do fix (GPS.GPSPositionReport.gpsTime) ────────────
+    # É o campo que separa "medi aqui" de "medi com uma posição velha".
+    # O State devolve a posição que o módulo tem NO MOMENTO da consulta;
+    # se o GPS atualiza a 1 Hz e perguntamos a 5 Hz, quatro das cinco
+    # respostas repetem a mesma posição. Sem `gpsTime` isso é invisível e
+    # vira ponto duplicado no mapa; com ele, dá para não gravar amostra
+    # cuja posição não mudou — e para medir sozinho de quanto em quanto o
+    # módulo atualiza, em vez de supor.
+    #
+    # `gpsQuality` é o indicador de fix do NMEA GGA (0 = inválido,
+    # 1 = GPS, 2 = DGPS, 4/5 = RTK). Também estava sendo descartado.
+    _gtime = _s(pos_b, 'gpsTime')
+    _qual  = _s(pos_b, 'gpsQuality')
+    gps_time = float(_gtime) if _gtime else None
+    gps_qual = float(_qual) if _qual else None
+
+    # ── Identidade de fábrica (State.Manufacturer) ─────────────
+    # `serial` aqui é uint32 — a parte NUMÉRICA do número de série. É ela
+    # que fecha a identificação do vizinho: State.Peer traz `encapId`, e
+    # encapId é esse mesmo número (conferido em 40 de 40 vizinhos da
+    # captura real: FE1-2255B-107805 <-> encap 107805). Com o serial de
+    # cada rádio coletado, o `encap` de qualquer vizinho vira nome.
+    #
+    # ATENÇÃO para quem for mexer: `manufacturer` é o campo 190 do State,
+    # um ramo À PARTE de gps/wireless/system. CAMINHOS_ESTADO não o pede,
+    # então numa coleta filtrada ele vem vazio — e é por isso que o certo
+    # é ler UMA vez por rádio e guardar: serial e modelo não mudam.
+    mf_b = extrair_bloco(txt_estado, 'manufacturer')
+    serial_num = (_i(mf_b, 'serial') or None) if mf_b else None
+    modelo_fab = (_s(mf_b, 'model') or None) if mf_b else None
+
     sistema = {
         "ip":         ip_m.group(1) if ip_m else "",
         "nome":       nome or (ip_m.group(1) if ip_m else ""),
@@ -899,6 +976,13 @@ def parse_state(raw):
         "gps_sats":   gps_sats,
         "gps_alt":    gps_alt,
         "gps_hdop":   gps_hdop,
+        # Bruto, como veio: comparar com a leitura anterior é o que diz se
+        # a posição é nova, e isso independe de saber a unidade.
+        "gps_time":   gps_time,
+        "gps_time_s": gps_time_para_segundos(gps_time),
+        "gps_qual":   gps_qual,
+        "serial_num": serial_num,
+        "modelo_fab": modelo_fab,
     }
 
     # ── Alertas (Common.proto AlertSystem) ─────────────────────
@@ -977,6 +1061,18 @@ def parse_state(raw):
                 "custo": _i(pb,'cost'),
                 # State.Peer não tem txpower — campo removido (era sempre 0).
                 "idade": _i(pb,'age'),
+                # State.Peer NÃO tem name nem serialNumber — conferido no
+                # State.proto: os campos são mac, enabled, cost, rate,
+                # rssi, signal, age, stats, encapId, ipv4Address. O que
+                # identifica o vizinho por NOME é o encapId: ele é o
+                # sufixo do número de série do rádio.
+                #
+                # Verificado nos 40 vizinhos da captura real da ERM-12:
+                #   ES1-2450CS-113187 <-> encap 113187  (ERB-11 L1)
+                #   FE1-2255B-107805  <-> encap 107805  (ERB-02)
+                # 40 de 40. Não é heurística; é a chave que o próprio
+                # MeshMapper usa para mostrar "ERB-07" em vez do MAC.
+                "encap": _i(pb,'encapId') or None,
             })
 
         custos     = [p["custo"] for p in peers if p["ativo"] and p["custo"] > 0]
@@ -1367,6 +1463,7 @@ def publicar(ip, dados, est):
     pub(m_gps_sats, s.get("gps_sats"))
     pub(m_gps_alt,  s.get("gps_alt"))
     pub(m_gps_hdop, s.get("gps_hdop"))
+    pub(m_gps_qual, s.get("gps_qual"))
     m_gps_fix.labels(**lbc).set(s.get("gps_fix", 0))
     m_boot.labels(**lbc).set(s["boot"])
     m_reboot_needed.labels(**lbc).set(s["reboot"])

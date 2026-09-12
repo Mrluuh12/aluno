@@ -105,6 +105,50 @@ correta. Sem nenhum dos dois → `None`, não 0.
 > O rumo já era calculado no parser antigo (`gps_rumo`) mas **não tinha `Gauge`** —
 > era computado e jogado fora.
 
+### `gpsTime` — o campo que faltava para medir no lugar certo
+
+| campo no proto | lido? | onde aparece |
+|---|---|---|
+| `GPS.gpsPos.gpsTime` | ✅ | `gps_time` (bruto) e `gps_time_s` (segundos) |
+| `GPS.gpsPos.gpsQuality` | ✅ | `gps_qual`, com `rajant_gps_qualidade` |
+| `GPS.gpsPos.gpsGeoidalSep` | ❌ | sem uso definido — não lido de propósito |
+
+O State devolve a posição que o módulo tem **no momento da consulta**. Se o GPS
+atualiza a 1 Hz e se pergunta a 5 Hz, quatro das cinco respostas repetem a mesma
+posição. Sem `gpsTime` isso é invisível e vira ponto duplicado no mapa; com ele,
+dá para não gravar amostra cuja posição não mudou — e para **medir** o intervalo
+de atualização do módulo em vez de supor.
+
+> O `Gps.proto` declara `optional float gpsTime = 1;` e **não diz a unidade**.
+> `gps_time_para_segundos()` discrimina entre hora NMEA `hhmmss.ss` e época Unix,
+> e devolve `None` no que não encaixa — número sem unidade conhecida não vira
+> medida de tempo. O uso principal (*"a posição mudou?"*) compara o valor **bruto**
+> e não depende dessa conversão.
+
+### Identidade do vizinho: `encapId`
+
+`State.Peer` **não tem** `name` nem `serialNumber`. Os campos são, no
+`State.proto`: `mac, enabled, cost, rate, rssi, signal, age, stats, encapId,
+ipv4Address`. O MeshMapper mostra nome e série porque resolve por fora — e a
+chave é o `encapId`, que é a **parte numérica do número de série**:
+
+| serial | encapId | nome |
+|---|---|---|
+| `ES1-2450CS-113187` | `113187` | ERB-11 L1 |
+| `FE1-2255B-107805` | `107805` | ERB-02 |
+
+Verificado nos **40 de 40** vizinhos da captura real da ERM-12; há teste que
+refaz a conferência sobre `exemplos/meshmapper_repetidora.json`.
+
+O outro lado da chave é `State.Manufacturer.serial` (uint32), agora lido como
+`serial_num`. Atenção: `manufacturer` é o campo **190**, um ramo à parte de
+`gps`/`wireless`/`system` — `CAMINHOS_ESTADO` não o pede, então numa coleta
+filtrada ele vem vazio. Como serial e modelo não mudam, o certo é ler uma vez
+por rádio e guardar.
+
+`channel` e `frequency` que o MeshMapper mostra por vizinho vêm do **rádio pai**
+(`State.Wireless.channel`), não do peer.
+
 ---
 
 ## 3. InstaMesh
