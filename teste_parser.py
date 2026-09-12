@@ -5423,6 +5423,102 @@ class TestColetaAoVivo(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.col.Coleta({}, aviso=lambda t: None).rodar(0)
 
+    def test_conecta_com_porta_usuario_e_senha_nos_lugares_certos(self):
+        """A troca de argumentos que zerou uma coleta inteira.
+
+        `SessaoRadio(ip, porta, role, senha, ...)` recebia
+        `(ip, role, senha, porta)`: a porta virava "VIEW", o usuário
+        virava a senha e a senha virava 2300. Toda conexão falhava — 139
+        falhas e zero amostra — e nada acusava, porque o Breadcrumb falso
+        aceitava qualquer coisa sem olhar.
+
+        Agora ele CONFERE. É o que transforma um fake em teste.
+        """
+        import time as _t, threading as _th
+        recebidos = []
+
+        class FakeBC:
+            def __init__(s, host, port=None, role=None, password=None):
+                recebidos.append({"host": host, "port": port,
+                                  "role": role, "password": password})
+                s.h = host
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k):
+                return ('configuration {\n  saved {\n    general {\n'
+                        '      name: "CA-1"\n    }\n  }\n}\n'
+                        'wireless {\n  name: "wlan0"\n  channel: 157\n}\n')
+        rm.Breadcrumb = FakeBC
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, role="co", senha="segredo",
+                            porta=2300, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        self.assertTrue(recebidos, "nem tentou conectar")
+        r = recebidos[0]
+        self.assertEqual(r["host"], "10.0.0.1")
+        self.assertEqual(r["port"], 2300, f"porta errada: {r}")
+        self.assertEqual(r["role"], "co", f"usuario errado: {r}")
+        self.assertEqual(r["password"], "segredo", f"senha errada: {r}")
+
+    def test_radio_descartado_volta_a_ser_tentado(self):
+        """`SessaoRadio` desiste após 3 falhas e nunca mais tenta.
+
+        Para o survey curto de onde ela veio isso está certo; numa coleta
+        de turno, não: um caminhão que passa vinte segundos atrás de uma
+        bancada sairia do levantamento para o resto do dia.
+        """
+        import time as _t, threading as _th
+        estado = {"vivo": False, "tentativas": 0}
+        ST = ('configuration {\n  saved {\n    general {\n      name: "CA-1"\n'
+              '    }\n  }\n}\ngps {\n  gpsSwitch {\n    enabled: true\n  }\n'
+              '  gpsPos {\n    gpsTime: 143025.0\n    gpsLat: "1853.6443S"\n'
+              '    gpsLong: "04325.8538W"\n  }\n}\n'
+              'wireless {\n  name: "wlan0"\n  channel: 157\n}\n')
+
+        class Intermitente:
+            def __init__(s, host, port=None, role=None, password=None):
+                estado["tentativas"] += 1
+            def reachable(s):    return estado["vivo"]
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return ST
+        rm.Breadcrumb = Intermitente
+        # Tempos curtos para o teste não levar minutos. `parado_s` também:
+        # depois de uma falha a agenda só reexamina o rádio a cada
+        # `parado_s`, então sem encurtá-lo o reencontro nunca chega a ser
+        # tentado dentro do teste.
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, reencontro_s=0.3,
+                            parado_s=0.3, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True); th.start()
+        _t.sleep(1.0)
+        self.assertEqual(len(c.amostras), 0, "deveria estar falhando")
+        estado["vivo"] = True          # o caminhão saiu de trás da bancada
+        _t.sleep(2.0)
+        c.parar(); th.join(10)
+        self.assertGreater(len(c.amostras), 0,
+                           "radio descartado nunca mais foi tentado")
+
+    def test_motivo_da_falha_chega_a_tela(self):
+        # Um contador de falhas subindo sem motivo escondeu a troca de
+        # argumentos por quase uma hora.
+        import time as _t, threading as _th
+        linhas = []
+
+        class Recusa:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s): return False
+            def authenticate(s): return False
+            def get_state(s, *a, **k): raise AssertionError("nao deveria chegar")
+        rm.Breadcrumb = Recusa
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=linhas.append)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        self.assertGreater(c.n_falhas, 0)
+        texto = " ".join(linhas)
+        self.assertIn("falha em CA-1", texto, f"motivo nao apareceu: {linhas}")
+        self.assertTrue(c.motivos, "nenhum motivo foi registrado")
+
     def test_relatorios_saem_da_coleta(self):
         import tempfile, shutil
         c = self._rodar(segundos=4.0)

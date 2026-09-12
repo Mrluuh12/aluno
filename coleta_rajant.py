@@ -106,14 +106,19 @@ class Coleta:
 
     def __init__(self, alvos, role="co", senha="", porta=2300,
                  passo_m=PASSO_M_PADRAO, max_threads=12, timeout_s=6,
-                 cfg=None, nome=None, aviso=print):
+                 cfg=None, nome=None, reencontro_s=60.0,
+                 parado_s=INTERVALO_PARADO_S, aviso=print):
         self.alvos    = {ip: (nomes or ip) for ip, nomes in dict(alvos).items()}
         self.role     = role
         self.senha    = senha
         self.porta    = porta
-        self.agenda   = Agenda(passo_m)
+        self.agenda   = Agenda(passo_m, parado_s)
         self.max_thr  = max(1, int(max_threads))
         self.timeout  = timeout_s
+        # Quanto esperar antes de tentar de novo um radio descartado.
+        # Curto demais gasta o orcamento em quem esta fora; longo demais
+        # perde o caminhao que voltou.
+        self.reencontro_s = float(reencontro_s)
         self.cfg      = rm.cfg_survey(cfg)
         self.nome     = nome or f"Coleta {time.strftime('%d/%m %H:%M')}"
         self.aviso    = aviso
@@ -127,6 +132,8 @@ class Coleta:
         # nova traz a posição velha, e gravá-la empilharia amostras no
         # mesmo lugar — que foi o que encheu a captura da ERM-12.
         self.ultimo_fix = {}
+        self.motivos    = {}   # motivo da falha -> quantas vezes
+        self.desistencias = {}  # ip -> quando a sessao desistiu dele
         self.n_repetidos = 0
         self.n_lidos     = 0
         self.n_falhas    = 0
@@ -139,13 +146,41 @@ class Coleta:
     # ── uma leitura ──────────────────────────────────────────
     def _ler(self, ip):
         ses = self.sessoes.get(ip)
+        # `SessaoRadio` DESISTE do rádio após 3 falhas seguidas e nunca
+        # mais tenta. Para o survey curto de onde ela veio isso está
+        # certo; para uma coleta de turno, não: um caminhão que passa
+        # vinte segundos atrás de uma bancada sairia do levantamento para
+        # o resto do dia. Aqui ele volta a ser tentado depois de uma
+        # pausa — a política de reencontro é do coletor, não da sessão.
+        if ses is not None and ses.desistiu:
+            quando = self.desistencias.get(ip)
+            agora = time.monotonic()
+            if quando is None:
+                self.desistencias[ip] = agora
+                return None
+            if agora - quando < self.reencontro_s:
+                return None
+            self.desistencias.pop(ip, None)
+            try: ses.fechar()
+            except Exception: pass
+            ses = None
+            self.sessoes.pop(ip, None)
+            self.aviso(f"tentando {self.alvos.get(ip, ip)} de novo")
         if ses is None:
-            ses = rm.SessaoRadio(ip, self.role, self.senha, self.porta,
-                                 self.timeout)
+            # POR NOME, nunca por posição. A assinatura é
+            # SessaoRadio(ip, porta, role, senha, ...) e eu passei
+            # (ip, role, senha, porta): a porta virou "VIEW", o usuário
+            # virou a senha e a senha virou 2300. Toda conexão falhou —
+            # 139 falhas e zero amostra —, e como os argumentos eram
+            # posicionais, nada acusou.
+            ses = rm.SessaoRadio(ip, porta=self.porta, role=self.role,
+                                 senha=self.senha, timeout=self.timeout)
             self.sessoes[ip] = ses
         txt = ses.estado_bruto()
         if not txt:
-            return None
+            # A sessão guarda o motivo; sem trazê-lo para cá o usuário vê
+            # só um contador de falhas subindo, sem nenhuma pista.
+            raise RuntimeError(ses.ultimo_erro or "sem resposta")
         return rm.parse_state(txt)
 
     def _amostra(self, ip, d, agora):
@@ -236,7 +271,23 @@ class Coleta:
 
             for ip, d in res.items():
                 if isinstance(d, Exception) or d is None:
-                    with self.lock: self.n_falhas += 1
+                    with self.lock:
+                        self.n_falhas += 1
+                        motivo = (f"{type(d).__name__}: {d}"
+                                  if isinstance(d, Exception) else "sem resposta")
+                        # Um contador subindo não diz nada. Cada motivo
+                        # NOVO vai para a tela uma vez; repetido só conta.
+                        # Foi um "139 falhas" mudo que escondeu uma troca
+                        # de argumentos por quase uma hora.
+                        if motivo not in self.motivos:
+                            self.motivos[motivo] = 0
+                            novo = True
+                        else:
+                            novo = False
+                        self.motivos[motivo] += 1
+                    if novo:
+                        nome = self.alvos.get(ip, ip)
+                        self.aviso(f"falha em {nome} ({ip}): {motivo}")
                     self.agenda.registrar(ip, time.monotonic(), None, None, None)
                     continue
                 with self.lock: self.n_lidos += 1
@@ -261,6 +312,11 @@ class Coleta:
         for ses in self.sessoes.values():
             try: ses.fechar()
             except Exception: pass
+        if self.motivos:
+            # Ordenado do motivo mais frequente para o menos: com dezenas
+            # de radios, e o primeiro que explica a coleta inteira.
+            for m, n in sorted(self.motivos.items(), key=lambda kv: -kv[1])[:5]:
+                self.aviso(f"  {n}x  {m}")
         self.aviso(f"coleta encerrada: {len(self.amostras)} amostras, "
                    f"{len(self.peers)} leituras de vizinho")
         return self.amostras, self.peers
