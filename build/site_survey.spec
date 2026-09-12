@@ -35,8 +35,15 @@ a = Analysis(
     # A rajant_api é importada dentro de try/except (para o módulo
     # carregar sem ela nas máquinas que só geram relatório), e o
     # PyInstaller não segue import condicional.
+    #
+    # tkinter entra EXPLÍCITO: ele é importado dentro de main(), e import
+    # em corpo de função é justamente o que a análise estática às vezes
+    # não alcança. Sem ele o exe abre, falha no import e fecha o console
+    # antes de alguém ler o motivo — que foi o "não abre" relatado.
     hiddenimports=["rajant_api", "coleta_rajant", "survey_meshmapper",
-                   "rajant_monitor"],
+                   "rajant_monitor",
+                   "tkinter", "tkinter.ttk", "tkinter.filedialog",
+                   "tkinter.messagebox", "tkinter.constants"],
     hookspath=[],
     runtime_hooks=[],
     excludes=["PyQt5", "PyQt6", "PySide2", "PySide6",

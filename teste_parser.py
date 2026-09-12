@@ -5278,6 +5278,45 @@ class TestJanelaUnica(unittest.TestCase):
             capture_output=True, text=True, timeout=90)
         self.assertIn("ok", r.stdout, r.stderr[-600:])
 
+    def test_verificar_nao_abre_janela_e_devolve_codigo(self):
+        # É o que o build usa para PROVAR que o exe funciona. Sem isto, a
+        # única forma de saber era dar duplo clique — e se falhasse, o
+        # console fechava no mesmo instante: virava "não abre", sem pista.
+        import subprocess, sys as _s
+        aqui = str(Path(__file__).resolve().parent)
+        r = subprocess.run(
+            [_s.executable, "site_survey.py", "--verificar"],
+            capture_output=True, text=True, timeout=120, cwd=aqui)
+        self.assertIn("Verificação do site_survey", r.stdout, r.stderr[-500:])
+        # Sem tkinter tem de FALHAR, não passar calado: é exatamente o
+        # caso que fazia o exe fechar sozinho.
+        try:
+            import tkinter  # noqa: F401
+            esperado = 0
+        except ImportError:
+            esperado = 1
+        self.assertEqual(r.returncode, esperado, r.stdout[-500:])
+
+    def test_erro_de_partida_vai_para_arquivo(self):
+        # Console de exe fecha no instante em que o programa termina. Se
+        # o motivo não for para o disco, o usuário fica sem nada.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn("site_survey_erro.txt", fonte)
+        # Congelado, __file__ aponta para o pacote temporário; o arquivo
+        # tem de ir para a pasta do EXE, que é a que o usuário enxerga.
+        self.assertTrue('"frozen"' in fonte or "'frozen'" in fonte,
+                        "erro iria para a pasta errada quando congelado")
+
+    def test_ha_um_unico_gerador_de_executavel(self):
+        # Dois .bat e dois .spec na mesma pasta geravam dois exes, e a
+        # duvida de qual abrir.
+        b = Path(__file__).resolve().parent / "build"
+        specs = sorted(p.name for p in b.glob("*.spec"))
+        self.assertNotIn("survey_meshmapper.spec", specs,
+                         f"voltou a haver dois exes de survey: {specs}")
+        self.assertFalse((b / "gerar_exe_survey.bat").exists())
+
     def test_a_logica_nao_mora_na_janela(self):
         # Se a coleta voltar para dentro do arquivo da interface, ela
         # deixa de ser testável sem display.

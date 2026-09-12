@@ -22,13 +22,52 @@ Pela linha de comando, use os módulos diretamente:
 import sys, os, threading, queue, traceback
 from pathlib import Path
 
+
+# ──────────────────────────────────────────────────────────────
+# Erro na partida TEM de ficar visível.
+#
+# Com o exe em modo console, um duplo clique abre a janela preta e ela
+# FECHA no instante em que o programa termina. Qualquer falha de import
+# some antes de alguém conseguir ler — e o que chega ao usuário é "não
+# abre", sem nenhuma pista.
+#
+# Então todo erro de partida vai para um arquivo AO LADO DO EXE e o
+# console espera uma tecla. Custa duas dúzias de linhas e transforma
+# "não abre" em "abriu e disse o motivo".
+# ──────────────────────────────────────────────────────────────
+def _pasta_do_exe():
+    # Congelado pelo PyInstaller, __file__ aponta para dentro do pacote
+    # temporário; o que o usuário enxerga é a pasta do executável.
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _morrer(titulo, detalhe):
+    txt = f"{titulo}\n\n{detalhe}\n"
+    try:
+        alvo = _pasta_do_exe() / "site_survey_erro.txt"
+        alvo.write_text(txt, encoding="utf-8")
+        onde = f"\nGravado em: {alvo}"
+    except Exception:
+        onde = ""
+    print("=" * 68)
+    print(txt + onde)
+    print("=" * 68)
+    try:
+        input("\nPressione ENTER para fechar...")
+    except Exception:
+        pass
+    sys.exit(1)
+
+
 try:
     import rajant_monitor as rm
     import survey_meshmapper as smm
     import coleta_rajant as col
-except ImportError as e:
-    print(f"ERRO: falta um módulo ao lado deste arquivo: {e}")
-    sys.exit(1)
+except Exception as e:
+    _morrer("Faltou um módulo ao lado deste programa.",
+            f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
 
 TITULO = "Site Survey — Rajant"
 EXTENSOES = [("Captura do MeshMapper", "*.kmz *.json *.csv"),
@@ -48,16 +87,72 @@ def abrir_pasta(caminho):
         return False
 
 
+def verificar():
+    """Confere tudo que a janela precisa, SEM abrir janela. Devolve 0/1.
+
+    Existe para o build poder provar que o executável funciona. Antes,
+    a única forma de saber era dar duplo clique — e se falhasse, o
+    console fechava antes de qualquer mensagem.
+    """
+    problemas = []
+    print("Verificação do site_survey\n")
+    for rot, mod in (("motor de relatórios", "rajant_monitor"),
+                     ("leitura de arquivos", "survey_meshmapper"),
+                     ("coleta ao vivo", "coleta_rajant")):
+        try:
+            __import__(mod); print(f"  ok      {rot} ({mod})")
+        except Exception as e:
+            print(f"  FALHOU  {rot} ({mod}): {e}"); problemas.append(mod)
+
+    try:
+        import tkinter
+        # Importar não basta: o tcl/tk pode faltar no disco e só quebrar
+        # ao criar a primeira janela. Cria e destrói uma, sem mostrar.
+        r = tkinter.Tk(); r.withdraw(); r.destroy()
+        print("  ok      interface gráfica (tkinter + tcl/tk)")
+    except Exception as e:
+        print(f"  FALHOU  interface gráfica: {e}")
+        problemas.append("tkinter")
+
+    try:
+        import rajant_monitor as _rm
+        print("  ok      rajant-api presente" if _rm.Breadcrumb is not None
+              else "  aviso   rajant-api ausente: a aba Coleta não funciona, "
+                   "a de Arquivos sim")
+    except Exception:
+        pass
+
+    for pacote in ("matplotlib", "numpy", "scipy", "pptx", "openpyxl", "lxml"):
+        try:
+            __import__(pacote); print(f"  ok      {pacote}")
+        except Exception as e:
+            print(f"  FALHOU  {pacote}: {e}"); problemas.append(pacote)
+
+    print()
+    if problemas:
+        print(f"{len(problemas)} problema(s): {', '.join(problemas)}")
+        return 1
+    print("Tudo certo. A janela vai abrir.")
+    return 0
+
+
 def main():
+    if "--verificar" in sys.argv[1:]:
+        return verificar()
     try:
         import tkinter as tk
         from tkinter import ttk, filedialog, messagebox
-    except ImportError:
-        print("ERRO: este Python não tem tkinter (a interface gráfica).\n"
-              "      No Windows, reinstale o Python marcando 'tcl/tk'.\n"
-              "      Enquanto isso, use pela linha de comando:\n"
-              "      survey_meshmapper captura.kmz -o saida")
-        return 1
+    except Exception as e:
+        # Aqui morava o "não abre": a mensagem ia para um console que
+        # fechava no mesmo instante.
+        _morrer(
+            "Este programa não achou o tkinter (a interface gráfica).",
+            f"{type(e).__name__}: {e}\n\n"
+            "No Windows, reinstale o Python marcando 'tcl/tk' e gere o "
+            "executável de novo.\n"
+            "Enquanto isso, pela linha de comando funciona:\n"
+            "   survey_meshmapper captura.kmz -o saida\n"
+            "   coleta_rajant --seeds 10.188.96.140 --minutos 30 -o saida")
 
     AZUL   = "#" + rm.ANGLO["azul"]
     AZUL2  = "#" + rm.ANGLO["azul2"]
@@ -461,4 +556,10 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        _morrer("O programa parou com um erro.",
+                f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
