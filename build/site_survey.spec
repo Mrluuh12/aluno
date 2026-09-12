@@ -1,0 +1,68 @@
+# PyInstaller spec do site_survey — a janela única: coleta ao vivo dos
+# rádios e relatórios a partir de arquivos do MeshMapper.
+#
+# Use:  python -m PyInstaller --noconfirm --clean build/site_survey.spec
+#
+# Diferenças em relação aos outros dois specs, e o motivo de cada uma:
+#
+#  * rajant_api ENTRA (hiddenimports). Este exe fala com rádio — é o que
+#    o survey_meshmapper.exe deliberadamente não faz. A importação é
+#    dentro de try/except, então o PyInstaller não a acha sozinho.
+#  * tkinter NÃO entra nos excludes: é a interface do programa. Herdar o
+#    exclude do spec do rajant_monitor geraria um exe que abre e fecha na
+#    hora, com o erro só no console que ninguém vê.
+#  * SEM prometheus_client e sem servidor web. O rajant_monitor entra como
+#    BIBLIOTECA (parser, KMZ, PPT, Excel), nunca executado — o coletor de
+#    métricas e a página web não têm por que vir junto.
+#  * console=True mesmo tendo janela: os módulos também rodam por linha de
+#    comando, e com console=False a saída some — o erro junto.
+#
+# A máquina que roda ESTE exe precisa de rede até a malha. Quem só gera
+# relatório de arquivo continua tendo o survey_meshmapper.exe, que não
+# carrega a rajant-api nem exige rede.
+import os
+
+datas = []
+for pasta in ("marca", "exemplos"):
+    if os.path.isdir(os.path.join("..", pasta)):
+        datas.append((os.path.join("..", pasta), pasta))
+
+a = Analysis(
+    ["../site_survey.py"],
+    pathex=[".."],
+    binaries=[],
+    datas=datas,
+    # A rajant_api é importada dentro de try/except (para o módulo
+    # carregar sem ela nas máquinas que só geram relatório), e o
+    # PyInstaller não segue import condicional.
+    hiddenimports=["rajant_api", "coleta_rajant", "survey_meshmapper",
+                   "rajant_monitor"],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6",
+              "IPython", "jupyter", "notebook", "pytest", "sphinx",
+              # A rajant-api DECLARA grpcio e NUNCA o importa. Sem este
+              # exclude o PyInstaller tenta empacotar uma dependência que
+              # nem sequer instala em Python 3.12+.
+              "grpc", "grpcio", "grpcio_tools",
+              # Este exe não expõe /metrics.
+              "prometheus_client"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz, a.scripts, [],
+    exclude_binaries=True,
+    name="site_survey",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+)
+coll = COLLECT(
+    exe, a.binaries, a.datas,
+    strip=False,
+    upx=False,
+    name="site_survey",
+)

@@ -10041,6 +10041,100 @@ def cfg_survey(cfg):
     return cfg
 
 
+def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
+                    max_threads=24, seguir_peers=True, limite=600,
+                    aviso=None):
+    """Percorre a malha a partir dos seeds e devolve o inventário.
+
+    `{ip: {"nome", "tem_gps", "serial", "modelo", "banda", "vizinhos"}}`.
+
+    É a mesma mecânica da descoberta do coletor — parte dos seeds, lê o
+    State de cada um e segue os `peers_ips` —, mas sem métrica, sem cache
+    em disco e sem filtro de tag. Serve para montar a lista de seleção do
+    app de coleta: ali o usuário quer ver TUDO que responde, e decidir
+    ele mesmo o que entra.
+
+    `tem_gps` é o que separa quem pode ir para o mapa de quem só pode ir
+    para o censo: rádio sem módulo de GPS, ou com `gpsSwitch.enabled`
+    falso, não sabe onde está. Melhor dizer isso na lista do que deixar o
+    usuário marcar e descobrir no fim que não saiu ponto nenhum.
+
+    `limite` é o teto de rádios visitados. Sem ele, uma malha com rota
+    para outra rede sairia visitando endereço alheio até estourar o
+    tempo do usuário.
+    """
+    Bc = exigir_rajant_api()
+    achados, vistos = {}, set()
+    lk = threading.Lock()
+    sem = threading.Semaphore(max(1, int(max_threads)))
+
+    def _diz(t):
+        log.info(f"[descoberta] {t}")
+        if aviso:
+            try: aviso(t)
+            except Exception: pass
+
+    def _um(ip):
+        with sem:
+            try:
+                bc = Bc(host=ip, port=porta, role=role, password=senha)
+                if not bc.reachable():
+                    raise ConnectionRefusedError("nao alcancavel")
+                if not bc.authenticate():
+                    raise PermissionError("autenticacao falhou")
+                d = parse_state(bc.get_state())
+            except Exception as e:
+                with lk:
+                    achados[ip] = {"ip": ip, "nome": ip, "tem_gps": False,
+                                   "serial": None, "modelo": None,
+                                   "vizinhos": 0, "erro": str(e)}
+                return set()
+            s = d["sistema"]
+            with lk:
+                achados[ip] = {
+                    "ip": ip,
+                    "nome": s.get("nome") or ip,
+                    # gps_fix já embute o gpsSwitch desligado.
+                    "tem_gps": bool(s.get("gps_fix")),
+                    "qualidade_gps": s.get("gps_qual"),
+                    "serial": s.get("serial_num"),
+                    "modelo": s.get("modelo_fab") or s.get("modelo"),
+                    "vizinhos": sum(len(r.get("peers") or [])
+                                    for r in d.get("radios") or []),
+                    "erro": None,
+                }
+            return set(d.get("peers_ips") or ())
+
+    fila = {str(x).strip() for x in seeds if str(x).strip()}
+    while fila:
+        lote = [ip for ip in fila if ip not in vistos][:max(0, limite - len(vistos))]
+        if not lote:
+            break
+        vistos.update(lote)
+        novos, ths, saidas = set(), [], {}
+
+        def _worker(x):
+            saidas[x] = _um(x)
+        for ip in lote:
+            t = threading.Thread(target=_worker, args=(ip,), daemon=True)
+            ths.append(t); t.start()
+        for t in ths:
+            t.join(timeout=timeout_s + 10)
+        ok = sum(1 for ip in lote if not achados.get(ip, {}).get("erro"))
+        _diz(f"{len(vistos)} visitados, {ok} responderam neste lote")
+        if not seguir_peers:
+            break
+        for s_ in saidas.values():
+            novos |= {p for p in s_ if p not in vistos}
+        fila = novos
+
+    com_gps = sum(1 for v in achados.values() if v["tem_gps"])
+    _diz(f"fim: {len(achados)} rádios, "
+         f"{sum(1 for v in achados.values() if not v['erro'])} responderam, "
+         f"{com_gps} com GPS")
+    return achados
+
+
 class SessaoRadio:
     """Sessão BCAPI persistente com um rádio, para uso durante o survey.
 

@@ -5034,5 +5034,258 @@ class TestPegadaPorRepetidora(unittest.TestCase):
         self.assertNotIn("CA-9", linhas)
 
 
+def _rajant_falsa(frota, t0, latencia=0.0, gps_hz=10.0):
+    """Fábrica de BreadCrumb falso para testar coleta sem rádio.
+
+    `frota`: {ip: (nome, vel_kmh ou None para sem GPS, rumo_graus)}.
+    A posição avança com o tempo real, e `gpsTime` só anda a `gps_hz` —
+    é assim que se reproduz o piso do módulo, que é o que separa
+    "medi aqui" de "medi com a posição de antes".
+    """
+    import math, time as _t
+
+    def _nmea(v, casas):
+        h = ("S" if v < 0 else "N") if casas == 2 else ("W" if v < 0 else "E")
+        v = abs(v); d = int(v)
+        return f"{d:0{casas}d}{(v - d) * 60:07.4f}{h}"
+
+    def _state(ip):
+        nome, vel, rumo = frota[ip]
+        if vel is None:
+            g = ""
+        else:
+            dt = _t.time() - t0[0]
+            d = (vel / 3.6) * dt
+            lat = -18.894 + (d * math.cos(math.radians(rumo))) / 111320.0
+            lon = -43.431 + ((d * math.sin(math.radians(rumo)))
+                             / (111320.0 * math.cos(math.radians(18.9))))
+            gt = 143025.0 + int(dt * gps_hz) / gps_hz
+            g = (f'gps {{\n  gpsSwitch {{\n    enabled: true\n  }}\n'
+                 f'  gpsPos {{\n    gpsTime: {gt}\n'
+                 f'    gpsLat: "{_nmea(lat, 2)}"\n'
+                 f'    gpsLong: "{_nmea(lon, 3)}"\n'
+                 f'    gpsQuality: 1.0\n    gpsSatsInView: 11\n  }}\n'
+                 f'  gpsVel {{\n    gpsSpeedKph: {vel}\n  }}\n}}\n')
+        ps = ""
+        for oip, (on, _v, _r) in frota.items():
+            if oip == ip: continue
+            sig = -60 - (abs(hash(ip + oip)) % 35)
+            ps += (f'  peer {{\n    ipv4Address: "{oip}"\n'
+                   f'    signal: {sig}\n    rssi: {max(5, sig + 100)}\n'
+                   f'    cost: 5000\n    rate: 650\n'
+                   f'    encapId: {90000 + abs(hash(oip)) % 9999}\n  }}\n')
+        return (f'configuration {{\n  saved {{\n    general {{\n'
+                f'      name: "{nome}"\n    }}\n  }}\n}}\n'
+                f'{g}wireless {{\n  name: "wlan0"\n  channel: 157\n'
+                f'  noise: -95\n{ps}}}\n')
+
+    class FakeBC:
+        def __init__(self, host, port=None, role=None, password=None):
+            self.h = host
+        def reachable(self):   return self.h in frota
+        def authenticate(self): return True
+        def get_state(self, *a, **k):
+            if latencia: _t.sleep(latencia)
+            return _state(self.h)
+    return FakeBC
+
+
+class TestDescobrirMalha(unittest.TestCase):
+    """Descoberta sem o peso do coletor: sem métrica, sem cache, sem
+    filtro de tag. O app de coleta precisa ver TUDO que responde para o
+    usuário decidir."""
+
+    FROTA = {"10.0.0.1": ("ERB-07", 0.0, 0.0),
+             "10.0.0.2": ("CA-1006", 40.0, 0.0),
+             "10.0.0.3": ("PCP-002", None, 0.0)}   # sem GPS
+
+    def setUp(self):
+        import time as _t
+        self._orig = rm.Breadcrumb
+        rm.Breadcrumb = _rajant_falsa(self.FROTA, [_t.time()])
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def test_segue_os_peers_a_partir_do_seed(self):
+        r = rm.descobrir_malha(["10.0.0.1"])
+        self.assertEqual(set(r), set(self.FROTA))
+
+    def test_marca_quem_nao_tem_gps(self):
+        # Quem não sabe onde está não vai para o mapa. Dizer isso na
+        # lista evita o usuário marcar e descobrir no fim que não saiu
+        # ponto nenhum.
+        r = rm.descobrir_malha(["10.0.0.1"])
+        self.assertFalse(r["10.0.0.3"]["tem_gps"])
+        self.assertTrue(r["10.0.0.2"]["tem_gps"])
+
+    def test_radio_que_nao_responde_entra_com_o_motivo(self):
+        r = rm.descobrir_malha(["10.9.9.9"])
+        self.assertIn("10.9.9.9", r)
+        self.assertTrue(r["10.9.9.9"]["erro"])
+
+    def test_sem_seguir_peers_fica_so_no_seed(self):
+        r = rm.descobrir_malha(["10.0.0.1"], seguir_peers=False)
+        self.assertEqual(set(r), {"10.0.0.1"})
+
+    def test_limite_impede_varredura_sem_fim(self):
+        r = rm.descobrir_malha(["10.0.0.1"], limite=2)
+        self.assertLessEqual(len(r), 2)
+
+
+class TestAgendaPorDeslocamento(unittest.TestCase):
+    """Ler todo mundo a cada N segundos gasta o orçamento em quem está
+    parado: a captura real da ERM-12 tem 1.095 leituras e ZERO metro
+    coberto. Aqui a pergunta é quem já andou o suficiente."""
+
+    def setUp(self):
+        import coleta_rajant as col
+        self.col = col
+        self.ag = col.Agenda(passo_m=15.0, parado_s=30.0)
+
+    def test_radio_nunca_lido_tem_prioridade_maxima(self):
+        self.assertEqual(self.ag.prioridade("novo", 0.0), float("inf"))
+
+    def test_quem_anda_rapido_vence_antes(self):
+        self.ag.registrar("rapido", 0.0, -18.9, -43.4, 40.0)
+        self.ag.registrar("lento", 0.0, -18.9, -43.4, 5.0)
+        # 1,35 s a 40 km/h = 15 m; a 5 km/h seriam quase 11 s.
+        self.assertGreater(self.ag.prioridade("rapido", 1.4), 1.0)
+        self.assertLess(self.ag.prioridade("lento", 1.4), 1.0)
+
+    def test_parado_ainda_e_lido_de_vez_em_quando(self):
+        # Prioridade zero nunca seria eleita, e o censo de vizinhos dele
+        # morreria junto.
+        self.ag.registrar("parado", 0.0, -18.9, -43.4, 0.0)
+        self.assertLess(self.ag.prioridade("parado", 10.0), 1.0)
+        self.assertGreaterEqual(self.ag.prioridade("parado", 31.0), 1.0)
+
+    def test_so_elege_quem_ja_venceu_o_alvo(self):
+        self.ag.registrar("a", 0.0, -18.9, -43.4, 40.0)
+        self.assertEqual(self.ag.eleger(["a"], 0.1, 5), [])
+        self.assertEqual(self.ag.eleger(["a"], 2.0, 5), ["a"])
+
+    def test_orcamento_por_ciclo_e_respeitado(self):
+        for i in range(20):
+            self.ag.registrar(f"r{i}", 0.0, -18.9, -43.4, 40.0)
+        self.assertEqual(len(self.ag.eleger([f"r{i}" for i in range(20)],
+                                            5.0, 6)), 6)
+
+
+class TestColetaAoVivo(unittest.TestCase):
+    """A coleta ponta a ponta, contra uma malha falsa que se move."""
+
+    FROTA = {"10.0.0.10": ("CA-1006", 40.0, 0.0),
+             "10.0.0.90": ("ERB-07", 0.0, 0.0)}
+
+    def setUp(self):
+        import time as _t, coleta_rajant as col
+        self.col = col
+        self.t0 = [_t.time()]
+        self._orig = rm.Breadcrumb
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def _rodar(self, segundos=3.0, passo_m=15.0, gps_hz=10.0):
+        import time as _t, threading as _th
+        rm.Breadcrumb = _rajant_falsa(self.FROTA, self.t0, latencia=0.01,
+                                      gps_hz=gps_hz)
+        c = self.col.Coleta({ip: v[0] for ip, v in self.FROTA.items()},
+                            passo_m=passo_m, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(segundos); c.parar(); th.join(10)
+        return c
+
+    def test_coleta_amostras_com_posicao_e_vizinhos(self):
+        c = self._rodar()
+        self.assertGreater(len(c.amostras), 0)
+        self.assertGreater(len(c.peers), 0)
+        self.assertTrue(all(a["lat"] is not None for a in c.amostras))
+
+    def test_posicao_repetida_nao_vira_amostra(self):
+        # O caso que enche o arquivo de ponto empilhado: o módulo não
+        # atualizou, a leitura traz a posição velha. Com gpsTime a 1 Hz e
+        # alvo de 1 m, a coleta pede muito mais rápido que o GPS entrega.
+        c = self._rodar(segundos=3.0, passo_m=1.0, gps_hz=1.0)
+        self.assertGreater(c.n_repetidos, 0,
+                           "nenhuma posicao repetida foi descartada")
+        self.assertLess(len(c.amostras), c.n_lidos)
+        # Cada amostra gravada tem um gpsTime diferente da anterior.
+        vistos = {}
+        for a in c.amostras:
+            vistos.setdefault(a["radio"], []).append((a["lat"], a["lon"]))
+        for r, pts in vistos.items():
+            self.assertEqual(len(pts), len(set(pts)),
+                             f"{r} gravou a mesma posicao duas vezes")
+
+    def test_gps_rapido_nao_descarta_nada(self):
+        c = self._rodar(segundos=3.0, passo_m=1.0, gps_hz=20.0)
+        self.assertEqual(c.n_repetidos, 0)
+
+    def test_passo_real_acompanha_o_alvo(self):
+        c = self._rodar(segundos=6.0, passo_m=15.0)
+        passo = c._passo_real()
+        self.assertIsNotNone(passo)
+        # Folga generosa: o que se afirma é que o alvo governa o
+        # espaçamento, não que ele seja exato.
+        self.assertLess(passo, 15.0 * 3)
+
+    def test_radio_parado_nao_domina_as_amostras(self):
+        # A ERB fixa não pode gerar tanta amostra quanto o caminhão: era
+        # exatamente isso que enchia o arquivo sem cobrir metro nenhum.
+        c = self._rodar(segundos=6.0, passo_m=15.0)
+        por = {}
+        for a in c.amostras:
+            por[a["radio"]] = por.get(a["radio"], 0) + 1
+        self.assertGreater(por.get("CA-1006", 0), por.get("ERB-07", 0))
+
+    def test_parar_no_meio_preserva_o_que_ja_foi_coletado(self):
+        c = self._rodar(segundos=2.0)
+        n = len(c.amostras)
+        self.assertGreater(n, 0)
+        self.assertIsNotNone(c.fim)
+
+    def test_sem_alvo_nenhum_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            self.col.Coleta({}, aviso=lambda t: None).rodar(0)
+
+    def test_relatorios_saem_da_coleta(self):
+        import tempfile, shutil
+        c = self._rodar(segundos=4.0)
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            feitos = self.col.gravar_e_gerar(c, str(tmp), aviso=lambda t: None)
+            self.assertTrue(feitos)
+            self.assertTrue(all(f.exists() for f in feitos))
+            self.assertTrue(any(f.suffix == ".xlsx" for f in feitos))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestJanelaUnica(unittest.TestCase):
+    """A janela junta coleta e arquivos; a lógica fica fora dela."""
+
+    def test_site_survey_importa_sem_abrir_janela(self):
+        # Importar não pode abrir tela nem exigir tkinter: é o que
+        # permite testar o resto sem display.
+        import subprocess, sys as _s
+        r = subprocess.run(
+            [_s.executable, "-c",
+             "import sys; sys.argv=['x'];"
+             "sys.path.insert(0, %r);" % str(Path(__file__).resolve().parent)
+             + "import site_survey; print('ok')"],
+            capture_output=True, text=True, timeout=90)
+        self.assertIn("ok", r.stdout, r.stderr[-600:])
+
+    def test_a_logica_nao_mora_na_janela(self):
+        # Se a coleta voltar para dentro do arquivo da interface, ela
+        # deixa de ser testável sem display.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("class Coleta", fonte)
+        self.assertNotIn("def descobrir_malha", fonte)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
