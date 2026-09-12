@@ -35,11 +35,45 @@ survey_meshmapper.exe *.kmz --separado        # um relatório por arquivo
 | `Survey_*.kmz` | rastro de calor por grandeza, uma aba cada, para o Google Earth |
 | `Vizinhanca_*.kmz` | pino de cada rádio capturado parado e os enlaces medidos entre eles |
 | `Site_Survey_*.pptx` | capa, índice, sumário, zonas-problema e uma página por grandeza/banda |
-| `Survey_*.xlsx` | origens, resumo, por grandeza, amostras, **censo de vizinhos** e todos os vizinhos ponto a ponto |
+| `Survey_*.xlsx` | origens, resumo, por grandeza, amostras, **censo de vizinhos**, **por repetidora** e todos os vizinhos ponto a ponto |
 
 **Juntar tudo num relatório só** (padrão) produz um conjunto com todas as
 capturas — é o caso da campanha cobrindo a mina. Desmarcado, sai um
 conjunto por arquivo, cada um em sua subpasta.
+
+## As três camadas do mapa
+
+Todas medidas. Nenhuma estimada.
+
+| camada | o que mostra | pergunta que responde |
+|---|---|---|
+| **Serviço entregue** | o enlace que o InstaMesh escolheu | a aplicação funcionou aqui? |
+| **Cobertura disponível** | o melhor ERB/ERM visível no ponto | existe sinal servível aqui? |
+| **Por repetidora** | a pegada de cada ERB/ERM | até onde a ERM-28 alcança? |
+
+As duas primeiras podem divergir muito. No arquivo do CA-1006 a diferença
+foi de **22 dB na mediana** — o enlace entregue a −88 dBm enquanto havia
+um ERB a −66 dBm no mesmo ponto, sem uso. Isso muda o laudo: a área tinha
+cobertura, o caminho escolhido é que era ruim. Repetidora nova não
+resolveria.
+
+A terceira existe porque as outras duas misturam as repetidoras. A
+cobertura disponível é *o melhor de cada ponto* — não dá para perguntar
+por uma em específico.
+
+**Como ela é montada:** cada leitura de um veículo traz a posição dele **e
+o sinal para todas as repetidoras que ele ouve** — 18 na mediana, medido
+no trajeto real. Uma passagem de um caminhão alimenta 18 mapas ao mesmo
+tempo. A posição é a do veículo, o sinal é o dele para aquela repetidora,
+os dois da mesma leitura.
+
+A pasta nasce recolhida e desligada: dezoito rastros ligados juntos se
+empilham e o mapa não diz nada.
+
+> Duas repetidoras inteiramente abaixo de −90 dBm saem com a **mesma cor**,
+> porque toda essa faixa satura no fundo da escala. É correto — no mapa as
+> duas são "não serve aqui". Os números que as separam estão na descrição
+> da pasta e na aba **Por Repetidora**.
 
 ## Captura de veículo e captura de repetidora
 

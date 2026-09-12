@@ -127,7 +127,7 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
     if fazer_kmz:
         if campos and andando:
             dados, nome_kmz = rm.gerar_kml_survey(sv, amostras, cfg=cfg,
-                                                  campos=campos)
+                                                  campos=campos, peers=peers)
             alvo = destino / nome_kmz
             alvo.write_bytes(dados); feitos.append(alvo)
         elif not campos:

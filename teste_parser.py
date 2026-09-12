@@ -4896,5 +4896,143 @@ wireless {
                             f"encap {enc} nao e sufixo de {ser}")
 
 
+class TestPegadaPorRepetidora(unittest.TestCase):
+    """A pegada MEDIDA de cada ERB/ERM.
+
+    A camada de cobertura disponível mistura as repetidoras — ela é o
+    MELHOR vizinho de cada ponto. Não dá para perguntar "até onde a
+    ERM-28 alcança". Esta responde, e sem estimar nada: a posição é a do
+    veículo e o sinal é o dele para aquela repetidora, da mesma leitura.
+    """
+
+    def _dados(self, n=12):
+        am = [{"radio": "CA-1", "ts": 100.0 + i, "lat": -18.90 + i * 0.0005,
+               "lon": -43.43, "sinal": -88.0, "banda": "5.8 GHz"}
+              for i in range(n)]
+        pr = []
+        for i in range(1, n + 1):
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "ERB-07",
+                       "sinal": -70.0 - i, "snr": 30.0, "custo": 5000.0,
+                       "banda": "5.8 GHz", "canal": 157})
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "CA-9",
+                       "sinal": -50.0, "snr": 40.0, "custo": 900.0,
+                       "banda": "2.4 GHz", "canal": 6})
+        return am, pr
+
+    def test_so_infraestrutura_ganha_pegada(self):
+        # Caminhão dá sinal ótimo e vai embora: não caracteriza cobertura.
+        d = rm.amostras_por_repetidora(*self._dados())
+        self.assertIn("ERB-07", d)
+        self.assertNotIn("CA-9", d)
+
+    def test_posicao_e_do_veiculo_e_sinal_e_do_enlace(self):
+        am, pr = self._dados()
+        d = rm.amostras_por_repetidora(am, pr)
+        prim = d["ERB-07"][0]
+        self.assertEqual(prim["lat"], am[0]["lat"])
+        self.assertEqual(prim["lon"], am[0]["lon"])
+        self.assertEqual(prim["sinal"], -71.0)       # o do vizinho
+        self.assertEqual(prim["radio"], "CA-1")      # quem mediu
+
+    def test_repetidora_pouco_ouvida_nao_vira_mapa(self):
+        # Poucos pontos viram bolha solta, que se lê como "medi esta
+        # área" onde o certo é "passei perto uma vez".
+        am, pr = self._dados()
+        pr = [p for p in pr if p["nome"] != "ERB-07" or p["ponto"] <= 3]
+        self.assertNotIn("ERB-07", rm.amostras_por_repetidora(am, pr))
+        self.assertIn("ERB-07",
+                      rm.amostras_por_repetidora(am, pr, min_pontos=3))
+
+    def test_duas_bandas_no_mesmo_ponto_contam_uma_vez(self):
+        # A mesma repetidora em 2.4 e 5.8 GHz é UM equipamento. Fica o
+        # melhor do ponto; somar os dois contaria em dobro.
+        #
+        # Testa NAS DUAS ORDENS de propósito: guardando por ponto num
+        # dicionário, o último a chegar vence sozinho. Com o pior vindo
+        # depois, um teste de ordem única passa mesmo sem a regra — foi
+        # o que aconteceu, e o mutante sobreviveu.
+        for pior_primeiro in (True, False):
+            am, pr = self._dados()
+            extra = {"movel": "CA-1", "ponto": 1, "nome": "ERB-07",
+                     "sinal": -60.0, "snr": 35.0, "custo": 4000.0,
+                     "banda": "2.4 GHz", "canal": 6}
+            if pior_primeiro:
+                pr.append(extra)                      # -71 e depois -60
+            else:
+                # -60 antes do -71 do _dados(): só a regra segura o melhor
+                pr.insert(0, extra)
+            d = rm.amostras_por_repetidora(am, pr)
+            do_ponto1 = [a for a in d["ERB-07"] if a["ts"] == 100.0]
+            self.assertEqual(len(do_ponto1), 1,
+                             f"contou em dobro (pior_primeiro={pior_primeiro})")
+            self.assertEqual(do_ponto1[0]["sinal"], -60.0,
+                             f"nao ficou o melhor (pior_primeiro={pior_primeiro})")
+
+    def test_vizinho_sem_amostra_correspondente_e_ignorado(self):
+        am, pr = self._dados()
+        pr.append({"movel": "CA-1", "ponto": 999, "nome": "ERB-07",
+                   "sinal": -40.0, "snr": 45.0, "custo": 10.0})
+        d = rm.amostras_por_repetidora(am, pr)
+        self.assertNotIn(-40.0, [a["sinal"] for a in d["ERB-07"]])
+
+    def test_kmz_ganha_uma_pasta_por_repetidora(self):
+        import zipfile, io as _io
+        am, pr = self._dados(20)
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"], peers=pr)
+        kml = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn("Por repetidora", kml)
+        self.assertIn("ERB-07", kml)
+
+    def test_sem_peers_o_kmz_sai_como_antes(self):
+        # A sondagem por API devolve só o enlace que atendeu; sem a
+        # vizinhança não há o que desenhar, e inventar pasta vazia seria
+        # pior que não ter.
+        import zipfile, io as _io
+        am, _ = self._dados(20)
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        dados, _n = rm.gerar_kml_survey(sv, am, campos=["sinal"])
+        kml = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertNotIn("Por repetidora", kml)
+
+    def test_cada_repetidora_tem_seu_proprio_raster(self):
+        # Todos os rasters se chamariam calor_sinal.png e um
+        # sobrescreveria o outro dentro do zip: sobraria um mapa só,
+        # repetido em todas as pastas.
+        import zipfile, io as _io
+        am = [{"radio": "CA-1", "ts": 100.0 + i, "lat": -18.90 + i * 0.0005,
+               "lon": -43.43, "sinal": -88.0, "banda": "5.8 GHz"}
+              for i in range(20)]
+        pr = []
+        for i in range(1, 21):
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "ERB-07",
+                       "sinal": -60.0, "snr": 30.0, "banda": "5.8 GHz"})
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "ERB-02",
+                       "sinal": -80.0, "snr": 18.0, "banda": "5.8 GHz"})
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"], peers=pr)
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        pngs = [n for n in z.namelist() if "calor_sinal_" in n]
+        self.assertEqual(len(pngs), len(set(pngs)))
+        self.assertGreaterEqual(len(pngs), 2, f"rasters colidiram: {pngs}")
+        # -60 dBm e -80 dBm caem em cores diferentes da escala: se as
+        # imagens saírem iguais, o sufixo voltou a colidir.
+        self.assertNotEqual(z.read(pngs[0]), z.read(pngs[1]))
+
+    def test_planilha_ganha_a_aba(self):
+        import io as _io
+        from openpyxl import load_workbook
+        am, pr = self._dados(12)
+        sv = {"nome": "t", "movel": "CA-1", "inicio": 100.0, "fim": 112.0}
+        dados, _ = rm.excel_do_meshmapper(sv, am, pr)
+        wb = load_workbook(_io.BytesIO(dados))
+        self.assertIn("Por Repetidora", wb.sheetnames)
+        ws = wb["Por Repetidora"]
+        linhas = [r[0] for r in ws.iter_rows(min_row=5, max_col=1,
+                                             values_only=True) if r[0]]
+        self.assertIn("ERB-07", linhas)
+        self.assertNotIn("CA-9", linhas)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

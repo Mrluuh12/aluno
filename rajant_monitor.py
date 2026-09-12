@@ -6207,8 +6207,14 @@ def _trechos_continuos(pts, fator=3.0, piso_s=30.0, salto_m=250.0):
 
 def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                      campo="sinal", max_pontos=8000, comprimir=True,
-                     grade_zonas=50.0, banda=None, campos=None):
+                     grade_zonas=50.0, banda=None, campos=None,
+                     peers=None, max_repetidoras=12):
     """KML/KMZ do survey para abrir no Google Earth.
+
+    `peers` (a lista de vizinhos da captura) acrescenta uma pasta por
+    ERB/ERM, com a pegada MEDIDA de cada uma. Sem ele o arquivo sai como
+    antes — a sondagem por API não devolve a vizinhança inteira, só o
+    enlace que atendeu, e aí não há o que desenhar.
 
     `campos` (lista) põe UMA ABA por grandeza no mesmo arquivo, que é o
     jeito de comparar RSSI e interferência sem abrir seis janelas. Só a
@@ -6355,7 +6361,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     # entao o calor so sai no KMZ.
     extras = []
 
-    def _calor_no_kmz(amostras_aba, campo, visivel):
+    def _calor_no_kmz(amostras_aba, campo, visivel, sufixo="", rotulo=None):
         if not comprimir:
             return ""
         # SÓ quem andou. O rádio parado dá dezenas de amostras no mesmo
@@ -6432,7 +6438,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                                          esc=esc)
             if valor is None:
                 return ""
-            nome_png = f"calor_{campo}.png"
+            # O sufixo não é enfeite: com uma pasta por repetidora, todos
+            # os rasters se chamariam calor_sinal.png e um sobrescreveria
+            # o outro dentro do zip — sobraria um mapa só, repetido em
+            # todas as pastas.
+            nome_png = f"calor_{campo}{sufixo}.png"
             import tempfile as _tf, os as _os
             cam = _os.path.join(_tf.mkdtemp(), nome_png)
             _png_calor(valor, alfa, _cmap_rf(invertido=(esc.get("melhor") == "baixo")),
@@ -6442,7 +6452,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         except Exception as e:
             log.warning(f"[kml] calor de {campo} falhou: {e}")
             return ""
-        rot = esc.get("rot", campo)
+        rot = rotulo or esc.get("rot", campo)
         return (f"<GroundOverlay><name>Calor — {_esc(rot)}</name>"
                 f"<visibility>{1 if visivel else 0}</visibility>"
                 f"<description>{_esc(f'Medido pelo radio, raio de {raio:.0f} m em volta de cada amostra. Transparente onde nao se passou.')}</description>"
@@ -6599,6 +6609,54 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
 
     for i, cp in enumerate(campos):
         pastas.append(_aba(cp, visivel=(i == 0)))
+
+    # ── Pegada de cada repetidora ──
+    # As abas acima misturam as repetidoras: a cobertura disponível é o
+    # MELHOR vizinho de cada ponto, então não dá para perguntar "até onde
+    # a ERM-28 alcança". Aqui cada ERB/ERM ganha o mapa dela, com o sinal
+    # que os veículos mediram para ela — posição e sinal da mesma leitura.
+    #
+    # Nasce recolhida e desligada: dezoito rastros ligados juntos se
+    # empilham e o mapa não diz nada.
+    if peers:
+        try:
+            por_rep = amostras_por_repetidora(am, peers)
+        except Exception as e:
+            log.warning(f"[kml] pegada por repetidora: {e}"); por_rep = {}
+        itens_r = []
+        # Da que mais foi ouvida para a que menos: a ordem do arquivo é a
+        # ordem em que alguém vai querer abrir.
+        for nome_r, am_r in sorted(por_rep.items(),
+                                   key=lambda kv: -len(kv[1]))[:max_repetidoras]:
+            png = _calor_no_kmz(am_r, "sinal", False,
+                                sufixo="_" + _slug_arquivo(nome_r)[:40],
+                                rotulo=f"RSSI de {nome_r}")
+            if not png:
+                continue
+            # Duas repetidoras inteiramente abaixo do piso da escala
+            # (-90 dBm) geram rasters IDÊNTICOS, porque toda a faixa
+            # satura na mesma cor. Não é defeito do desenho: no mapa as
+            # duas são "não serve aqui", e é verdade. Os números que as
+            # separam ficam na descrição — é por isso que ela traz
+            # mediana, melhor e pior, e não só a cor.
+            vs = sorted(a["sinal"] for a in am_r)
+            med = vs[len(vs) // 2]
+            req_r = float(ESCALAS["sinal"]["req"])
+            ok = sum(1 for v in vs if v > req_r)
+            itens_r.append(
+                f"<Folder><name>{_esc(nome_r)} — {len(am_r)} pontos</name>"
+                f"<open>0</open><visibility>0</visibility>"
+                f"<description><![CDATA[Mediana {med:g} dBm &middot; "
+                f"{ok*100.0/len(vs):.0f}% acima de {req_r:g} dBm &middot; "
+                f"melhor {vs[-1]:g} &middot; pior {vs[0]:g} dBm"
+                f"]]></description>{png}</Folder>")
+        if itens_r:
+            pastas.append(
+                f"<Folder><name>Por repetidora ({len(itens_r)})</name>"
+                f"<open>0</open><visibility>0</visibility>"
+                f"<description><![CDATA[RSSI medido pelos veículos para "
+                f"cada ERB/ERM, na posição do veículo.]]></description>"
+                f"{''.join(itens_r)}</Folder>")
 
     # Agora que se sabe QUAIS cores apareceram, emite so essas: gerar as
     # 40 do gradiente vezes seis grandezas encheria o arquivo de estilo
@@ -7699,6 +7757,36 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                 ", ".join(c["interfaces"])], zebra=(lin % 2 == 0))
         ws.freeze_panes = "A5"
 
+    # ── 4b. Pegada por repetidora ──
+    # Responde "até onde a ERM-28 alcança", que o censo e a cobertura
+    # disponível não respondem: o censo agrega por vizinho sem lugar, e a
+    # cobertura mistura todas as repetidoras num valor por ponto.
+    pegada = amostras_por_repetidora(amostras, peers)
+    if pegada:
+        ws = wb.create_sheet("Por Repetidora")
+        req_r = float(ESCALAS["sinal"]["req"])
+        _cab(ws, "Alcance medido de cada ERB/ERM",
+             f"Posição do veículo, RSSI dele para aquela repetidora — "
+             f"da mesma leitura", 8)
+        lin = 4
+        _th(ws, lin, ["Repetidora", "Pontos", "Mediana (dBm)", "Melhor",
+                      "Pior", f"Acima de {req_r:g} dBm (%)", "Bandas",
+                      "Equipamentos que a ouviram"],
+            [26, 9, 15, 10, 10, 20, 18, 30])
+        lin += 1
+        for nome_r, am_r in sorted(pegada.items(),
+                                   key=lambda kv: -len(kv[1])):
+            vs = sorted(a["sinal"] for a in am_r)
+            bandas_r = sorted({a["banda"] for a in am_r if a.get("banda")})
+            eq = sorted({a["radio"] for a in am_r if a.get("radio")})
+            lin = _td(ws, lin, [
+                nome_r, len(am_r), vs[len(vs) // 2], vs[-1], vs[0],
+                round(sum(1 for v in vs if v > req_r) * 100.0 / len(vs), 1),
+                ", ".join(bandas_r),
+                ", ".join(eq[:4]) + (f" +{len(eq)-4}" if len(eq) > 4 else "")],
+                zebra=(lin % 2 == 0))
+        ws.freeze_panes = "A5"
+
     # ── 5. Vizinhos, leitura a leitura ──
     # A aba que so existe com dado do MeshMapper: a sondagem pela BC API
     # devolve o enlace que atendeu, nao a vizinhanca inteira.
@@ -7927,6 +8015,68 @@ def _mm_pct(ordenados, q):
     if not ordenados: return None
     return round(ordenados[min(len(ordenados) - 1,
                                max(0, int(q * (len(ordenados) - 1))))], 1)
+
+
+def amostras_por_repetidora(amostras, peers, padrao=None, min_pontos=8):
+    """A pegada MEDIDA de cada ERB/ERM: onde ela foi ouvida, e com quanto.
+
+    Vira `{nome_da_repetidora: [amostras]}`, onde cada amostra tem a
+    posição do VEÍCULO e, em `sinal`, o RSSI daquele veículo para aquela
+    repetidora. Posição e sinal saíram da mesma leitura, no mesmo
+    instante — nada é estimado, nada é cruzado por distância.
+
+    É o que responde "até onde a ERM-28 alcança de verdade?", que a
+    camada de cobertura disponível não responde: ela mistura todas as
+    repetidoras num valor só (o melhor de cada ponto).
+
+    A economia aqui é grande e não é óbvia: uma única leitura de um
+    veículo traz o sinal para TODAS as repetidoras que ele ouve — 18 na
+    mediana, medido no trajeto do CA-1006. Uma passagem de um caminhão
+    alimenta 18 mapas de cobertura ao mesmo tempo.
+
+    `min_pontos` descarta a repetidora ouvida em meia dúzia de posições:
+    com poucos pontos o rastro vira bolha solta, que se lê como "medi
+    esta área" quando o certo é "passei perto uma vez".
+    """
+    rx = re.compile(padrao or PADRAO_INFRA, re.I)
+    # Posição e hora vêm da amostra do ponto, não do registro do vizinho:
+    # no par de CSVs o vizinho repete a coordenada de quem capturou, e
+    # depender dela ligaria o dado à fonte errada se o formato mudar.
+    por_ponto = {}
+    for i, a in enumerate(amostras, start=1):
+        if a.get("lat") is None or a.get("lon") is None: continue
+        por_ponto[i] = a
+
+    out = {}
+    for p in peers:
+        if p.get("sinal") is None: continue
+        nome = (p.get("nome") or "").strip()
+        if not nome or not rx.search(nome): continue
+        a = por_ponto.get(p.get("ponto"))
+        if a is None: continue
+        # Um vizinho aparece uma vez por RÁDIO (2,4 e 5,8 GHz são dois
+        # enlaces com a mesma repetidora). Fica o melhor do ponto: é o
+        # que ela consegue entregar ali, e somar os dois seria contar o
+        # mesmo equipamento duas vezes.
+        ant = out.setdefault(nome, {}).get(p["ponto"])
+        if ant is not None and ant["sinal"] >= p["sinal"]:
+            continue
+        out[nome][p["ponto"]] = {
+            "radio": a.get("radio"), "ts": a.get("ts"),
+            "lat": a["lat"], "lon": a["lon"], "alt": a.get("alt"),
+            "sinal": p["sinal"], "snr": p.get("snr"),
+            "ruido": p.get("ruido"), "custo": p.get("custo"),
+            "banda": p.get("banda"), "canal": p.get("canal"),
+            "servidor": nome, "fonte": a.get("fonte"),
+            # Marcado para ninguém confundir com o enlace que atendeu: é
+            # o que ESTA repetidora oferecia no ponto, tenha ela sido
+            # usada ou não.
+            "repetidora": nome,
+        }
+
+    return {nome: [d[k] for k in sorted(d)]
+            for nome, d in sorted(out.items())
+            if len(d) >= min_pontos}
 
 
 def sitios_parados(amostras, peers, limite_m=None):

@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 452, em 66 classes |
+| testes | 461, em 67 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 452 testes e as âncoras de seção (§26).
+segura isso são os 461 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -633,6 +633,51 @@ Isso foi pego por teste próprio antes de chegar ao relatório.
 Com as posições dos fixos e o RSSI medido, ajusta `A` e `n` por banda e
 guarda `rms` e nº de amostras. Serve para estimar alcance — e a estimativa
 **nunca** é desenhada junto com a medição sem distinção visual (§23).
+
+### A pegada de cada repetidora
+
+`cobertura_disponivel()` responde *"existe sinal servível aqui?"* pegando o
+**melhor** ERB/ERM de cada ponto — e por isso mistura todos. Não dá para
+perguntar *"até onde a ERM-28 alcança?"*.
+
+`amostras_por_repetidora()` responde. Para cada ERB/ERM, junta os pontos em
+que ela foi ouvida, com a **posição do veículo** e o **RSSI daquele veículo
+para ela** — os dois da mesma leitura de State. Nada é estimado e nada é
+cruzado por distância.
+
+A economia não é óbvia: uma leitura de um veículo traz o sinal para **todas**
+as repetidoras que ele ouve — **18 na mediana**, medido no trajeto do
+CA-1006. Uma passagem de um caminhão alimenta 18 mapas de cobertura ao mesmo
+tempo.
+
+**Por que "melhor" e não "mais próxima".** Medido no mesmo trajeto de 325 m:
+o veículo ouve 18 infra por ponto, com **31 dB de espalhamento** entre a
+melhor e a pior (até 39 dB), e a melhor **mudou quatro vezes** nesses 325 m
+(ERM-28 → ERM-08 → ERM-15 → ERM-24). Numa cava a mais próxima costuma estar
+atrás de uma bancada enquanto uma distante tem visada limpa: colorir pela
+distância pinta vermelho onde a cobertura está boa, e o laudo recomenda
+rádio onde não precisa. Escolher pela medição também não custa nada a mais —
+o sinal para as 18 já vem na leitura; "mais próxima" exigiria saber onde
+cada repetidora está.
+
+Dois detalhes que o teste de mutação fixou:
+
+- **`min_pontos`** descarta a repetidora ouvida em meia dúzia de posições.
+  Poucos pontos viram bolha solta, que se lê como "medi esta área" onde o
+  certo é "passei perto uma vez".
+- A mesma repetidora em 2,4 e 5,8 GHz é **um** equipamento: fica o melhor do
+  ponto. Guardando por ponto num dicionário, o último a chegar venceria
+  sozinho — um teste de ordem única passava sem a regra.
+
+No KMZ vira uma pasta por repetidora, recolhida e desligada (dezoito rastros
+ligados juntos se empilham). Cada raster leva **sufixo no nome do arquivo**:
+sem ele todos seriam `calor_sinal.png` e um sobrescreveria o outro dentro do
+zip, sobrando um mapa só repetido em todas as pastas.
+
+> Duas repetidoras inteiramente abaixo do piso da escala (−90 dBm) geram
+> rasters **byte a byte idênticos**, porque a faixa toda satura na mesma cor.
+> Não é defeito: no mapa as duas são "não serve aqui". Os números que as
+> separam ficam na descrição da pasta e na aba Por Repetidora.
 
 ### Captura parada: o laudo do rádio
 
@@ -1274,6 +1319,7 @@ KMZ e KML do survey                       →  gerar_kml_survey, _calor_da_rota
 KML de captura parada                     →  gerar_kml_pontos_fixos
 leitura do MeshMapper                     →  ler_meshmapper, _mm_enlace
 análise da vizinhança                     →  censo_vizinhos, sitios_parados
+ pegada por repetidora                    →  amostras_por_repetidora
 persistência dos surveys                  →  survey_criar, amostras_gravar
 medições manuais, seleção por tag
 fundo de satélite, mapas do survey
