@@ -10041,9 +10041,223 @@ def cfg_survey(cfg):
     return cfg
 
 
+# ══════════════════════════════════════════════════════════════
+# A MALHA CONHECIDA
+# ══════════════════════════════════════════════════════════════
+# Os rádios da mina, por IP e nome. Serve de PONTO DE PARTIDA para a
+# descoberta: cada um é contatado direto, e a busca ainda segue os
+# vizinhos de cada um — então rádio novo aparece mesmo sem estar aqui.
+#
+# Por que isto existe, e não é só cache: `ipv4Address` é OPCIONAL no
+# State.Peer. Um rádio cujos vizinhos só trazem MAC não leva a busca a
+# lugar nenhum, e foi o que aconteceu em campo — partindo só do
+# 10.188.96.140, a descoberta achou UM equipamento numa malha de 150.
+#
+# Lista tirada dos caches reais da operação. Rádio que sai da frota
+# simplesmente não responde e aparece com o motivo na tela; não some
+# calado nem trava a busca.
+REDE_CONHECIDA = {
+    "10.188.96.30": "ERB-01 PLATO 17",
+    "10.188.96.40": "ERB-02",
+    "10.188.96.50": "ERB-03",
+    "10.188.96.60": "ERB-04",
+    "10.188.96.70": "ERB-05 TALUDE",
+    "10.188.96.90": "ERB-07",
+    "10.188.96.100": "ERB-08",
+    "10.188.96.130": "ERB-11 L2",
+    "10.188.96.131": "ERB-11 L1",
+    "10.188.96.140": "ERB-12 Slipstream",
+    "10.188.96.150": "ERB-13",
+    "10.188.96.160": "ERB-14",
+    "10.188.97.10": "ERM-01 PTP CAM",
+    "10.188.97.20": "ERM-02",
+    "10.188.97.30": "ERM-03",
+    "10.188.97.40": "ERM-04 PTP",
+    "10.188.97.50": "ERM-05 PTP CAM",
+    "10.188.97.60": "ERM-06 PTP",
+    "10.188.97.70": "ERM-07",
+    "10.188.97.80": "ERM-08 PTP CAM",
+    "10.188.97.90": "ERM-09 PTP CAM",
+    "10.188.97.100": "ERM-10 PTP CAM",
+    "10.188.97.110": "ERM-11",
+    "10.188.97.120": "ERM-12 PTP CAM",
+    "10.188.97.127": "ERM-27 PTP",
+    "10.188.97.128": "ERM-28 PTP",
+    "10.188.97.129": "ERM-29 PTP",
+    "10.188.97.130": "ERM-13",
+    "10.188.97.139": "ERM-30 PTP",
+    "10.188.97.140": "ERM-14",
+    "10.188.97.148": "ERM-31 PTP CAM",
+    "10.188.97.150": "ERM-15 PTP",
+    "10.188.97.154": "ERM-32 PTP CAM",
+    "10.188.97.160": "ERM-16",
+    "10.188.97.164": "ERM-33 PTP CAM",
+    "10.188.97.170": "ERM-17",
+    "10.188.97.180": "ERM-18",
+    "10.188.97.184": "ERM-35 PTP CAM",
+    "10.188.97.190": "ERM-19",
+    "10.188.97.200": "ERM-20",
+    "10.188.97.210": "ERM-21 PTP CAM",
+    "10.188.97.220": "ERM-22 PTP CAM",
+    "10.188.97.230": "ERM-23 PTP",
+    "10.188.97.240": "ERM-24 PTP",
+    "10.188.99.1": "CA-1001",
+    "10.188.99.2": "CA-1002",
+    "10.188.99.3": "CA-1003",
+    "10.188.99.4": "CA-1004",
+    "10.188.99.5": "CA-1005",
+    "10.188.99.6": "CA-1006",
+    "10.188.99.7": "CA-1007",
+    "10.188.99.9": "CA-1009",
+    "10.188.99.10": "CA-1010",
+    "10.188.99.11": "CA-1011",
+    "10.188.99.13": "CA-1013",
+    "10.188.99.14": "CA-1014",
+    "10.188.99.16": "CA-1016",
+    "10.188.99.17": "CA-1017",
+    "10.188.99.18": "CA-1018",
+    "10.188.99.19": "CA-1019",
+    "10.188.99.20": "CA-1020",
+    "10.188.99.21": "CA-1021",
+    "10.188.99.22": "CA-1022",
+    "10.188.99.23": "CA-1023",
+    "10.188.99.24": "CA-1024",
+    "10.188.99.25": "CA-1025",
+    "10.188.99.26": "CA-1026",
+    "10.188.99.27": "CA-1027",
+    "10.188.99.28": "CA-1028",
+    "10.188.99.29": "CA-1029",
+    "10.188.99.30": "CA-1030",
+    "10.188.99.31": "CA-1031",
+    "10.188.99.32": "CA-1032",
+    "10.188.99.33": "CA-1033",
+    "10.188.99.34": "CA-1034",
+    "10.188.99.35": "CA-1035",
+    "10.188.99.36": "CA-1036",
+    "10.188.99.37": "CA-1037",
+    "10.188.99.38": "CA-1038",
+    "10.188.99.39": "CA-1039",
+    "10.188.99.40": "CA-1040",
+    "10.188.99.41": "CA-1041",
+    "10.188.99.42": "CA-1042",
+    "10.188.99.43": "CA-1043",
+    "10.188.99.44": "CA-1044",
+    "10.188.99.45": "CA-1045",
+    "10.188.99.46": "CA-1046",
+    "10.188.99.49": "CA-1049",
+    "10.188.99.50": "CA-1050",
+    "10.188.99.91": "RED070",
+    "10.188.99.92": "RED071",
+    "10.188.99.114": "PA-5504",
+    "10.188.99.115": "PA-5505",
+    "10.188.99.116": "PA-5506",
+    "10.188.99.118": "TT-3707",
+    "10.188.99.119": "TT-3708",
+    "10.188.99.120": "TT-3709",
+    "10.188.99.121": "TT-3710",
+    "10.188.99.122": "TT-3711",
+    "10.188.99.131": "PA-5501",
+    "10.188.99.132": "PA-5502",
+    "10.188.99.133": "PA-5503",
+    "10.188.99.134": "EH-6001",
+    "10.188.99.135": "EH-6002",
+    "10.188.99.136": "EH-6101",
+    "10.188.99.137": "EH-6102",
+    "10.188.99.138": "RED002",
+    "10.188.99.139": "RED004",
+    "10.188.99.140": "EH-6003",
+    "10.188.99.141": "RED065",
+    "10.188.99.146": "EH-6550",
+    "10.188.99.147": "EH-6551",
+    "10.188.99.151": "PF-4601",
+    "10.188.99.155": "PF-4701",
+    "10.188.99.156": "PF-4702 FLANDERS",
+    "10.188.99.157": "PF-4703",
+    "10.188.99.158": "PF-4704",
+    "10.188.99.159": "PF-4705",
+    "10.188.99.167": "TT-3503 TECWISE",
+    "10.188.99.169": "TT-3505 TECWISE",
+    "10.188.99.170": "TT-3506",
+    "10.188.99.171": "TT-3507",
+    "10.188.99.172": "TT-3508 TECWISE",
+    "10.188.99.173": "TT-3509 TECWISE",
+    "10.188.99.174": "TT-3510 TECWISE",
+    "10.188.99.175": "TT-3511 TECWISE",
+    "10.188.99.176": "TT-3512 TECWISE",
+    "10.188.99.189": "TT-3705",
+    "10.188.99.190": "TT-3706",
+    "10.188.99.192": "TT-3802",
+    "10.188.99.194": "PA-5801",
+    "10.188.99.195": "PA-5802",
+    "10.188.99.199": "TN-4001",
+    "10.188.99.200": "TN-4002",
+    "10.188.99.210": "EH-6402",
+    "10.188.99.212": "EH-6404",
+    "10.188.99.213": "EH-6405",
+    "10.188.99.216": "CP-7001",
+    "10.188.99.217": None,
+    "10.188.99.218": "CP-7003",
+    "10.188.99.219": "CP-7004",
+    "10.188.99.224": "PR-7202",
+    "10.188.99.227": "MA-5101",
+    "10.188.99.229": "MA-5103",
+    "10.188.99.230": "MA-5104",
+    "10.188.99.237": "EH-6552",
+    "10.188.99.238": "EH-6553",
+    "10.188.99.240": "MA-5201",
+    "10.188.99.241": "MA-5202",
+    "10.188.99.242": "MA-5203",
+    "10.188.100.155": "PF-4701 FLANDERS",
+    "10.188.100.157": "PF-4703 FLANDERS",
+    "10.188.100.158": "PF-4704 FLANDERS",
+    "10.188.105.170": "TT-3506 KOMATSU",
+    "10.188.105.171": "TT-3507 KOMATSU",
+    "10.188.111.46": "PCP-002 Sensing POD",
+}
+
+
+def ler_lista_de_ips(caminho):
+    """Lê uma lista de rádios de arquivo. Devolve {ip: nome}.
+
+    Aceita o `rajant_ips_cache.json` que o coletor grava — `{ip: {nome,
+    ...}}` — e também texto solto com um IP por linha, com o nome opcional
+    depois de vírgula, ponto e vírgula ou espaço.
+
+    Existe porque descoberta pela malha pode não ter por onde andar: o
+    `ipv4Address` é OPCIONAL no State.Peer, e um rádio cujos vizinhos só
+    trazem MAC não leva a lugar nenhum. Quem já tem a lista dos próprios
+    equipamentos não deve ficar refém disso.
+    """
+    p = Path(caminho)
+    if not p.exists():
+        raise RuntimeError(f"arquivo nao encontrado: {caminho}")
+    txt = p.read_text(encoding="utf-8", errors="replace").strip()
+    out = {}
+    if txt.startswith("{"):
+        d = json.loads(txt)
+        for ip, v in d.items():
+            nome = v.get("nome") if isinstance(v, dict) else (v or None)
+            out[str(ip).strip()] = (str(nome).strip() if nome else str(ip))
+    else:
+        for linha in txt.splitlines():
+            linha = linha.strip()
+            if not linha or linha.startswith("#"):
+                continue
+            partes = re.split(r"[,;\t]| {2,}", linha, maxsplit=1)
+            ip = partes[0].strip()
+            if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+                continue
+            out[ip] = (partes[1].strip() if len(partes) > 1 and partes[1].strip()
+                       else ip)
+    if not out:
+        raise RuntimeError(f"{p.name}: nenhum IP reconhecido")
+    log.info(f"[lista] {len(out)} equipamento(s) lidos de {p.name}")
+    return out
+
+
 def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
                     max_threads=24, seguir_peers=True, limite=600,
-                    aviso=None):
+                    incluir_conhecidos=True, aviso=None):
     """Percorre a malha a partir dos seeds e devolve o inventário.
 
     `{ip: {"nome", "tem_gps", "serial", "modelo", "banda", "vizinhos"}}`.
@@ -10082,14 +10296,28 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
                     raise ConnectionRefusedError("nao alcancavel")
                 if not bc.authenticate():
                     raise PermissionError("autenticacao falhou")
-                d = parse_state(bc.get_state())
+                txt = bc.get_state()
+                d = parse_state(txt)
             except Exception as e:
                 with lk:
-                    achados[ip] = {"ip": ip, "nome": ip, "tem_gps": False,
+                    # Rádio que não responde ainda aparece COM O NOME que
+                    # se conhece: uma tela com dez linhas de IP cru não
+                    # diz quais equipamentos estão fora.
+                    achados[ip] = {"ip": ip,
+                                   "nome": REDE_CONHECIDA.get(ip) or ip,
+                                   "tem_gps": False,
                                    "serial": None, "modelo": None,
                                    "vizinhos": 0, "erro": str(e)}
                 return set()
             s = d["sistema"]
+            n_radios = len(d.get("radios") or [])
+            n_peers = sum(len(r.get("peers") or []) for r in d.get("radios") or [])
+            ips = set(d.get("peers_ips") or ())
+            # Vizinho SEM ipv4Address não serve para expandir: o campo é
+            # opcional no State.Peer, e sem ele não há para onde ir. Sem
+            # esta contagem, "achei só o seed" fica indistinguível de
+            # "achei vizinhos mas nenhum tinha IP" — e são problemas
+            # diferentes, com soluções diferentes.
             with lk:
                 achados[ip] = {
                     "ip": ip,
@@ -10099,13 +10327,24 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
                     "qualidade_gps": s.get("gps_qual"),
                     "serial": s.get("serial_num"),
                     "modelo": s.get("modelo_fab") or s.get("modelo"),
-                    "vizinhos": sum(len(r.get("peers") or [])
-                                    for r in d.get("radios") or []),
+                    "vizinhos": n_peers,
+                    "radios": n_radios,
+                    "vizinhos_com_ip": len(ips),
+                    "bytes_state": len(txt or ""),
                     "erro": None,
                 }
-            return set(d.get("peers_ips") or ())
+            return ips
 
-    fila = {str(x).strip() for x in seeds if str(x).strip()}
+    fila = {str(x).strip() for x in (seeds or []) if str(x).strip()}
+    if incluir_conhecidos:
+        # Cada rádio conhecido é um ponto de partida PRÓPRIO, não só um
+        # nome. Partindo de um seed só, a busca depende de os vizinhos
+        # trazerem IP — e `ipv4Address` é opcional no State.Peer. Em campo
+        # isso achou UM equipamento numa malha de 150.
+        fila |= set(REDE_CONHECIDA)
+    if not fila:
+        raise RuntimeError("nenhum endereço de partida")
+    _diz(f"partindo de {len(fila)} endereço(s)")
     while fila:
         lote = [ip for ip in fila if ip not in vistos][:max(0, limite - len(vistos))]
         if not lote:
@@ -10122,6 +10361,22 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
             t.join(timeout=timeout_s + 10)
         ok = sum(1 for ip in lote if not achados.get(ip, {}).get("erro"))
         _diz(f"{len(vistos)} visitados, {ok} responderam neste lote")
+        # Sem vizinho COM IP a busca morre ali, e o usuário fica com um
+        # rádio na tela achando que a rede tem um. Dizer o motivo é o que
+        # separa "a malha é essa" de "o state veio sem o que preciso".
+        # Só se relata quando o lote inteiro foi estéril — com 140 pontos
+        # de partida, uma linha por rádio viraria ruído.
+        mudos = [achados[ip] for ip in lote
+                 if not achados.get(ip, {}).get("erro")
+                 and not achados.get(ip, {}).get("vizinhos_com_ip")]
+        if mudos and len(mudos) == ok and ok:
+            v = mudos[0]
+            _diz(f"  {len(mudos)} rádio(s) responderam sem NENHUM vizinho com "
+                 f"endereço IP — não há por onde continuar a busca. "
+                 f"Exemplo: {v.get('nome')} devolveu {v.get('bytes_state', 0)} "
+                 f"bytes, {v.get('radios', 0)} rádio(s), "
+                 f"{v.get('vizinhos', 0)} vizinho(s). "
+                 f"A busca depende da lista conhecida e dos seeds.")
         if not seguir_peers:
             break
         for s_ in saidas.values():

@@ -377,8 +377,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="coleta_rajant", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--seeds", required=True,
-                    help="IPs de partida, separados por vírgula")
+    ap.add_argument("--seeds", default="",
+                    help="IPs de partida, separados por vírgula. A busca "
+                         "já parte da malha conhecida no código; isto "
+                         "acrescenta endereços.")
+    ap.add_argument("--lista", metavar="ARQ",
+                    help="arquivo com IPs (o rajant_ips_cache.json, ou um "
+                         "IP por linha) para usar como partida")
     ap.add_argument("--role", default="co")
     ap.add_argument("--senha", default="")
     ap.add_argument("--porta", type=int, default=2300)
@@ -391,6 +396,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     seeds = [s.strip() for s in a.seeds.replace(";", ",").split(",") if s.strip()]
+    if a.lista:
+        seeds += list(rm.ler_lista_de_ips(a.lista))
     achados = rm.descobrir_malha(seeds, role=a.role, senha=a.senha,
                                  porta=a.porta, aviso=print)
     alvos = {ip: v["nome"] for ip, v in achados.items()

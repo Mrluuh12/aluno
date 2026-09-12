@@ -5107,30 +5107,139 @@ class TestDescobrirMalha(unittest.TestCase):
     def tearDown(self):
         rm.Breadcrumb = self._orig
 
+    # `incluir_conhecidos=False` nestes: aqui se testa a MECÂNICA de
+    # seguir peers. A lista embutida da mina real entraria junto e
+    # afogaria a malha de três rádios do teste.
     def test_segue_os_peers_a_partir_do_seed(self):
-        r = rm.descobrir_malha(["10.0.0.1"])
+        r = rm.descobrir_malha(["10.0.0.1"], incluir_conhecidos=False)
         self.assertEqual(set(r), set(self.FROTA))
 
     def test_marca_quem_nao_tem_gps(self):
         # Quem não sabe onde está não vai para o mapa. Dizer isso na
         # lista evita o usuário marcar e descobrir no fim que não saiu
         # ponto nenhum.
-        r = rm.descobrir_malha(["10.0.0.1"])
+        r = rm.descobrir_malha(["10.0.0.1"], incluir_conhecidos=False)
         self.assertFalse(r["10.0.0.3"]["tem_gps"])
         self.assertTrue(r["10.0.0.2"]["tem_gps"])
 
     def test_radio_que_nao_responde_entra_com_o_motivo(self):
-        r = rm.descobrir_malha(["10.9.9.9"])
+        r = rm.descobrir_malha(["10.9.9.9"], incluir_conhecidos=False)
         self.assertIn("10.9.9.9", r)
         self.assertTrue(r["10.9.9.9"]["erro"])
 
     def test_sem_seguir_peers_fica_so_no_seed(self):
-        r = rm.descobrir_malha(["10.0.0.1"], seguir_peers=False)
+        r = rm.descobrir_malha(["10.0.0.1"], seguir_peers=False,
+                               incluir_conhecidos=False)
         self.assertEqual(set(r), {"10.0.0.1"})
 
     def test_limite_impede_varredura_sem_fim(self):
-        r = rm.descobrir_malha(["10.0.0.1"], limite=2)
+        r = rm.descobrir_malha(["10.0.0.1"], limite=2,
+                               incluir_conhecidos=False)
         self.assertLessEqual(len(r), 2)
+
+
+class TestMalhaConhecida(unittest.TestCase):
+    """Partir de um seed só não basta.
+
+    `ipv4Address` é OPCIONAL no State.Peer. Um rádio cujos vizinhos só
+    trazem MAC não leva a busca a lugar nenhum — em campo, partindo do
+    10.188.96.140, a descoberta achou UM equipamento numa malha de 150.
+    Por isso cada rádio conhecido é um ponto de partida próprio.
+    """
+
+    # Vizinho SEM ipv4Address: reproduz o caso real.
+    ST = ('configuration {\n  saved {\n    general {\n      name: "%s"\n'
+          '    }\n  }\n}\nwireless {\n  name: "wlan0"\n  channel: 157\n'
+          '  peer {\n    mac: "aa:bb"\n    signal: -70\n    rssi: 25\n  }\n}\n')
+
+    def setUp(self):
+        self._orig = rm.Breadcrumb
+        vivos = dict(list(rm.REDE_CONHECIDA.items())[:5])
+        st = self.ST
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None):
+                s.h = host
+            def reachable(s):    return s.h in vivos
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return st % (vivos[s.h] or s.h)
+        rm.Breadcrumb = F
+        self.vivos = vivos
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def test_a_lista_embutida_tem_a_frota(self):
+        self.assertGreater(len(rm.REDE_CONHECIDA), 100)
+        nomes = [v for v in rm.REDE_CONHECIDA.values() if v]
+        self.assertTrue(any(n.startswith("ERB") for n in nomes))
+        self.assertTrue(any(n.startswith("CA-") for n in nomes))
+
+    def test_seed_sozinho_com_vizinho_sem_ip_nao_expande(self):
+        # A regressão de campo, reproduzida: sem a lista, acha um só.
+        um = next(iter(self.vivos))
+        r = rm.descobrir_malha([um], incluir_conhecidos=False)
+        self.assertEqual(len(r), 1)
+
+    def test_com_a_lista_embutida_acha_todos_os_que_respondem(self):
+        r = rm.descobrir_malha([], incluir_conhecidos=True)
+        resp = {v["nome"] for v in r.values() if not v["erro"]}
+        self.assertEqual(len(resp), len(self.vivos))
+
+    def test_quem_nao_responde_aparece_com_nome_e_motivo(self):
+        # Uma tela com dezenas de linhas de IP cru não diz quais
+        # equipamentos estão fora.
+        r = rm.descobrir_malha([], incluir_conhecidos=True)
+        fora = [v for v in r.values() if v["erro"]]
+        self.assertTrue(fora)
+        com_nome = [v for v in fora if v["nome"] != v["ip"]]
+        self.assertTrue(com_nome, "radio fora do ar perdeu o nome conhecido")
+        self.assertTrue(all(v["erro"] for v in fora))
+
+    def test_conta_vizinhos_com_e_sem_ip_separado(self):
+        # "achei só o seed" e "achei vizinhos mas nenhum tinha IP" sao
+        # problemas diferentes; sem separar, viram o mesmo sintoma.
+        um = next(iter(self.vivos))
+        r = rm.descobrir_malha([um], incluir_conhecidos=False)
+        v = r[um]
+        self.assertEqual(v["vizinhos"], 1)
+        self.assertEqual(v["vizinhos_com_ip"], 0)
+        self.assertGreater(v["bytes_state"], 0)
+
+    def test_sem_partida_nenhuma_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            rm.descobrir_malha([], incluir_conhecidos=False)
+
+
+class TestListaDeIpsDeArquivo(unittest.TestCase):
+    """Outra mina, outra lista: a de arquivo continua aceita."""
+
+    def _tmp(self, nome, texto):
+        import tempfile
+        d = Path(tempfile.mkdtemp()); p = d / nome
+        p.write_text(texto, encoding="utf-8")
+        return p
+
+    def test_le_o_cache_do_coletor(self):
+        p = self._tmp("c.json", json.dumps({
+            "10.0.0.1": {"nome": "ERB-07", "falhas": 2},
+            "10.0.0.2": {"nome": "CA-1006", "falhas": 0}}))
+        self.assertEqual(rm.ler_lista_de_ips(p),
+                         {"10.0.0.1": "ERB-07", "10.0.0.2": "CA-1006"})
+
+    def test_le_texto_com_um_ip_por_linha(self):
+        p = self._tmp("c.txt", "# comentario\n10.0.0.1, ERB-07\n10.0.0.2\n\n")
+        self.assertEqual(rm.ler_lista_de_ips(p),
+                         {"10.0.0.1": "ERB-07", "10.0.0.2": "10.0.0.2"})
+
+    def test_arquivo_sem_ip_falha_com_motivo(self):
+        p = self._tmp("c.txt", "nada aqui\noutra linha\n")
+        with self.assertRaises(RuntimeError):
+            rm.ler_lista_de_ips(p)
+
+    def test_arquivo_inexistente_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            rm.ler_lista_de_ips("/nao/existe/lista.json")
 
 
 class TestAgendaPorDeslocamento(unittest.TestCase):

@@ -180,7 +180,7 @@ def main():
     jan.geometry("1200x820")
     jan.configure(bg=FUNDO)
     fila = queue.Queue()
-    est = {"coleta": None, "achados": {}, "arquivos": []}
+    est = {"coleta": None, "achados": {}, "arquivos": [], "lista": {}}
 
     st = ttk.Style()
     try: st.theme_use("clam")
@@ -264,6 +264,11 @@ def main():
         ttk.Entry(lr, textvariable=v_porta, width=7).pack(side="left", padx=(6, 12))
         b_desc = ttk.Button(lr, text="Procurar equipamentos", style="Azul.TButton")
         b_desc.pack(side="left")
+
+        ttk.Label(ab_col, style="Fraco.TLabel", text=(
+            f"a busca parte destes seeds e dos {len(rm.REDE_CONHECIDA)} "
+            f"rádios já conhecidos, e segue os vizinhos de cada um"
+        )).pack(anchor="w", pady=(0, 4))
 
         ttk.Label(ab_col, text="2. Equipamentos",
                   style="Sec.TLabel").pack(anchor="w", pady=(8, 0))
@@ -520,8 +525,16 @@ def main():
                 elif tipo == "achados":
                     est["achados"] = val
                     for i in arv.get_children(): arv.delete(i)
-                    for ip, v in sorted(val.items(),
-                                        key=lambda kv: kv[1]["nome"]):
+                    resp = sum(1 for v in val.values() if not v.get("erro"))
+                    escreve(f"{resp} de {len(val)} responderam")
+                    # Quem respondeu primeiro, e dentro disso por nome:
+                    # com 156 endereços de partida, a lista abre cheia de
+                    # rádio fora do ar e o que interessa fica embaixo.
+                    for ip, v in sorted(
+                            val.items(),
+                            key=lambda kv: (bool(kv[1].get("erro")),
+                                            not kv[1].get("tem_gps"),
+                                            kv[1]["nome"])):
                         if v.get("erro"):
                             tag, gps, obs = "erro", "—", v["erro"][:70]
                         elif not v.get("tem_gps"):
