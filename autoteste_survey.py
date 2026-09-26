@@ -8,7 +8,7 @@ de campo:
 
     python autoteste_survey.py
 
-A suíte completa (602 testes) fica no projeto principal; aqui o objetivo
+A suíte completa (610 testes) fica no projeto principal; aqui o objetivo
 é outro — provar que ESTA cópia, nesta máquina, gera o que promete.
 """
 import sys, io, zipfile, tempfile, shutil
@@ -130,7 +130,8 @@ def main():
             # nenhuma. É a garantia de que a cor confere com a régua.
             usadas = set(_re.findall(r"<styleUrl>#l([0-9A-F]{6})</styleUrl>",
                                      doc))
-            legenda = {c for cp in rm.FAIXAS_KML.values() for _, c in cp}
+            legenda = ({c for cp in rm.FAIXAS_KML.values() for _, c in cp}
+                       | {rm.COR_SEM_VALOR})
             checa(bool(usadas) and usadas <= legenda,
                   f"cores do trajeto só da legenda ({len(usadas)} usadas)",
                   str(sorted(usadas - legenda)))

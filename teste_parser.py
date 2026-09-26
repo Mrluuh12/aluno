@@ -3350,7 +3350,10 @@ class TestKmlSurvey(unittest.TestCase):
                             r".*?<coordinates>([^<]*)</coordinates>", doc)
         self.assertEqual([c for c, _ in fitas], ["3EAD30", "FF0000"],
                          "20 leituras em duas faixas viraram mais que 2 fitas")
-        self.assertEqual([len(xy.split()) for _, xy in fitas], [20, 20])
+        # Uma emenda na troca de cor, e cada fita com linha de verdade.
+        a, b = ([tuple(p.split(",")[:2]) for p in xy.split()] for _, xy in fitas)
+        self.assertEqual(a[-1], b[0])
+        self.assertTrue(len(a) >= 2 and len(b) >= 2)
 
     def test_rota_tem_contorno_escuro(self):
         # Truque de cartografia: contorno por baixo deixa a linha legivel
@@ -3389,7 +3392,9 @@ class TestKmlSurvey(unittest.TestCase):
         fonte = inspect.getsource(rm.gerar_kml_survey)
         self.assertNotIn("mediana movel", fonte.replace("ó", "o"))
         self.assertNotIn("cor_continua(", fonte)
-        self.assertIn("_fita_por_amostra(", fonte)
+        self.assertIn("trilha_consolidada(", fonte)
+        self.assertIn("_fita_por_amostra(",
+                      inspect.getsource(rm.trilha_consolidada))
 
     def test_cada_trecho_mostra_a_leitura_mais_proxima(self):
         # A amostra é dona do caminho até o ponto médio com a vizinha. O
@@ -3410,7 +3415,7 @@ class TestKmlSurvey(unittest.TestCase):
         # Com alfa, o vermelho do chão da cava tingia o verde e a cor vista
         # deixava de ser a da faixa. Opaca = ff no alfa do KML (aabbggrr).
         _, txt, _ = self._arvore()
-        self.assertIn("<width>7</width>", txt)
+        self.assertIn("<width>6</width>", txt)
         self.assertIn('<Style id="l3EAD30"><LineStyle><color>ff30ad3e</color>',
                       txt)
 
@@ -5403,6 +5408,78 @@ class TestCustoDoCaminho(unittest.TestCase):
         self.assertIn("sem rota", b)
 
 
+class TestTrilhaConsolidada(unittest.TestCase):
+    """Uma linha por caminho, não uma por veículo (campo, 26/09/2026: 29
+    rádios nas mesmas estradas viravam uma faixa larga e salpicada)."""
+
+    K = 1 / 111000.0       # ~1 m em grau, perto do equador
+
+    def _veiculo(self, radio, lado_m, vals, passo_m=10.0, lat0=0.0, t0=0):
+        return [{"radio": radio, "ts": t0 + k, "lat": lat0 + lado_m * self.K,
+                 "lon": k * passo_m * self.K, "sinal": v}
+                for k, v in enumerate(vals)]
+
+    def test_dois_veiculos_na_mesma_pista_viram_uma_linha(self):
+        am = (self._veiculo("CA-1", -3, [-60] * 30)
+              + self._veiculo("CA-2", +4, [-60] * 30, t0=100))
+        pecas, cadeias, soltas = rm.trilha_consolidada(
+            am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 1)
+        self.assertEqual(soltas, [])
+        self.assertEqual([c for c, _, _ in pecas], ["3EAD30"])
+        # No meio da pista, não na de um nem na do outro.
+        lat_m = [la / self.K for la, _ in cadeias[0]]
+        self.assertTrue(all(-3 <= y <= 4 for y in lat_m), lat_m)
+        self.assertTrue(all(-1 < y < 2.5 for y in lat_m[1:-1]), lat_m)
+
+    def test_pistas_separadas_ficam_separadas(self):
+        am = (self._veiculo("CA-1", 0, [-60] * 20)
+              + self._veiculo("CA-2", 60, [-60] * 20, t0=100))
+        _, cadeias, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 2)
+
+    def test_mediana_do_lado_pior_e_sempre_uma_leitura_real(self):
+        self.assertEqual(rm._valor_da_celula([-60, -80], "sinal"), -80)
+        self.assertEqual(rm._valor_da_celula([-60, -70, -80], "sinal"), -70)
+        self.assertEqual(rm._valor_da_celula([9000, 21000], "custo_caminho"), 21000)
+        self.assertEqual(rm._valor_da_celula([None, -65, None], "sinal"), -65)
+        self.assertIsNone(rm._valor_da_celula([None, None], "sinal"))
+
+    def test_cores_de_dois_veiculos_no_mesmo_ponto_nao_se_salpicam(self):
+        # Um bom e um ruim no mesmo lugar: antes, cada um pintava sua linha
+        # e a de cima escondia a de baixo. Agora o trecho tem UMA cor, a
+        # do lado pior do meio.
+        am = (self._veiculo("CA-1", -2, [-60] * 20)
+              + self._veiculo("CA-2", +2, [-78] * 20, t0=100))
+        pecas, _, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual({c for c, _, _ in pecas}, {"FF0000"})
+
+    def test_veiculo_rapido_nao_cria_cruzamento_falso(self):
+        # Um passa a cada 10 m, outro a cada 30 m pulando grupo: sem tirar
+        # o atalho, cada pulo virava triângulo e o trecho se partia.
+        am = (self._veiculo("CA-1", 0, [-60] * 40, passo_m=10)
+              + self._veiculo("CA-2", 1, [-60] * 13, passo_m=30, t0=200))
+        _, cadeias, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 1)
+
+    def test_trecho_sem_nenhum_valor_fica_cinza_e_com_valor_nao(self):
+        vals = [-60] * 10 + [None] * 10 + [-60] * 10
+        am = self._veiculo("CA-1", 0, vals, passo_m=15)
+        # Um segundo veículo mede o miolo: ali o trecho deixa de ser cinza.
+        pecas, _, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertIn(rm.COR_SEM_VALOR, [c for c, _, _ in pecas])
+        am2 = am + self._veiculo("CA-2", 1, [-60] * 30, passo_m=15, t0=300)
+        pecas2, _, _ = rm.trilha_consolidada(am2, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertNotIn(rm.COR_SEM_VALOR, [c for c, _, _ in pecas2])
+
+    def test_buraco_de_medicao_nao_vira_reta(self):
+        am = self._veiculo("CA-1", 0, [-60] * 10)
+        am += [dict(a, ts=a["ts"] + 5000, lon=a["lon"] + 1000 * self.K)
+               for a in self._veiculo("CA-1", 0, [-60] * 10)]
+        _, cadeias, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 2)
+
+
 class TestReguaOficial(unittest.TestCase):
     """A régua de cor de cada grandeza é rastreável a uma fonte, e a cor
     de uma leitura nunca discorda da contagem de reprovados.
@@ -5415,6 +5492,30 @@ class TestReguaOficial(unittest.TestCase):
 
     EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
 
+
+    def test_cinza_da_leitura_sem_valor_esta_na_legenda(self):
+        # Campo, 26/09/2026: "o cinza aí é o quê?" — o mapa pintava cinza a
+        # leitura sem custo do caminho e a legenda não dizia.
+        am = []
+        for k in range(6):
+            am.append({"radio": "CA-1006", "ts": 1000 + k, "lat": -18.9 + k * 1e-4,
+                       "lon": -43.4, "sinal": -60, "sinal_cob": -60, "snr": 30,
+                       "custo_caminho": 9000 if k < 3 else None})
+        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 1000, "fim": 1006},
+                                       am, campos=["custo_caminho"])
+        import zipfile, io
+        doc = zipfile.ZipFile(io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn(f"#l{rm.COR_SEM_VALOR}", doc)
+        self.assertIn("sem trace neste trecho", doc)
+        import tempfile, os
+        from unittest import mock as _m
+        ditos = []
+        orig = rm._legenda_de_faixas_png
+        with tempfile.TemporaryDirectory() as d:
+            with _m.patch("matplotlib.axes.Axes.text",
+                          side_effect=lambda *a, **k: ditos.append(a[2])):
+                orig(os.path.join(d, "l.png"), "custo_caminho")
+        self.assertIn("sem trace neste trecho", ditos)
     def test_snr_e_a_regua_oficial_da_rajant(self):
         # Limites e cores lidos do próprio MeshMapper: goodRSSI e
         # greatRSSI no data.json (em dB de SNR), FF0000/F26A00/3EAD30 nos

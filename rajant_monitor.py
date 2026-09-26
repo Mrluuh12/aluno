@@ -5860,7 +5860,7 @@ def _faixa_idx(v, faixas, na_de_baixo=()):
 
 def _bucket_cor(v, faixas, na_de_baixo=()):
     """faixas: [(limite, 'RRGGBB')] em ordem crescente de limite."""
-    if v is None: return "808080"
+    if v is None: return COR_SEM_VALOR
     return faixas[_faixa_idx(v, faixas, na_de_baixo)][1]
 
 
@@ -6492,6 +6492,182 @@ def _fita_por_amostra(corrida, campo, faixas):
     return [tuple(p) for p in pedacos]
 
 
+# Raio do grupo da trilha consolidada, em metros: uma leitura por passagem
+# a ~40 km/h, e maior que o erro do GPS do rádio mais a largura da pista,
+# para que dois caminhões na mesma estrada caiam no mesmo grupo.
+TRILHA_CELULA_M = 12.0
+
+
+def _valor_da_celula(vals, campo):
+    """Mediana CONSERVADORA das leituras do grupo — sempre uma leitura
+    real, nunca média: com número par, a do meio do lado pior."""
+    vs = sorted(v for v in vals if isinstance(v, (int, float)))
+    if not vs:
+        return None
+    melhor_alto = (ESCALAS.get(campo) or {}).get("melhor", "alto") == "alto"
+    return vs[(len(vs) - 1) // 2] if melhor_alto else vs[len(vs) // 2]
+
+
+def trilha_consolidada(amostras, campo, faixas, celula_m=TRILHA_CELULA_M,
+                       suavizar=2):
+    """Uma linha por CAMINHO, não uma por veículo.
+
+    Com 29 rádios nas mesmas estradas, uma linha por veículo virava uma
+    faixa larga e salpicada: o GPS de cada um erra alguns metros para um
+    lado, e a cor de um aparecia por baixo da do outro. Aqui as leituras
+    de todos se juntam em grupos ao longo da pista: cada leitura entra no
+    grupo mais próximo a até `celula_m`, ou abre um. O grupo fica no
+    centro das suas leituras — o meio da pista — e vale a mediana
+    conservadora das leituras a até `celula_m` dele, de todos os veículos. Dois grupos se ligam quando um veículo passou de
+    um para o outro sem buraco de medição (`_trechos_continuos`); as
+    ligações viram polilinhas, uma por trecho entre cruzamentos,
+    suavizadas para tirar o zigue-zague do GPS.
+
+    Grupo e não grade fixa: a grade corta a estrada de lado, e dois
+    caminhões na mesma pista, a 10 m um do outro, caíam em células
+    vizinhas — a linha abria em degrau.
+
+    Devolve (pecas, cadeias, soltas):
+      pecas  — [(cor, [(lat, lon)...], [valores dos grupos])], como a fita;
+      cadeias — geometria de cada trecho, para o contorno;
+      soltas — [(lat, lon, valor, n_leituras)] dos grupos sem ligação.
+    """
+    pts = [a for a in amostras if a.get("lat") is not None
+           and a.get("lon") is not None]
+    if not pts:
+        return [], [], []
+    lat0 = sum(a["lat"] for a in pts) / len(pts)
+    lon0 = sum(a["lon"] for a in pts) / len(pts)
+    kx = 111320.0 * math.cos(math.radians(lat0)); ky = 110540.0
+    R = float(celula_m)
+
+    lideres = []                 # (x, y) de quem abriu o grupo
+    grade = {}                   # hash espacial dos líderes, lado R
+    cel = []                     # por grupo: soma das posições e n
+
+    def grupo(x, y):
+        gx, gy = math.floor(x / R), math.floor(y / R)
+        melhor, dmin = None, R
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for g in grade.get((gx + dx, gy + dy), ()):
+                    lx, ly = lideres[g]
+                    d = math.hypot(x - lx, y - ly)
+                    if d <= dmin:
+                        melhor, dmin = g, d
+        if melhor is None:
+            melhor = len(lideres)
+            lideres.append((x, y))
+            grade.setdefault((gx, gy), []).append(melhor)
+            cel.append({"x": 0.0, "y": 0.0, "n": 0})
+        return melhor
+
+    viz = {}
+    por_radio = {}
+    todas = {}                   # hash espacial das leituras, lado R
+    for a in pts:
+        por_radio.setdefault(a.get("radio"), []).append(a)
+    for r in sorted(por_radio, key=str):
+        ps = sorted(por_radio[r], key=lambda x: x.get("ts") or 0)
+        for corrida in _trechos_continuos(ps, manter_isolados=True):
+            ant = None
+            for a in corrida:
+                x = (a["lon"] - lon0) * kx; y = (a["lat"] - lat0) * ky
+                todas.setdefault((math.floor(x / R), math.floor(y / R)),
+                                 []).append((x, y, a.get(campo)))
+                k = grupo(x, y)
+                c = cel[k]
+                c["x"] += x; c["y"] += y; c["n"] += 1
+                viz.setdefault(k, set())
+                if ant is not None and ant != k:
+                    viz[ant].add(k); viz[k].add(ant)
+                ant = k
+    for c in cel:
+        c["x"] /= c["n"]; c["y"] /= c["n"]
+        c["lat"] = lat0 + c["y"] / ky; c["lon"] = lon0 + c["x"] / kx
+        # O valor é o das leituras a até R do PONTO da linha — de todos os
+        # veículos —, não só das que caíram no grupo: com a divisão em
+        # grupos desigual, um caminhão bom e um ruim no mesmo trecho davam
+        # grupos alternando verde e vermelho.
+        gx, gy = math.floor(c["x"] / R), math.floor(c["y"] / R)
+        c["vals"] = [v for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                     for x, y, v in todas.get((gx + dx, gy + dy), ())
+                     if math.hypot(x - c["x"], y - c["y"]) <= R]
+        c["v"] = _valor_da_celula(c["vals"], campo)
+
+    # Atalho em triângulo: o veículo mais rápido pula um grupo (A→C) que
+    # os outros visitam (A→B→C). A ligação A–C é redundante e faria um
+    # cruzamento falso no meio da pista.
+    def dist(a, b):
+        return math.hypot(cel[a]["x"] - cel[b]["x"], cel[a]["y"] - cel[b]["y"])
+    for a in list(viz):
+        for c_ in list(viz[a]):
+            if c_ <= a or c_ not in viz[a]:
+                continue
+            dac = dist(a, c_)
+            for b in viz[a] & viz[c_]:
+                if (dist(a, b) < dac and dist(b, c_) < dac
+                        and dist(a, b) + dist(b, c_) <= 1.3 * dac):
+                    viz[a].discard(c_); viz[c_].discard(a)
+                    break
+
+    # Trechos entre cruzamentos: anda pelos grupos de grau 2 a partir de
+    # cada ponta ou cruzamento; o que sobrar sem ponta é anel.
+    usadas = set()
+    cadeias_k = []
+
+    def andar(a, b):
+        cad = [a, b]
+        usadas.add(frozenset((a, b)))
+        while len(viz[cad[-1]]) == 2:
+            prox = [n for n in viz[cad[-1]] if frozenset((cad[-1], n)) not in usadas]
+            if not prox:
+                break
+            usadas.add(frozenset((cad[-1], prox[0])))
+            cad.append(prox[0])
+        return cad
+
+    for k in sorted(viz):
+        if len(viz[k]) != 2:
+            for n in sorted(viz[k]):
+                if frozenset((k, n)) not in usadas:
+                    cadeias_k.append(andar(k, n))
+    for k in sorted(viz):
+        for n in sorted(viz[k]):
+            if frozenset((k, n)) not in usadas:
+                cadeias_k.append(andar(k, n))
+
+    pecas, cadeias = [], []
+    for cad in cadeias_k:
+        geo = [(cel[k]["lat"], cel[k]["lon"]) for k in cad]
+        # Suaviza só o miolo: pontas e cruzamentos ficam onde estão, e os
+        # trechos continuam se encontrando.
+        for _ in range(suavizar):
+            if len(geo) < 3:
+                break
+            geo = ([geo[0]]
+                   + [((p[0] + 2 * q[0] + r_[0]) / 4.0, (p[1] + 2 * q[1] + r_[1]) / 4.0)
+                      for p, q, r_ in zip(geo, geo[1:], geo[2:])]
+                   + [geo[-1]])
+        cadeias.append(geo)
+        falsas = [{"lat": la, "lon": lo, campo: cel[k]["v"]}
+                  for (la, lo), k in zip(geo, cad)]
+        pecas.extend(_fita_por_amostra(falsas, campo, faixas))
+    soltas = [(c["lat"], c["lon"], c["v"], c["n"])
+              for k, c in enumerate(cel) if not viz.get(k)]
+    return pecas, cadeias, soltas
+
+
+# Cor e nome do trecho cuja leitura não tem valor da grandeza. Nunca zero,
+# nunca a cor de uma faixa: cinza, e dito na legenda.
+COR_SEM_VALOR = "808080"
+_SEM_VALOR = {"custo_caminho": "sem trace neste trecho"}
+
+
+def sem_valor_txt(campo):
+    return _SEM_VALOR.get(campo, "sem medição neste trecho")
+
+
 def _rotulo_trecho(vals, un, campo=None):
     """Nome do trecho no Google Earth: a faixa MEDIDA nele, não a da
     legenda — clicar na linha diz o que foi lido ali."""
@@ -6499,7 +6675,7 @@ def _rotulo_trecho(vals, un, campo=None):
     sr = [v for v in vs if sem_rota(v, campo)]
     vs = [v for v in vs if not sem_rota(v, campo)]
     if not vs:
-        return "sem rota" if sr else "sem medição"
+        return "sem rota" if sr else sem_valor_txt(campo)
     lo, hi = min(vs), max(vs)
     txt = (f"{lo:.0f} {un}" if round(lo) == round(hi)
            else f"{lo:.0f} a {hi:.0f} {un}").rstrip()
@@ -6551,7 +6727,8 @@ def _legenda_de_faixas_png(caminho, campo):
 
     Melhor faixa em cima, pior embaixo, em qualquer grandeza — em RSSI o
     alto é bom, em ruído o baixo, e a ordem de FAIXAS_KML segue o valor,
-    não a qualidade. O requisito vai no rodapé.
+    não a qualidade. Por último o cinza da leitura sem valor: toda cor que
+    o mapa pode pintar está aqui. O requisito vai no rodapé.
     """
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -6560,6 +6737,7 @@ def _legenda_de_faixas_png(caminho, campo):
     linhas = _faixas_rotuladas(campo)
     if esc.get("melhor", "alto") == "alto":
         linhas = list(reversed(linhas))
+    linhas = list(linhas) + [(sem_valor_txt(campo), COR_SEM_VALOR, "")]
     req = limite_de(campo)
     fonte = FONTE_FAIXAS.get(campo, "")
     titulo = esc.get("rot", campo)
@@ -6577,7 +6755,8 @@ def _legenda_de_faixas_png(caminho, campo):
     ax.text(12, 31, un, color="#5A6478", fontsize=7.5, va="center")
     # A classificação começa depois do rótulo mais longo: "10001 a 20000"
     # encostava em "bom" com a coluna fixa.
-    x_cls = max(130, 54 + int(6.4 * max(len(r) for r, _c, _k in linhas)) + 14)
+    x_cls = max(130, 54 + int(6.4 * max((len(r) for r, _c, k in linhas if k),
+                                         default=0)) + 14)
     for i, (rng, cor, cls) in enumerate(linhas):
         y = 46 + 21 * i
         ax.add_patch(plt.Rectangle((12, y), 34, 15, facecolor="#" + cor,
@@ -6665,7 +6844,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     # Coletadas ao montar as abas e emitidas antes do documento.
     cores_ponto = set()
     cores_todas = {c for cp in campos for _, c in FAIXAS_KML[cp]}
-    cores_todas.add("808080")          # trecho sem medição
+    cores_todas.add(COR_SEM_VALOR)     # trecho sem medição
     estilos = []
     for cor in sorted(cores_todas):
         estilos.append(
@@ -6680,14 +6859,14 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         # cor vista deixava de ser a da faixa da legenda.
         estilos.append(
             f'<Style id="l{cor}"><LineStyle><color>{_kml_cor(cor, 255)}</color>'
-            f'<width>7</width></LineStyle></Style>')
+            f'<width>6</width></LineStyle></Style>')
     # Contorno da fita: mais largo, escuro e por baixo — separa a cor do
     # terreno. Pode ser firme porque TODOS os contornos vão antes de todas
     # as cores (ver `_aba`): o de um veículo não cobre mais a cor de outro
     # no cruzamento de pistas, que era o motivo de ele ser quase apagado.
     estilos.append(
-        '<Style id="lcontorno"><LineStyle><color>c8141008</color>'
-        '<width>10</width></LineStyle></Style>')
+        '<Style id="lcontorno"><LineStyle><color>b4141008</color>'
+        '<width>9</width></LineStyle></Style>')
     estilos.append(
         '<Style id="pFora"><IconStyle><color>ff0000ff</color><scale>0.55</scale>'
         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png'
@@ -6885,38 +7064,30 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         # E a linha não inventa caminho: `_trechos_continuos` a parte onde
         # houve buraco de medição (tempo ou salto de posição). Foi a reta
         # atravessando a cava que tinha tirado a linha do padrão antes.
-        contornos, fitas, soltos, n_trechos = [], [], [], 0
+        # UMA linha por caminho (`trilha_consolidada`): com uma por veículo,
+        # 29 rádios nas mesmas estradas viravam uma faixa larga e salpicada.
+        contornos, fitas, soltos = [], [], []
         do_rastro = _amostras_do_rastro(am, fixos)
-        por_radio_rastro = {}
-        for a in do_rastro:
-            por_radio_rastro.setdefault(a["radio"], []).append(a)
-        for radio, pts in sorted(por_radio_rastro.items()):
-            pts = sorted(pts, key=lambda x: x.get("ts") or 0)
-            for corrida in _trechos_continuos(pts, manter_isolados=True):
-                if len(corrida) == 1:
-                    # Leitura isolada entre dois buracos: não há linha a
-                    # traçar, mas a medida não pode sumir do mapa.
-                    a_ = corrida[0]
-                    cor = cor_da_leitura(a_.get(campo_a), campo_a)
-                    cores_ponto.add(cor)
-                    soltos.append(_placemark(
-                        _rotulo_trecho([a_.get(campo_a)], un_a, campo_a),
-                        _balao_amostra(a_), f"q{cor}",
-                        ponto=(a_["lat"], a_["lon"])))
-                    continue
-                n_trechos += 1
-                # O contorno escuro é moldura, um por TRECHO — por trajeto
-                # ele redesenharia a reta que a quebra acabou de tirar.
-                contornos.append(_placemark(
-                    None, None, "lcontorno",
-                    linha=[(q["lat"], q["lon"]) for q in corrida]))
-                for cor, geo, vals in _fita_por_amostra(corrida, campo_a,
-                                                        faixas_a):
-                    fitas.append(_placemark(
-                        _rotulo_trecho(vals, un_a, campo_a),
-                        f"<![CDATA[{_esc(radio)} · {len(vals)} "
-                        f"leitura{'s' if len(vals) != 1 else ''}]]>",
-                        f"l{cor}", linha=geo))
+        por_radio_rastro = {a["radio"] for a in do_rastro}
+        pecas, cadeias, soltas = trilha_consolidada(do_rastro, campo_a,
+                                                    faixas_a)
+        n_trechos = len(cadeias)
+        for geo in cadeias:
+            contornos.append(_placemark(None, None, "lcontorno", linha=geo))
+        desc_cel = (f"<![CDATA[mediana das leituras de todos os rádios, em "
+                    f"grupos de {TRILHA_CELULA_M:g} m ao longo da pista]]>")
+        for cor, geo, vals in pecas:
+            fitas.append(_placemark(_rotulo_trecho(vals, un_a, campo_a),
+                                    desc_cel, f"l{cor}", linha=geo))
+        for la, lo, v, n in soltas:
+            # Célula sem ligação (leitura isolada entre dois buracos): não
+            # há linha a traçar, mas a medida não pode sumir do mapa.
+            cor = cor_da_leitura(v, campo_a)
+            cores_ponto.add(cor)
+            soltos.append(_placemark(
+                _rotulo_trecho([v], un_a, campo_a),
+                f"<![CDATA[{n} leitura{'s' if n != 1 else ''}]]>",
+                f"q{cor}", ponto=(la, lo)))
         if contornos or soltos:
             # TODOS os contornos antes de TODAS as cores: com um contorno
             # por veículo intercalado, o de um cobria a cor do outro no

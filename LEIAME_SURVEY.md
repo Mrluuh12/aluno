@@ -256,12 +256,23 @@ MeshMapper da Rajant desenha — não mais bolhas de calor. Com amostras
 espaçadas, o calor de raio fixo saía em bolhas soltas e borradas, com o
 chão da cava tingindo a cor pela transparência.
 
-- **Cada trecho mostra a leitura real mais próxima.** A amostra é dona do
-  caminho até o ponto médio com a vizinha; nenhum trecho mostra média nem
-  cor interpolada entre duas leituras.
-- **A fita parte onde houve buraco** de medição (tempo ou salto de
+- **Uma linha por caminho, não uma por veículo.** Na coleta com 29
+  rádios nas mesmas estradas, uma linha por veículo virava uma faixa larga
+  e salpicada: o GPS de cada caminhão erra alguns metros para um lado, e a
+  cor de um aparecia por baixo da do outro. Agora as leituras de todos se
+  juntam em grupos de 12 m ao longo da pista; a linha passa pelo meio das
+  leituras (o meio da pista) e é suavizada para tirar o zigue-zague do GPS.
+- **Cada ponto da linha vale a mediana das leituras a até 12 m dele**, de
+  todos os veículos — sempre uma leitura real, nunca média; com número par,
+  a do meio do lado pior. Um caminhão bom e um ruim no mesmo trecho não
+  alternam mais verde e vermelho.
+- **Cinza é trecho sem valor** para a grandeza — nenhuma leitura ali teve
+  aquela medida (no custo do caminho: nenhuma com trace). Está na legenda.
+- **A linha parte onde houve buraco** de medição (tempo ou salto de
   posição), em vez de traçar uma reta por onde ninguém passou.
 - **Opaca, com contorno escuro por baixo**: a cor vista é a cor da faixa.
+- **Cada leitura, com rádio e hora**, continua na pasta *Medições*
+  (desligada): clique num ponto para ver a leitura original.
 - **A legenda vai na tela**, dentro de cada aba. O print do Google Earth
   que vai para o slide leva junto a régua com que foi pintado.
 
