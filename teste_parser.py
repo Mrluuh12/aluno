@@ -6092,7 +6092,9 @@ class _RadioBCAPI:
     def __init__(self, nome="CA-1006", peers=3, filtro_ok=True, recusa=None,
                  fragmentos=2, pedaco=700, custo=17952, salto=17951,
                  saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
-                 prontos_apos=3, encap=128433, sem_custo=False):
+                 prontos_apos=3, encap=128433, sem_custo=False,
+                 senha="", papel="CO", motivo_recusa="authentication failed",
+                 ocupado=0):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -6104,20 +6106,74 @@ class _RadioBCAPI:
         # Rádio cuja saída não traz caminho com custo (o formato real de
         # "sem rota" em texto ainda não foi visto em campo).
         self.sem_custo = sem_custo
+        # Login: o rádio só aceita este papel com esta senha, conferindo o
+        # sha384(senha + desafio) como o firmware.
+        self.senha, self.papel, self.motivo_recusa = senha, papel, motivo_recusa
+        self.logins = []                # (papel pedido, aceito?)
+        # Quantos runTask respondem "task TRACE is already running" antes
+        # de aceitar (-1: sempre) — o texto exato do campo.
+        self.ocupado = ocupado
+        self.conexoes = []              # o lado do rádio, para ver se fechou
         self.pedidos = []
         self._pos = 0
 
-    def conectar(self):
+    def conectar(self, login=False):
+        """`login=True`: a conexão começa pelo desafio, como no rádio."""
         import socket, threading
         a, b = socket.socketpair()
         a.settimeout(5)
-        threading.Thread(target=self._servir, args=(b,), daemon=True).start()
+        self.conexoes.append(b)
+        threading.Thread(target=self._servir, args=(b, login),
+                         daemon=True).start()
         return a
+
+    def _login(self, sock):
+        """Desafio → resposta → authResult. False: recusado."""
+        import os as _os, hashlib, struct, zlib
+        from rajant_api import Message_pb2, Common_pb2
+        desafio = _os.urandom(32)
+        ini = Message_pb2.BCMessage(); ini.sequenceNumber = 0
+        ini.auth.action = ini.auth.LOGIN
+        ini.auth.challengeOrResponse = desafio
+        ini.auth.serial = "ME4-2450R-96692"      # string, como o do campo
+        self._enviar(sock, ini)
+        cab = rm._bc_ler_exato(sock, 8)
+        n, flag = struct.unpack(">ibbbb", cab)[:2]
+        corpo = rm._bc_ler_exato(sock, n)
+        if flag == 2:
+            corpo = zlib.decompress(corpo, -15)
+        m = Message_pb2.BCMessage(); m.ParseFromString(corpo)
+        certo = hashlib.sha384(
+            (self.senha + desafio.decode("latin1")).encode("latin1")).digest()
+        ok = (m.auth.role == Common_pb2.Role.Value(self.papel)
+              and m.auth.challengeOrResponse == certo)
+        self.logins.append((Common_pb2.Role.Name(m.auth.role), ok))
+        self.cliente = m.auth.userAgent
+        r = Message_pb2.BCMessage(); r.sequenceNumber = m.sequenceNumber
+        r.authResult.status = (r.authResult.SUCCESS if ok
+                               else r.authResult.FAILURE)
+        if not ok and self.motivo_recusa:
+            r.authResult.description = self.motivo_recusa
+        self._enviar(sock, r)
+        return ok
 
     def estado(self):
         from rajant_api import State_pb2
         st = State_pb2.State()
         st.system.uptime = 1000.0
+        # A tarefa do rádio e as sessões abertas, como no teste de campo
+        # de 10.188.99.9: um TRACE de outra sessão, ainda rodando.
+        t = st.task
+        t.command.action = t.command.TRACE
+        t.command.arguments = "10.188.96.11"
+        t.startTime = "2026-09-26 11:59:18"
+        t.status.state = t.status.RUNNING
+        t.status.id = 3649279092588551
+        t.status.adminSessionID = 0x88b00000dba
+        for sid, idade in ((0x88b00000dba, 17), (0xcf700000202, 2)):
+            a = st.adminSessions.add()
+            a.sessionID, a.address, a.port, a.age = (
+                sid, "10.188.111.248", 52797, idade)
         st.configuration.saved.general.name = self.nome
         g = st.gps
         g.gpsSwitch.enabled = True
@@ -6174,9 +6230,15 @@ class _RadioBCAPI:
             if self.atraso:
                 _t.sleep(self.atraso)
 
-    def _servir(self, sock):
+    def _servir(self, sock, login=False):
         import struct, zlib, gzip
         from rajant_api import Message_pb2
+        if login:
+            try:
+                if not self._login(sock):
+                    sock.close(); return
+            except Exception:
+                return
         saida = gzip.compress(self._texto_imtrace() if self.formato == "texto"
                               else self._trace().SerializeToString())
         pedidos_saida = [0]
@@ -6204,7 +6266,16 @@ class _RadioBCAPI:
                 r.state.CopyFrom(st)
             elif m.HasField("runTask"):
                 pedidos_saida[0] = 0          # cada trace monta a saída de novo
-                if self.recusa:
+                if self.ocupado:
+                    if self.ocupado > 0:
+                        self.ocupado -= 1
+                    r.runTaskResult.status = r.runTaskResult.FAILURE
+                    r.runTaskResult.description = (
+                        "Cannot run new task TRACE from session[cf700000202,"
+                        "::FFFF:10.188.111.248:52916,41,2s]: task TRACE is "
+                        "already running")
+                    r.runTaskResult.id = 3649279092588551
+                elif self.recusa:
                     r.runTaskResult.status = r.runTaskResult.FAILURE
                     r.runTaskResult.description = self.recusa
                 else:
@@ -6391,12 +6462,12 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         self._orig = rm.Breadcrumb
         radios = self.radios = {}
 
+        # Só a rede é trocada: o login é o da biblioteca, pelo
+        # rm.autenticar, contra o desafio do rádio falso.
         class BCFalso(Breadcrumb):
             def reachable(s): return True
-            def authenticate(s):
-                s.connection = radios[s.host].conectar()
-                s.authenticated, s.serial = True, "96716"
-                return True
+            def setup_connection_socket(s):
+                s.connection = radios[s.host].conectar(login=True)
         rm.Breadcrumb = BCFalso
 
     def tearDown(self):
@@ -6494,6 +6565,92 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         c, _ = self._rodar(radio, trace_destino=None)
         self.assertTrue(c.amostras)
         self.assertFalse([m for m in radio.pedidos if m.HasField("runTask")])
+
+    def test_trace_ocupado_nao_tira_o_radio_e_volta_na_leitura_seguinte(self):
+        # Campo, 26/09/2026: "task TRACE is already running" em EH-6001,
+        # CA-1013, CA-1020 e EH-6102, e a v17 tirava cada um do trace na
+        # primeira vez.
+        c, avisos = self._rodar(_RadioBCAPI(ocupado=3), segundos=6.0)
+        self.assertNotIn("10.0.0.6", c.trace_sem)
+        self.assertIsNone(c.trace_parado)
+        self.assertEqual(c.trace_ocupado, 3)
+        self.assertGreater(c.trace_ok, 0)
+        self.assertEqual(c.amostras[-1]["custo_caminho"], 17952)
+        self.assertEqual(len([l for l in avisos if "trace ocupado" in l]), 1)
+        # Motivos agrupados sem a sessão, que muda a cada vez.
+        self.assertEqual(
+            c.trace_motivos,
+            {"Cannot run new task TRACE: task TRACE is already running": 3})
+
+    def test_trace_sempre_ocupado_avisa_uma_vez_e_segue_tentando(self):
+        with mock.patch.object(self.col.Coleta, "OCUPADO_SEGUIDAS", 3):
+            c, avisos = self._rodar(_RadioBCAPI(ocupado=-1), segundos=5.0)
+        self.assertNotIn("10.0.0.6", c.trace_sem)
+        self.assertGreater(c.trace_ocupado, 3)          # seguiu tentando
+        self.assertEqual(len([l for l in avisos if "o tempo todo" in l]), 1)
+        self.assertTrue(c.amostras)
+
+    def test_login_aceita_co_minusculo(self):
+        # A rajant-api só conhece "CO": com "co" o authenticate() dela dava
+        # KeyError, engolido, e a tela dizia "autenticacao falhou" nos 156.
+        radio = _RadioBCAPI(senha="segredo")
+        c, _ = self._rodar(radio, role="co", senha="segredo")
+        self.assertTrue(c.amostras)
+        self.assertEqual(radio.logins[0], ("CO", True))
+        self.assertEqual(radio.cliente, "site_survey")   # visível no rádio
+
+    def test_senha_errada_diz_o_que_o_radio_respondeu(self):
+        self.radios["10.0.0.6"] = _RadioBCAPI(senha="certa")
+        ses = rm.SessaoRadio("10.0.0.6", 2300, "CO", "errada ")
+        with self.assertRaises(PermissionError) as cm:
+            ses.estado_bruto()
+        msg = str(cm.exception)
+        self.assertIn("authentication failed", msg)
+        self.assertIn("confira usuário e senha", msg)
+        self.assertIn("espaço no começo ou no fim", msg)
+
+    def test_usuario_que_nao_existe_e_dito_antes_de_ir_a_rede(self):
+        self.assertEqual(rm.conferir_papel(" co "), "CO")
+        with self.assertRaises(ValueError) as cm:
+            rm.conferir_papel("operador")
+        self.assertIn("VIEW", str(cm.exception))
+        self.assertIn("CO", str(cm.exception))
+
+    def test_sessao_derrubada_fecha_o_socket(self):
+        # A Breadcrumb não tem close(): soltar a referência deixava a sessão
+        # aberta no rádio, com o TRACE dela ocupando a tarefa.
+        radio = _RadioBCAPI()
+        self.radios["10.0.0.6"] = radio
+        ses = rm.SessaoRadio("10.0.0.6", 2300, "CO", "")
+        ses.estado_bruto()
+        lado_do_radio = radio.conexoes[-1]
+        # Referência viva ao socket, como a de uma leitura que ainda o usa:
+        # sem ela, o coletor de lixo fechava o socket e o teste não via a
+        # diferença.
+        nosso_lado = ses.bc.connection
+        ses.fechar()
+        lado_do_radio.settimeout(2)
+        self.assertEqual(lado_do_radio.recv(1), b"")   # o outro lado fechou
+        self.assertIsNotNone(nosso_lado)
+
+    def test_descreve_a_tarefa_e_a_sessao_dona(self):
+        txt = rm.descrever_tarefa(_RadioBCAPI().estado())
+        self.assertIn("TRACE 10.188.96.11", txt)
+        self.assertIn("RUNNING", txt)
+        self.assertIn("88b00000dba: 10.188.111.248:52797  17 s", txt)
+        self.assertEqual(txt.count("dona da tarefa"), 1)
+
+    def test_diagnostico_espera_o_trace_ocupado(self):
+        import tempfile
+        self.radios["10.0.0.6"] = _RadioBCAPI(ocupado=2)
+        alvo = self.col.testar_trace("10.0.0.6", "10.188.96.11",
+                                     pasta=tempfile.mkdtemp(),
+                                     aviso=lambda t: None)
+        txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("TRACE ocupado", txt)
+        self.assertIn("dona da tarefa", txt)
+        self.assertIn("RESULTADO DO TRACE\nOK", txt)
+        self.assertIn("depois de 2 tentativa(s)", txt)
 
     def test_diagnostico_de_campo_grava_o_que_o_radio_respondeu(self):
         import tempfile
@@ -7056,7 +7213,7 @@ class TestColetaAoVivo(unittest.TestCase):
         alvo = self.col.testar_trace("10.0.0.1", pasta=tempfile.mkdtemp(),
                                      aviso=lambda t: None)
         txt = alvo.read_text(encoding="utf-8")
-        self.assertIn("autenticação — ERRO", txt)
+        self.assertIn("autenticação — FALHOU", txt)
         self.assertIn("ping", txt)
 
     def test_coleta_traz_snr_e_ruido(self):

@@ -78,14 +78,51 @@ derrubava o de todos — foi o "trace desligado" da primeira coleta. Agora:
 | situação | o que acontece |
 |---|---|
 | o rádio **recusa** a tarefa | só ele sai do trace; os demais seguem |
+| **TRACE ocupado** ("task TRACE is already running") | só aquela amostra fica sem; a próxima leitura tenta de novo — nunca tira o rádio |
 | 3 falhas seguidas sem nunca ter dado certo | só ele sai do trace |
 | falha avulsa num rádio que já deu certo | só aquela amostra fica sem |
 | 5 rádios fora e **nenhum** sucesso na coleta | trace desligado para todos (papel sem permissão ou destino errado) |
 
+**TRACE ocupado.** O rádio roda uma tarefa por vez (`State.task`), de
+qualquer sessão. Ela fica ocupada por um TRACE nosso que passou do prazo,
+pelo de uma sessão que caiu no meio, ou pelo de outro cliente ligado no
+rádio — MeshMapper, BC|Commander. Na v17 isso contava como recusa, e
+EH-6001, CA-1013, CA-1020 e EH-6102 saíram do trace na primeira vez. Se
+um rádio ficar ocupado 10 leituras seguidas sem nenhum sucesso, a tela
+avisa uma vez: é outro cliente tracejando nele o tempo todo.
+
+A sessão derrubada agora **fecha o socket**. A `rajant-api` não tem
+`close()`, e soltar a sessão deixava-a aberta no rádio, com o TRACE dela
+ocupando a tarefa. E a sessão se identifica no login como `site_survey`
+(campo `userAgent` do `Auth`): no rádio, em `State.adminSessions`, dá
+para separar a sessão desta ferramenta da de um MeshMapper.
+
 Cada motivo novo aparece uma vez no andamento, com o nome do rádio — e,
 quando o rádio responde algo sem custo, o começo do texto que ele mandou.
-A linha de status mostra `trace N ok · M rádio(s) sem`; no fim da coleta
-sai o total e os motivos mais frequentes.
+A linha de status mostra `trace N ok · K ocupado · M rádio(s) sem`; no
+fim da coleta sai o total e os motivos mais frequentes (agrupados sem o
+número da sessão, que o rádio põe na mensagem e muda a cada vez).
+
+## Usuário e senha
+
+O campo **Usuário** é o papel da BCAPI: `VIEW`, `CO`, `ADMIN`, `LOCAL`
+ou `JOIN`. Pode ser digitado em minúsculo — o programa passa para
+maiúsculo. Até a v17 não passava: a `rajant-api` procura o papel num
+dicionário só com maiúsculas, `co` dava erro dentro dela, e ela devolvia
+só "falhou" — a busca mostrava "autenticacao falhou" nos 156 rádios com a
+senha certa.
+
+Agora a falha de login diz o motivo:
+
+| mensagem | o que é |
+|---|---|
+| `usuário 'X' não existe na BCAPI — use VIEW, …` | nome de papel errado; dito antes de ir à rede |
+| `o rádio recusou o login de CO (…) — confira usuário e senha` | senha errada, ou papel sem acesso naquele rádio; entre parênteses, o que o rádio respondeu |
+| `…; a senha digitada tem espaço no começo ou no fim` | espaço colado junto com a senha |
+| `sem resposta do rádio no login` | rede: o rádio não respondeu a tempo |
+
+No fim da busca, o andamento lista os motivos mais frequentes: "156x o
+rádio recusou o login" numa linha, em vez de 156 linhas vermelhas.
 
 **A leitura também ficou mais leve.** A `rajant-api` lia a resposta do
 rádio com um único `recv`: resposta maior que um registro TLS (~16 KB),
@@ -113,8 +150,13 @@ Feito em 26/09/2026 no rádio 10.188.99.4, com o papel VIEW:
 | State inteiro | 9318 bytes na rede, 221 ms |
 | filtro `gps` (e `/gps`) | **funciona**: 2307 bytes, só GPS, rádio e sistema |
 | filtro `State.gps`, `state.gps` | vazio |
-| TRACE | aceito com VIEW; pronto em ~0,8 s |
+| TRACE | aceito com VIEW e com CO; pronto em ~0,8 s |
 | saída do TRACE | **texto** do `imtrace` em gzip — não a mensagem binária |
+
+No 10.188.99.9 (CO), com a coleta rodando nele ao mesmo tempo, o TRACE
+voltou "task TRACE is already running": a tarefa era da coleta. O
+diagnóstico agora espera até 10 s pela tarefa livre e grava de quem ela
+é (sessão, endereço, idade, cliente).
 
 A saída daquele rádio: caminho 9225, salto 6352, saída pela `wlan0wds50`
 em 2,4 GHz canal 6, −42 dBm, SNR 53. O interpretador foi escrito e

@@ -155,7 +155,7 @@ class Coleta:
     que já foi gravado, então interromper no meio não perde a coleta.
     """
 
-    def __init__(self, alvos, role="co", senha="", porta=2300,
+    def __init__(self, alvos, role="CO", senha="", porta=2300,
                  passo_m=PASSO_M_PADRAO, max_threads=LEITURAS_SIMULTANEAS,
                  timeout_s=6,
                  cfg=None, nome=None, reencontro_s=60.0,
@@ -199,6 +199,7 @@ class Coleta:
         self.trace_destino = (trace_destino or "").strip() or None
         self.trace_ok      = 0
         self.trace_falhas  = 0
+        self.trace_ocupado = 0      # TRACE já rodando no rádio: passageiro
         self.trace_parado  = None   # motivo, quando o trace saiu da coleta toda
         self.trace_radio   = {}     # ip -> {"ok", "falhas"}
         self.trace_sem     = {}     # ip -> motivo: rádios que saíram do trace
@@ -295,14 +296,49 @@ class Coleta:
             return None
         try:
             t = ses.trace(self.trace_destino)
+        except rm.TraceOcupado as e:
+            return self._trace_ocupado(ip, str(e))
         except rm.TraceRecusado as e:
             return self._trace_falhou(ip, str(e), recusa=True)
         except Exception as e:
             return self._trace_falhou(ip, f"{type(e).__name__}: {e}")
         with self.lock:
             self.trace_ok += 1
-            self.trace_radio.setdefault(ip, {"ok": 0, "falhas": 0})["ok"] += 1
+            st = self.trace_radio.setdefault(ip, {"ok": 0, "falhas": 0})
+            st["ok"] += 1
+            st["ocupado_seguidas"] = 0
         return t
+
+    # Leituras seguidas com o TRACE ocupado, sem nenhum sucesso, para dizer
+    # que outro cliente parece estar tracejando naquele rádio sem parar.
+    OCUPADO_SEGUIDAS = 10
+
+    def _trace_ocupado(self, ip, motivo):
+        """TRACE já rodando no rádio: esta amostra sai sem, a próxima tenta
+        de novo. Nunca tira o rádio do trace — na v17 tirava, na primeira
+        vez, e foi o "sem trace nesta coleta" em EH-6001, CA-1013, CA-1020
+        e EH-6102."""
+        nome = self.alvos.get(ip, ip)
+        with self.lock:
+            self.trace_ocupado += 1
+            st = self.trace_radio.setdefault(ip, {"ok": 0, "falhas": 0})
+            st["ocupado"] = st.get("ocupado", 0) + 1
+            st["ocupado_seguidas"] = st.get("ocupado_seguidas", 0) + 1
+            primeira = st["ocupado"] == 1
+            insiste = (st["ok"] == 0
+                       and st["ocupado_seguidas"] == self.OCUPADO_SEGUIDAS)
+            m = rm.motivo_curto(motivo)
+            self.trace_motivos[m] = self.trace_motivos.get(m, 0) + 1
+        if primeira:
+            self.aviso(f"trace ocupado em {nome} ({ip}): o rádio ainda roda "
+                       f"um TRACE — esta leitura sai sem o custo do caminho, "
+                       f"a próxima tenta de novo")
+        if insiste:
+            self.aviso(f"{nome}: TRACE ocupado em {self.OCUPADO_SEGUIDAS} "
+                       f"leituras seguidas — outra sessão parece rodar TRACE "
+                       f"nesse rádio o tempo todo (MeshMapper ou BC|Commander "
+                       f"ligado nele?)")
+        return None
 
     # Quantos rádios têm de sair do trace, SEM nenhum sucesso na coleta,
     # para ele sair da coleta inteira. Aí o problema não é de um rádio — é
@@ -324,6 +360,9 @@ class Coleta:
         tela uma vez.
         """
         nome = self.alvos.get(ip, ip)
+        # Sem a sessão e a idade dela, que mudam a cada vez: com elas, cada
+        # falha era um motivo "novo" e o resumo do fim contava tudo 1x.
+        motivo = rm.motivo_curto(motivo)
         with self.lock:
             self.trace_falhas += 1
             st = self.trace_radio.setdefault(ip, {"ok": 0, "falhas": 0})
@@ -616,7 +655,8 @@ class Coleta:
                 self.aviso(f"  {n}x  {m}")
         if self.trace_destino:
             self.aviso(f"trace: {self.trace_ok} ok, {self.trace_falhas} "
-                       f"falha(s), {len(self.trace_sem)} rádio(s) sem trace")
+                       f"falha(s), {self.trace_ocupado} ocupado, "
+                       f"{len(self.trace_sem)} rádio(s) sem trace")
             for m, n in sorted(self.trace_motivos.items(),
                                key=lambda kv: -kv[1])[:5]:
                 self.aviso(f"  {n}x  {m}")
@@ -644,6 +684,7 @@ class Coleta:
                 "trace_ok": self.trace_ok, "trace_falhas": self.trace_falhas,
                 "trace_parado": self.trace_parado,
                 "trace_sem": len(self.trace_sem),
+                "trace_ocupado": self.trace_ocupado,
                 "passo_m": self._passo_real(),
             }
 
@@ -727,7 +768,7 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
 # ══════════════════════════════════════════════════════════════
 # DIAGNÓSTICO DE CAMPO — o que o rádio responde de verdade
 # ══════════════════════════════════════════════════════════════
-def testar_trace(ip, destino=None, role="co", senha="", porta=2300,
+def testar_trace(ip, destino=None, role="CO", senha="", porta=2300,
                  pasta=".", aviso=print):
     """Pergunta a UM rádio como ele responde à leitura e ao TRACE, e grava
     tudo num arquivo de texto.
@@ -761,18 +802,15 @@ def testar_trace(ip, destino=None, role="co", senha="", porta=2300,
                                 password=senha)
     t0 = time.monotonic()
     try:
-        ok = bc.authenticate()
+        rm.autenticar(bc)
     except Exception as e:
-        # A biblioteca chama o `ping` do sistema e não trata a falta dele
-        # nem nenhum outro erro de rede: o diagnóstico registra e grava o
-        # arquivo mesmo assim, que é para isso que ele existe.
-        reg("autenticação — ERRO", f"{type(e).__name__}: {e}")
+        # Usuário que não existe, senha recusada, rede: o diagnóstico
+        # registra o motivo e grava o arquivo mesmo assim, que é para isso
+        # que ele existe.
+        reg("autenticação — FALHOU", f"{type(e).__name__}: {e}")
         return _gravar_teste(pasta, ip, linhas)
-    reg("autenticação", f"{'ok' if ok else 'FALHOU'} em "
-                        f"{(time.monotonic() - t0) * 1000:.0f} ms"
-                        f"  serial {bc.serial}")
-    if not ok:
-        return _gravar_teste(pasta, ip, linhas)
+    reg("autenticação", f"ok em {(time.monotonic() - t0) * 1000:.0f} ms"
+                        f"  papel {bc.role}  serial {bc.serial}")
 
     def medir(rotulo, caminhos):
         t0 = time.monotonic()
@@ -790,21 +828,43 @@ def testar_trace(ip, destino=None, role="co", senha="", porta=2300,
     st = medir("State inteiro", None)
     if st is not None:
         reg("State.task (antes do trace)", str(st.task) or "(vazio)")
+        reg("tarefa e sessões no rádio", rm.descrever_tarefa(st))
     # O formato do caminho não está documentado; os candidatos plausíveis,
     # um por vez. Vale o que devolver só os ramos pedidos.
     for fmt in ("{}", "State.{}", "/{}", "state.{}"):
         medir(f"filtro '{fmt.format('gps')}'",
               [fmt.format(c) for c in rm.CAMINHOS_ESTADO])
 
-    registro = []
+    # Com a tarefa ocupada (a coleta ligada nesse rádio, ou outro cliente),
+    # tenta de novo por até 10 s — e registra de quem é a tarefa.
     t0 = time.monotonic()
-    try:
-        r = rm.bc_trace(bc, destino, espera_s=3.0, registro=registro)
-        res = f"OK em {(time.monotonic() - t0) * 1000:.0f} ms\n" + \
-              "\n".join(f"{k}: {v}" for k, v in r.items())
-    except Exception as e:
-        res = f"FALHOU em {(time.monotonic() - t0) * 1000:.0f} ms — " \
-              f"{type(e).__name__}: {e}"
+    ocupado = 0
+    while True:
+        registro = []
+        try:
+            r = rm.bc_trace(bc, destino, espera_s=3.0, registro=registro)
+            res = f"OK em {(time.monotonic() - t0) * 1000:.0f} ms\n" + \
+                  "\n".join(f"{k}: {v}" for k, v in r.items())
+        except rm.TraceOcupado as e:
+            ocupado += 1
+            if ocupado == 1:
+                reg("TRACE ocupado", str(e))
+                try:
+                    reg("tarefa e sessões no rádio (ocupado)",
+                        rm.descrever_tarefa(rm.bc_state(bc, None)))
+                except Exception as e2:
+                    reg("tarefa (falhou)", f"{type(e2).__name__}: {e2}")
+            if time.monotonic() - t0 < 10:
+                time.sleep(0.5)
+                continue
+            res = (f"OCUPADO em {ocupado} tentativas por "
+                   f"{time.monotonic() - t0:.0f} s — {e}")
+        except Exception as e:
+            res = f"FALHOU em {(time.monotonic() - t0) * 1000:.0f} ms — " \
+                  f"{type(e).__name__}: {e}"
+        break
+    if ocupado and res.startswith("OK"):
+        res += f"\n(depois de {ocupado} tentativa(s) com o TRACE ocupado)"
     for rot, txt in registro:
         reg(f"trace · {rot}", txt)
     reg("RESULTADO DO TRACE", res)
@@ -848,7 +908,7 @@ def main(argv=None):
     ap.add_argument("--lista", metavar="ARQ",
                     help="arquivo com IPs (o rajant_ips_cache.json, ou um "
                          "IP por linha) para usar como partida")
-    ap.add_argument("--role", default="co")
+    ap.add_argument("--role", default="CO")
     ap.add_argument("--senha", default="")
     ap.add_argument("--porta", type=int, default=2300)
     ap.add_argument("--minutos", type=float, default=10.0)

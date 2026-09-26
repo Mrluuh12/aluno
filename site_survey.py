@@ -286,7 +286,8 @@ def main():
                                              fallback="10.188.96.140"))
         ttk.Entry(lr, textvariable=v_seeds, width=30).pack(side="left", padx=(6, 12))
         ttk.Label(lr, text="Usuário").pack(side="left")
-        v_role = tk.StringVar(value=cfg.get("rede", "role", fallback="co"))
+        v_role = tk.StringVar(value=rm.papel_bcapi(
+            cfg.get("rede", "role", fallback="CO")))
         ttk.Entry(lr, textvariable=v_role, width=8).pack(side="left", padx=(6, 12))
         ttk.Label(lr, text="Senha").pack(side="left")
         v_senha = tk.StringVar(value=cfg.get("rede", "password", fallback=""))
@@ -504,7 +505,14 @@ def main():
             txt.delete("1.0", "end")
             seeds = [s.strip() for s in
                      v_seeds.get().replace(";", ",").split(",") if s.strip()]
-            role, senha = v_role.get(), v_senha.get()
+            try:
+                role = rm.conferir_papel(v_role.get())
+            except ValueError as e:
+                b_desc.configure(state="normal", text="Procurar equipamentos")
+                messagebox.showwarning(TITULO, str(e))
+                return
+            v_role.set(role)
+            senha = v_senha.get()
             porta = int(v_porta.get() or 2300)
 
             def trab():
@@ -654,8 +662,10 @@ def main():
                    if s.get("leitura_ms") is not None else "")
             if s.get("trace_parado"):
                 tr = "   trace desligado"
-            elif s.get("trace_ok") or s.get("trace_sem"):
+            elif s.get("trace_ok") or s.get("trace_sem") or s.get("trace_ocupado"):
                 tr = (f"   trace {s['trace_ok']} ok"
+                      + (f" · {s['trace_ocupado']} ocupado"
+                         if s.get("trace_ocupado") else "")
                       + (f" · {s['trace_sem']} rádio(s) sem"
                          if s.get("trace_sem") else ""))
             else:

@@ -1688,7 +1688,7 @@ class RajantCollector:
                 bc = exigir_rajant_api()(host=ip, port=self.port,
                                 role=self.role, password=self.password)
                 if not bc.reachable():   raise ConnectionRefusedError("nao alcancavel")
-                if not bc.authenticate(): raise PermissionError("autenticacao falhou")
+                autenticar(bc)
                 dados = parse_state(bc.get_state())
                 ts    = time.monotonic()
                 dados = calcular_taxas(ip, dados, ts)
@@ -1767,7 +1767,7 @@ class RajantCollector:
             try:
                 bc = exigir_rajant_api()(host=seed, port=self.port,
                                 role=self.role, password=self.password)
-                if bc.reachable() and bc.authenticate():
+                if bc.reachable() and autenticar(bc):
                     seeds_ok.append(seed)
                     m_seed_status.labels(seed=seed).set(1)
                     log.info(f"  Seed OK:     {seed}")
@@ -1775,10 +1775,10 @@ class RajantCollector:
                     seeds_fail.append(seed)
                     m_seed_status.labels(seed=seed).set(0)
                     log.warning(f"  Seed OFFLINE:{seed}")
-            except Exception:
+            except Exception as e:
                 seeds_fail.append(seed)
                 m_seed_status.labels(seed=seed).set(0)
-                log.warning(f"  Seed OFFLINE:{seed}")
+                log.warning(f"  Seed OFFLINE:{seed} ({e})")
 
         cache_ips    = self.cache.todos_ips()
 
@@ -10797,7 +10797,7 @@ def ler_lista_de_ips(caminho):
     return out
 
 
-def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
+def descobrir_malha(seeds, role="CO", senha="", porta=2300, timeout_s=6,
                     max_threads=24, seguir_peers=True, limite=600,
                     incluir_conhecidos=True, aviso=None):
     """Percorre a malha a partir dos seeds e devolve o inventário.
@@ -10820,6 +10820,7 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
     tempo do usuário.
     """
     Bc = exigir_rajant_api()
+    role = conferir_papel(role)
     achados, vistos = {}, set()
     lk = threading.Lock()
     sem = threading.Semaphore(max(1, int(max_threads)))
@@ -10836,8 +10837,7 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
                 bc = Bc(host=ip, port=porta, role=role, password=senha)
                 if not bc.reachable():
                     raise ConnectionRefusedError("nao alcancavel")
-                if not bc.authenticate():
-                    raise PermissionError("autenticacao falhou")
+                autenticar(bc)
                 # get_state() devolve o OBJETO State, não texto — quem
                 # converte é o parse_state, com str(). Medir o tamanho
                 # antes disso estourava com "object of type 'State' has
@@ -10950,6 +10950,14 @@ def descobrir_malha(seeds, role="co", senha="", porta=2300, timeout_s=6,
     _diz(f"fim: {len(achados)} rádios, "
          f"{sum(1 for v in achados.values() if not v['erro'])} responderam, "
          f"{com_gps} com GPS")
+    # Os motivos, do mais frequente: "156 x o rádio recusou o login" diz
+    # numa linha o que 156 linhas vermelhas não dizem.
+    motivos = {}
+    for v in achados.values():
+        if v["erro"]:
+            motivos[v["erro"]] = motivos.get(v["erro"], 0) + 1
+    for m, n in sorted(motivos.items(), key=lambda kv: -kv[1])[:4]:
+        _diz(f"  {n}x  {m}")
     return achados
 
 
@@ -10980,7 +10988,7 @@ class SessaoRadio:
         bc = exigir_rajant_api()(host=self.ip, port=self.porta,
                         role=self.role, password=self.senha)
         if not bc.reachable():    raise ConnectionRefusedError("nao alcancavel")
-        if not bc.authenticate(): raise PermissionError("autenticacao falhou")
+        autenticar(bc)
         self.bc = bc
         return bc
 
@@ -11004,7 +11012,7 @@ class SessaoRadio:
         except Exception as e:
             # A sessão pode ter caído (rádio reiniciou, rota mudou). Joga
             # fora para a próxima tentativa reautenticar do zero.
-            self.bc = None
+            self._largar()
             self.falhas += 1
             self.ultimo_erro = str(e)
             if self.falhas >= self.falhas_max:
@@ -11025,8 +11033,18 @@ class SessaoRadio:
         except Exception:
             # Erro de transporte no meio do trace deixa a conexão num
             # estado desconhecido (meia mensagem pendente): refaz a sessão.
-            self.bc = None
+            self._largar()
             raise
+
+    def _largar(self):
+        """Fecha o socket e solta a sessão. A Breadcrumb não tem close():
+        soltar só a referência deixava a sessão aberta no rádio até ele
+        desistir dela — com o TRACE dela ainda ocupando a tarefa."""
+        conn = getattr(self.bc, "connection", None)
+        if conn is not None:
+            try: conn.close()
+            except Exception: pass
+        self.bc = None
 
     def fechar(self):
         for m in ("close", "disconnect", "logout"):
@@ -11034,7 +11052,7 @@ class SessaoRadio:
                 f = getattr(self.bc, m, None)
                 if callable(f): f(); break
             except Exception: pass
-        self.bc = None
+        self._largar()
 
 
 # Descoberto uma vez por processo: a assinatura de get_state varia entre
@@ -11132,6 +11150,57 @@ class TraceRecusado(TraceIndisponivel):
     permissão, firmware sem TRACE. Não adianta insistir naquele rádio."""
 
 
+class TraceOcupado(TraceIndisponivel):
+    """Já há um TRACE rodando no rádio. Passageiro: tenta-se de novo.
+
+    O rádio tem UMA tarefa por vez (`State.task`), de qualquer sessão. Em
+    campo (26/09/2026): "Cannot run new task TRACE from session[…]: task
+    TRACE is already running". Ocupa a tarefa um TRACE nosso que passou do
+    prazo, o de uma sessão que caiu no meio, ou o de outro cliente ligado
+    no rádio (MeshMapper, BC|Commander). Na v17 isso contava como recusa
+    e o rádio saía do trace na primeira vez."""
+
+
+_RX_OCUPADO = re.compile(r"already running|busy|in progress", re.I)
+
+
+def motivo_curto(texto):
+    """O motivo sem o que muda a cada vez — a sessão e a idade dela —,
+    para contar motivos iguais como iguais."""
+    return re.sub(r"\s*from session\[[^\]]*\]", "", str(texto))
+
+
+def descrever_tarefa(st):
+    """A tarefa do rádio e quem a disparou, em texto, de um State inteiro.
+
+    `State.task` é um TaskObject (Common.proto): comando, início, fim e
+    TaskStatus com estado, id e `adminSessionID` — a sessão dona, que se
+    acha em `State.adminSessions` (endereço, idade, cliente)."""
+    linhas = []
+    try:
+        t = st.task
+        s = t.status
+        cmd = t.command
+        linhas.append(
+            f"tarefa: {type(cmd).TaskAction.Name(cmd.action)} {cmd.arguments}  "
+            f"estado: {type(s).TaskState.Name(s.state) if s.HasField('state') else '?'}  "
+            f"id {s.id or '?'}")
+        linhas.append(f"início {t.startTime or '?'}  fim {t.stopTime or '—'}")
+        dona = s.adminSessionID if s.HasField("adminSessionID") else None
+        papeis = {v: k for k, v in (papeis_bcapi() or {}).items()}
+        for a in st.adminSessions:
+            marca = "  ← dona da tarefa" if dona is not None and a.sessionID == dona else ""
+            linhas.append(
+                f"sessão {a.sessionID:x}: {a.address}:{a.port}  {a.age} s  "
+                f"{papeis.get(a.role, a.role)}  {a.userAgent or ''} "
+                f"{a.remoteUsername or ''}".rstrip() + marca)
+        if not len(st.adminSessions):
+            linhas.append("sessões: (o State não trouxe adminSessions)")
+    except Exception as e:
+        linhas.append(f"(não deu para ler a tarefa: {type(e).__name__}: {e})")
+    return "\n".join(linhas)
+
+
 # Como a coleta está lendo, aprendido na primeira leitura boa e valendo
 # para o processo inteiro: None = ainda não se sabe.
 #   direto: a leitura enquadrada funciona (senão, volta a get_state()).
@@ -11213,6 +11282,99 @@ def bc_receber(bc):
     bc.seq_number += 1            # como o get_message da biblioteca
     bc._ultimo_tamanho = (bruto, len(corpo))
     return m
+
+
+def papel_bcapi(role):
+    """O usuário (papel) do jeito que a rajant-api o procura: maiúsculo.
+
+    A biblioteca faz `roles[role]` num dicionário que só tem VIEW, LOCAL,
+    ADMIN, CO e JOIN. Com "co" em minúsculo dá KeyError — e o `except:`
+    do authenticate() dela engole o erro e devolve só False. Na tela saía
+    "autenticacao falhou" nos 156 rádios, com a senha certa.
+    """
+    return str(role or "").strip().upper()
+
+
+def papeis_bcapi():
+    """{papel: número} que a biblioteca instalada conhece, ou None."""
+    try:
+        from rajant_api import Message_pb2
+        return dict(Message_pb2.Common__pb2.Role.items())
+    except Exception:
+        return None
+
+
+def conferir_papel(role):
+    """O papel normalizado; ValueError se a BCAPI não tiver esse usuário.
+    Para dizer ANTES de bater em 156 rádios com um nome que não existe."""
+    papel = papel_bcapi(role)
+    papeis = papeis_bcapi()
+    if papeis and papel not in papeis:
+        raise ValueError(f"usuário '{role}' não existe na BCAPI — use "
+                         + ", ".join(sorted(papeis, key=papeis.get)))
+    return papel
+
+
+AGENTE_BCAPI = "site_survey"
+
+
+def autenticar(bc):
+    """Login no rádio: True, ou uma exceção com o MOTIVO.
+
+    O authenticate() da biblioteca devolve False para tudo — usuário que
+    não existe, senha errada, TLS, tempo esgotado —, e a tela só podia
+    dizer "autenticacao falhou". Aqui são os mesmos passos dela (o rádio
+    manda um desafio; volta sha384 da senha + desafio), com cada falha
+    dita pelo nome e a descrição que o próprio rádio mandar. Sem o ping
+    que ela faz antes: quem chama já testou o alcance.
+    """
+    bc.role = papel_bcapi(getattr(bc, "role", ""))
+    papeis = getattr(bc, "roles", None)
+    if isinstance(papeis, dict) and papeis and bc.role not in papeis:
+        raise PermissionError(f"usuário '{bc.role}' não existe na BCAPI — use "
+                              + ", ".join(sorted(papeis, key=papeis.get)))
+    if not (callable(getattr(bc, "setup_connection_socket", None))
+            and callable(getattr(bc, "prepare_login_message", None))
+            and isinstance(getattr(bc, "statuses", None), dict)):
+        # Objeto de teste, ou outra versão da biblioteca: o caminho dela.
+        if not bc.authenticate():
+            raise PermissionError("autenticacao falhou")
+        return True
+    try:
+        bc.setup_connection_socket()
+        ini = bc_receber(bc)
+        bc.serial = str(ini.auth.serial)
+        pedido = bc.prepare_login_message(ini)
+        # Campo do Auth "reportado pelo cliente no login" (Message.proto):
+        # o rádio o mostra em State.adminSessions, e o diagnóstico separa
+        # a sessão desta ferramenta da de um MeshMapper ou BC|Commander.
+        pedido.auth.userAgent = AGENTE_BCAPI
+        bc.send_message(pedido)
+        res = None
+        for _ in range(3):
+            r = bc_receber(bc)
+            if r.HasField("authResult"):
+                res = r.authResult
+                break
+    except TimeoutError:
+        raise TimeoutError(f"sem resposta do rádio no login (porta {bc.port})")
+    except ssl.SSLError as e:
+        raise ConnectionError(f"TLS no login: {e}")
+    if res is None:
+        raise PermissionError("o rádio não devolveu o resultado do login")
+    st = bc.statuses.get(res.status, str(res.status))
+    if st != "SUCCESS":
+        try: bc.connection.close()
+        except Exception: pass
+        desc = (res.description or "").strip()
+        msg = (f"o rádio recusou o login de {bc.role}"
+               + (f" ({desc})" if desc else "") + " — confira usuário e senha")
+        senha = getattr(bc, "password", None) or ""
+        if senha != senha.strip():
+            msg += "; a senha digitada tem espaço no começo ou no fim"
+        raise PermissionError(msg)
+    bc.authenticated = True
+    return True
 
 
 def bc_pedir(bc, montar, aceita, max_msgs=6):
@@ -11404,7 +11566,10 @@ def bc_trace(bc, destino, espera_s=3.0, registro=None):
     res = r.runTaskResult
     _reg("runTaskResult", res)
     if res.status == type(res).FAILURE:
-        raise TraceRecusado(res.description or "o rádio recusou a tarefa")
+        desc = res.description or "o rádio recusou a tarefa"
+        if _RX_OCUPADO.search(desc):
+            raise TraceOcupado(desc)
+        raise TraceRecusado(desc)
     tid = res.id if res.HasField("id") else None
 
     # Em campo a saída ficou pronta em ~0,8 s, depois de 3 FAILED e 5
@@ -15540,7 +15705,7 @@ def criar_handler(cfg):
                     senha = cfg.get("rede","password", fallback="")
                     bc = exigir_rajant_api()(host=ip, port=porta_api, role=role, password=senha)
                     if not bc.reachable():    raise RuntimeError("BC nao alcancavel")
-                    if not bc.authenticate(): raise RuntimeError("Autenticacao falhou")
+                    autenticar(bc)
                     raw = bc.get_state()
                     dados = parse_state(raw)
                     txt = json.dumps(raw, indent=2) if isinstance(raw, dict) else str(raw)
@@ -15996,7 +16161,8 @@ def main():
         log.info(f"Diagnostico de ethernet em {ipd}...")
         bc = exigir_rajant_api()(host=ipd, port=port, role=role, password=password)
         if not bc.reachable():    log.error("Nao alcancavel"); sys.exit(2)
-        if not bc.authenticate(): log.error("Autenticacao falhou"); sys.exit(3)
+        try: autenticar(bc)
+        except Exception as e: log.error(f"Autenticacao falhou: {e}"); sys.exit(3)
         raw = bc.get_state()
         rel = diagnostico_ethernet(raw)
         arq = f"diagnostico_eth_{ipd.replace('.','_')}.txt"
@@ -16010,7 +16176,8 @@ def main():
         log.info(f"Coletando state bruto de {ipd}...")
         bc = exigir_rajant_api()(host=ipd, port=port, role=role, password=password)
         if not bc.reachable():    log.error("Nao alcancavel"); sys.exit(2)
-        if not bc.authenticate(): log.error("Autenticacao falhou"); sys.exit(3)
+        try: autenticar(bc)
+        except Exception as e: log.error(f"Autenticacao falhou: {e}"); sys.exit(3)
         raw = bc.get_state()
         txt = json.dumps(raw, indent=2) if isinstance(raw, dict) else str(raw)
         arq = f"state_{ipd.replace('.','_')}.txt"
