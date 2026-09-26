@@ -74,11 +74,32 @@ leitura. Agora a mensagem é lida até o fim, sem ping, e só com GPS, rádio
 e sistema. Se o rádio não entender o filtro, volta sozinha ao State
 inteiro; se a leitura direta não funcionar, volta ao modo da biblioteca.
 
-### Teste de campo (uma vez, antes de confiar no trace)
+**Nome dos vizinhos.** O rádio não informa o nome de cada vizinho — só o
+IP (nem sempre) e o *encap*, que é o final do número de série. Até a v14
+o vizinho entrava com o **IP** no lugar do nome, e a eleição da melhor
+ERB/ERM, que reconhece infraestrutura pelo nome, nunca achava nenhuma: o
+mapa ao vivo saía com o melhor vizinho de qualquer tipo, caminhão
+incluído. Agora o nome vem da busca (nome e serial de cada rádio que
+respondeu) e da lista de 156 rádios da mina embutida no programa.
 
-Dois detalhes não estão no `.proto` e não se inventam: o formato do filtro
-e o formato da resposta do trace. Os testes daqui usam um rádio simulado
-com o protocolo real; a confirmação é num rádio de verdade:
+### Teste de campo
+
+Feito em 26/09/2026 no rádio 10.188.99.4, com o papel VIEW:
+
+| o que | resultado |
+|---|---|
+| autenticação | ok, 270 ms |
+| State inteiro | 9318 bytes na rede, 221 ms |
+| filtro `gps` (e `/gps`) | **funciona**: 2307 bytes, só GPS, rádio e sistema |
+| filtro `State.gps`, `state.gps` | vazio |
+| TRACE | aceito com VIEW; pronto em ~0,8 s |
+| saída do TRACE | **texto** do `imtrace` em gzip — não a mensagem binária |
+
+A saída daquele rádio: caminho 9225, salto 6352, saída pela `wlan0wds50`
+em 2,4 GHz canal 6, −42 dBm, SNR 53. O interpretador foi escrito e
+testado com esses bytes exatos.
+
+Para repetir o teste em outro rádio:
 
 1. Na aba **Coleta**, **Procurar equipamentos** e **clicar no nome** de
    um rádio da lista (não na caixinha de marcar).

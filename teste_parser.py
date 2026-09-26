@@ -6051,11 +6051,17 @@ class _RadioBCAPI:
 
     `filtro_ok`: entende stateFilterPath no formato "gps". `recusa`: texto
     do FAILURE ao TRACE. `fragmentos`: em quantas partes vem a saída.
+
+    Por padrão responde ao TRACE como o rádio 10.188.99.4 respondeu em
+    campo: TEXTO do `imtrace` em gzip, sem `compression` nem `content`, e
+    só depois de algumas respostas FAILED/UNAVAILABLE (`prontos_apos`).
+    `formato="proto"` devolve a mensagem `Trace` binária do Common.proto.
     """
 
     def __init__(self, nome="CA-1006", peers=3, filtro_ok=True, recusa=None,
                  fragmentos=2, pedaco=700, custo=17952, salto=17951,
-                 saida="ERM-08 PTP CAM", atraso=0.0):
+                 saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
+                 prontos_apos=3, encap=128433):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -6063,6 +6069,7 @@ class _RadioBCAPI:
         # Sem ele, o buffer do socket já tinha a mensagem inteira e um recv
         # único a pegava — o teste passava até com a leitura da biblioteca.
         self.atraso = atraso
+        self.formato, self.prontos_apos, self.encap = formato, prontos_apos, encap
         self.pedidos = []
         self._pos = 0
 
@@ -6101,10 +6108,21 @@ class _RadioBCAPI:
         pa = t.path
         pa.type = pa.WIRELESS_PEER
         pa.name, pa.mac = self.saida, bytes.fromhex("848d8441a60d")
+        pa.encapid = self.encap
         pa.cost, pa.hopCost = self.custo, self.salto
         pa.signal, pa.rssi, pa.rate = -89, 20, 65
         pa.channel, pa.freq = 157, 5785
         return t
+
+    def _texto_imtrace(self):
+        # A linha exata do campo, com os números deste rádio falso.
+        return ("Target IP(s):  10.188.96.11(396)\n"
+                "Target MAC(s): 00:00:0C:9F:F1:8C \n"
+                "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)):"
+                f"peer=84:8D:84:41:A6:0D/wlan0wds33/{self.encap} "
+                f"cost={self.custo} hop cost={self.salto} channel=157 "
+                "display channel=157 freq=5785 signal=-89 rssi=20 "
+                "rate=65\x00").encode()
 
     def _enviar(self, sock, msg):
         import struct, zlib
@@ -6121,8 +6139,9 @@ class _RadioBCAPI:
     def _servir(self, sock):
         import struct, zlib, gzip
         from rajant_api import Message_pb2
-        saida = gzip.compress(self._trace().SerializeToString())
-        partes = [saida[i::1] for i in range(1)]
+        saida = gzip.compress(self._texto_imtrace() if self.formato == "texto"
+                              else self._trace().SerializeToString())
+        pedidos_saida = [0]
         tam = max(1, -(-len(saida) // self.fragmentos))
         partes = [saida[i:i + tam] for i in range(0, len(saida), tam)]
         while True:
@@ -6154,10 +6173,21 @@ class _RadioBCAPI:
                     r.runTaskResult.id = 7
             elif m.HasField("taskOutputRequest"):
                 o = r.taskOutputResponse
+                pedidos_saida[0] += 1
+                if pedidos_saida[0] <= self.prontos_apos:
+                    # Em campo: FAILED e depois UNAVAILABLE enquanto o rádio
+                    # monta a saída.
+                    o.status = (o.FAILED if pedidos_saida[0] == 1
+                                else o.UNAVAILABLE)
+                    self._enviar(sock, r)
+                    continue
                 i = m.taskOutputRequest.position // tam
                 o.data = partes[i]
-                o.output.compression = o.output.GZIP
-                o.output.content = o.output.PROTO
+                if self.formato == "texto":
+                    o.output.totalSize = len(saida)   # e só isso, como em campo
+                else:
+                    o.output.compression = o.output.GZIP
+                    o.output.content = o.output.PROTO
                 if i + 1 < len(partes):
                     o.status = o.FRAGMENT
                     o.position = (i + 1) * tam
@@ -6210,16 +6240,66 @@ class TestBCAPIDireto(_ComBCAPIReal, unittest.TestCase):
         self.assertFalse(radio.pedidos[-1].stateFilterPath)
 
     def test_trace_em_fragmentos_comprimidos(self):
+        # Como em campo: saída em texto do imtrace, gzip, pronta só depois
+        # de FAILED e UNAVAILABLE — e aqui ainda partida em 3 fragmentos.
         radio = _RadioBCAPI(fragmentos=3)
         t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
         self.assertEqual(t["custo_caminho"], 17952)
         self.assertEqual(t["custo_saida"], 17951)
-        self.assertEqual(t["saida"], "ERM-08 PTP CAM")
+        self.assertEqual((t["saida"], t["encap"]), ("wlan0wds33", 128433))
         self.assertEqual((t["sinal"], t["snr"], t["freq"]), (-89, 20, 5785))
         self.assertEqual(t["tipo"], "WIRELESS_PEER")
         pedidos = [m.taskOutputRequest.position for m in radio.pedidos
                    if m.HasField("taskOutputRequest")]
-        self.assertEqual(len(pedidos), 3)
+        self.assertEqual(len(pedidos), 3 + 3)   # 3 "ainda não" + 3 pedaços
+
+    def test_trace_em_mensagem_binaria_tambem_serve(self):
+        # O Common.proto declara a mensagem Trace; firmware que a devolva
+        # em vez do texto tem de dar o mesmo resultado.
+        radio = _RadioBCAPI(formato="proto")
+        t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertEqual((t["custo_caminho"], t["custo_saida"], t["encap"]),
+                         (17952, 17951, 128433))
+        self.assertEqual(t["saida"], "ERM-08 PTP CAM")
+
+    def test_saida_real_do_campo(self):
+        # Os bytes EXATOS que o rádio 10.188.99.4 devolveu em 26/09/2026.
+        import base64
+        b = base64.b64decode(
+            "H4sIAAAAAAAAA22MywqDMBREu/Yr7lIX1TyMxgtZFIvQRaELfyBoqoJVmwSkf9+H"
+            "m0ILw8DMHKbWtjMeTpfQRQhASUyljIsspjTkRRYF9QacD+WHIATfKrGosKIoSwiG"
+            "m7e6MeDnP2v48xjhYoxVMkV5xJdXBCXDXCTrqCeytk6QhDKZcg7N7LwqGBPQz8uW"
+            "Mi4YNL2eJjOqDNrBLaN+fDVXa+6KpTwHN3STHtU+ZWCdG5TgYLU3SshY7J6IMPIm"
+            "+AAAAA==")
+        t = rm.trace_de_bytes(b)
+        self.assertEqual(t["destino"], "10.188.96.11")
+        self.assertEqual((t["custo_caminho"], t["custo_saida"]), (9225, 6352))
+        self.assertEqual((t["saida"], t["encap"], t["mac"]),
+                         ("wlan0wds50", 128433, "84:8d:84:f0:82:75"))
+        self.assertEqual((t["canal"], t["freq"]), (6, 2437))
+        self.assertEqual((t["sinal"], t["snr"], t["taxa"]), (-42, 53, 58.5))
+
+    def test_hop_cost_e_display_channel_nao_se_confundem(self):
+        # "hop cost=" contém "cost=" e "display channel=" contém "channel=".
+        t = rm.trace_de_texto("imtrace to x (1.1.1.1):peer=a/wlan1/5 "
+                              "hop cost=100 cost=900 display channel=11 "
+                              "channel=6 freq=2437 signal=-70 rssi=25 rate=6.5")
+        self.assertEqual((t["custo_caminho"], t["custo_saida"]), (900, 100))
+        self.assertEqual(t["canal"], 6)
+
+    def test_texto_sem_custo_nao_vira_numero(self):
+        # O "sem rota" em texto não foi visto em campo. Sem custo na linha,
+        # não há medição — nunca um zero nem um sem-rota inventado.
+        self.assertIsNone(rm.trace_de_texto(
+            "Target IP(s):  10.188.96.11\nimtrace to ?: no route\x00"))
+        self.assertIsNone(rm.trace_de_texto("qualquer outra coisa"))
+
+    def test_custo_maximo_e_sem_rota_em_int32_e_uint32(self):
+        for v in (2147483647, 4294967295):
+            t = rm.trace_de_texto(f"imtrace to x (1.1.1.1):peer=a/wlan0/1 "
+                                  f"cost={v} hop cost={v}")
+            self.assertEqual(t["custo_caminho"], rm.CUSTO_SEM_ROTA)
+            self.assertIsNone(t["custo_saida"])
 
     def test_trace_recusado_diz_por_que(self):
         radio = _RadioBCAPI(recusa="permission denied for role co")
@@ -6295,7 +6375,10 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         return c, avisos
 
     def test_amostra_leva_o_enlace_de_saida_e_o_custo_do_caminho(self):
-        c, _ = self._rodar(_RadioBCAPI())
+        # O trace diz a saída por MAC/interface/encap; o nome vem do serial
+        # que a descoberta leu (encap = sufixo do serial).
+        malha = {"10.188.97.80": {"nome": "ERM-08 PTP CAM", "serial": 128433}}
+        c, _ = self._rodar(_RadioBCAPI(), malha=malha)
         self.assertTrue(c.amostras)
         a = c.amostras[0]
         self.assertEqual(a["custo_caminho"], 17952)
@@ -6307,6 +6390,11 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         # descoberta, não o IP que o parser devolveria.
         self.assertEqual(a["radio"], "CA-1006")
         self.assertGreater(c.trace_ok, 0)
+
+    def test_saida_sem_nome_conhecido_fica_com_a_interface(self):
+        # Como o MeshMapper grava (path.name = "wlan0wds33").
+        c, _ = self._rodar(_RadioBCAPI())
+        self.assertEqual(c.amostras[0]["servidor"], "wlan0wds33")
 
     def test_sem_rota_chega_como_sem_rota(self):
         c, _ = self._rodar(_RadioBCAPI(custo=2147483647))
@@ -6840,6 +6928,39 @@ class TestColetaAoVivo(unittest.TestCase):
                          "o 0 dBm ganhou a eleição do melhor sinal")
         self.assertFalse([v for v in c.peers if v["sinal"] == 0],
                          "vizinho sem signal virou 0 dBm")
+
+    def test_vizinho_ganha_nome_e_a_erb_e_reconhecida(self):
+        # O State.Peer não traz nome. Com o IP no lugar do nome, a eleição
+        # da melhor ERB/ERM — que reconhece infraestrutura PELO NOME —
+        # nunca achava nenhuma, e o mapa ao vivo saía com o melhor vizinho
+        # de qualquer tipo. Aqui o caminhão encostado (-45) é mais forte
+        # que a ERB (-70): o laudo tem de ficar com a ERB.
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None,
+                            malha={"10.0.0.2": {"nome": "CA-2", "serial": 2}})
+        d = {"sistema": {"gps_lat": -18.9, "gps_lon": -43.4, "gps_time": 1.0},
+             "radios": [{"freq": 5785, "canal": 157, "ruido": -95, "peers": [
+                 {"ip": "10.0.0.2", "sinal": -45, "snr": 50, "custo": 3000,
+                  "encap": 2},
+                 {"ip": "10.188.96.90", "sinal": -70, "snr": 25,
+                  "custo": 9000, "encap": 90}]}],
+             "_trace": None}
+        am, viz = c._amostra("10.0.0.1", d, 0.0)
+        self.assertEqual({v["nome"] for v in viz}, {"CA-2", "ERB-07"})
+        for v in viz:
+            v["ponto"] = 1
+        rm.cobertura_disponivel([am], viz)
+        self.assertEqual(am["servidor_cob"], "ERB-07")
+        self.assertEqual(am["sinal_cob"], -70)
+        self.assertTrue(am["cob_e_infra"])
+
+    def test_vizinho_so_com_encap_ganha_nome_pelo_serial(self):
+        # ipv4Address é opcional no State.Peer; o encap (sufixo do serial)
+        # sempre vem.
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None,
+                            malha={"10.188.97.80": {"nome": "ERM-08 PTP CAM",
+                                                    "serial": 128433}})
+        self.assertEqual(c._nome_vizinho(None, 128433), "ERM-08 PTP CAM")
+        self.assertIsNone(c._nome_vizinho("10.9.9.9", 1))
 
     def test_diagnostico_grava_o_arquivo_mesmo_sem_conseguir_autenticar(self):
         # A rajant-api chama o `ping` do sistema e não trata a falta dele:

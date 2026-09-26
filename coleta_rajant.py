@@ -48,12 +48,17 @@ MIN_RELEITURA_S = 1.0
 # Leituras simultâneas, cada uma para um rádio diferente; o que limita a
 # densidade do mapa é quantas cabem por segundo.
 #
-# ATENÇÃO: com a rajant-api 0.1.1 a consulta NÃO é enxuta. O filtro de
-# caminho não é parâmetro de `get_state()` — é outro método,
-# `get_state_filter()`, que aceita um caminho só —, então
-# `rm._get_state_filtrado` cai no State inteiro, configuração incluída. E
-# cada `get_state()` da biblioteca dispara um ping de sistema antes.
-LEITURAS_SIMULTANEAS = 24
+# A leitura é enxuta e inteira (ver `rm.estado_da_sessao`): só gps,
+# wireless e system, lida até o fim, sem ping. Conferido num rádio da mina
+# (10.188.99.4): 2307 bytes contra 9318 do State inteiro — o filtro no
+# formato "gps" funciona; "State.gps" e "state.gps" voltam vazios.
+#
+# 48 com o TRACE: em campo, uma leitura levou 233 ms e o trace 837 ms,
+# quase tudo esperando o rádio montar a saída. Cada rádio fica ~1,1 s por
+# leitura; com 24 trabalhadores e 40 caminhões, sobrava caminhão esperando
+# vez. Esperar não custa banda: são ~2,3 KB de State e uma dúzia de
+# mensagens curtas por leitura.
+LEITURAS_SIMULTANEAS = 48
 
 
 # ══════════════════════════════════════════════════════════════
@@ -155,7 +160,7 @@ class Coleta:
                  timeout_s=6,
                  cfg=None, nome=None, reencontro_s=60.0,
                  parado_s=INTERVALO_PARADO_S, aviso=print,
-                 trace_destino=rm.DESTINO_TRACE_PADRAO):
+                 trace_destino=rm.DESTINO_TRACE_PADRAO, malha=None):
         self.alvos    = {ip: (nomes or ip) for ip, nomes in dict(alvos).items()}
         self.role     = role
         self.senha    = senha
@@ -195,9 +200,38 @@ class Coleta:
         self.trace_ok      = 0
         self.trace_falhas  = 0
         self.trace_parado  = None   # motivo, quando o trace foi desligado
+        # NOME DOS VIZINHOS. O State.Peer não traz nome — só IP (opcional) e
+        # encapId, que é o sufixo numérico do serial. Sem isto o vizinho
+        # entrava com o IP no lugar do nome, e a eleição da melhor ERB/ERM,
+        # que reconhece infraestrutura PELO NOME (PADRAO_INFRA), nunca achava
+        # nenhuma: o mapa da coleta ao vivo saía com o melhor vizinho de
+        # qualquer tipo, caminhão incluído, rotulado de ERB/ERM.
+        # Fontes, da mais fraca para a mais forte: a malha conhecida
+        # embutida, a descoberta desta sessão (nome e serial de cada rádio
+        # que respondeu) e os equipamentos marcados.
+        self.nome_ip = dict(rm.REDE_CONHECIDA)
+        self.nome_encap = {}
+        for ip_m, v in (malha or {}).items():
+            n = (v or {}).get("nome")
+            if not n or n == ip_m:
+                continue
+            self.nome_ip[ip_m] = n
+            try:
+                if v.get("serial"):
+                    self.nome_encap[int(v["serial"])] = n
+            except (TypeError, ValueError):
+                pass
+        for ip_a, n in self.alvos.items():
+            if n and n != ip_a:
+                self.nome_ip[ip_a] = n
 
     def parar(self):
         self._parar.set()
+
+    def _nome_vizinho(self, ip=None, encap=None):
+        """Nome do vizinho pelo encap (serial) ou pelo IP; None se nenhum."""
+        return ((self.nome_encap.get(encap) if encap else None)
+                or (self.nome_ip.get(ip) if ip else None))
 
     # ── uma leitura ──────────────────────────────────────────
     def _ler(self, ip):
@@ -328,7 +362,8 @@ class Coleta:
                 sig, snr, custo, _ru = rm.limpar_enlace(
                     p.get("sinal"), p.get("snr"), p.get("custo"))
                 vizinhos.append({
-                    "nome": p.get("nome") or p.get("ip"),
+                    "nome": (self._nome_vizinho(p.get("ip"), p.get("encap"))
+                             or p.get("nome") or p.get("ip")),
                     "ip": p.get("ip"), "encap": p.get("encap"),
                     "sinal": sig, "snr": snr,
                     "custo": custo, "taxa": p.get("taxa") or None,
@@ -375,7 +410,15 @@ class Coleta:
                    "banda": (rm._norm_banda(tr["freq"]) if tr.get("freq")
                              else enl["banda"]),
                    "canal": tr.get("canal"),
-                   "servidor": tr.get("saida") or tr.get("mac"),
+                   # O trace dá o vizinho de saída por MAC/interface/encap. O
+                   # nome sai do encap (ou do IP do vizinho com esse encap);
+                   # sem nome conhecido, a interface — como o MeshMapper.
+                   "servidor": (self._nome_vizinho(
+                                    next((v.get("ip") for v in vizinhos
+                                          if tr.get("encap") and
+                                          v.get("encap") == tr.get("encap")),
+                                         None), tr.get("encap"))
+                                or tr.get("saida") or tr.get("mac")),
                    "interf": (radio_t or {}).get("interf_pct")}
             custo_caminho = tr.get("custo_caminho")
 
@@ -799,7 +842,8 @@ def main(argv=None):
     print(f"{len(alvos)} equipamento(s); coletando por {a.minutos:g} min")
     c = Coleta(alvos, role=a.role, senha=a.senha, porta=a.porta,
                passo_m=a.passo_m, aviso=print,
-               trace_destino=None if a.sem_trace else a.destino_trace)
+               trace_destino=None if a.sem_trace else a.destino_trace,
+               malha=achados)
     c.rodar(a.minutos)
     feitos = gravar_e_gerar(c, a.saida, aviso=print)
     print(f"\n{len(feitos)} arquivo(s) gerado(s).")

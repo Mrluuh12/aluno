@@ -526,7 +526,8 @@ def main():
                            porta=int(v_porta.get() or 2300), passo_m=passo,
                            aviso=lambda t: fila.put(("log", t)),
                            trace_destino=(v_dest.get().strip()
-                                          if v_trace.get() else None))
+                                          if v_trace.get() else None),
+                           malha=est["achados"])
             est["coleta"] = c
             b_ini.configure(state="disabled")
             b_par.configure(state="normal")

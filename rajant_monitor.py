@@ -11031,12 +11031,12 @@ _FILTRO_ESTADO = {"param": None}
 # inteiro de 150 rádios a cada 10 s é desperdício de banda na malha.
 #
 # CONFERIDO na rajant-api 0.1.1 (o pacote do PyPI, lido): `get_state()`
-# não recebe filtro nenhum, então a inspeção abaixo não acha parâmetro e
-# a coleta pede o State INTEIRO. O filtro existe no protocolo
-# (BCMessage.stateFilterPath, campo 601, repetido) e a biblioteca o
-# expõe num método à parte, `get_state_filter(caminho)`, que anexa UM
-# caminho só. O formato do caminho ("gps" ou outro) não está documentado
-# no .proto — não conferido contra rádio.
+# não recebe filtro nenhum, então a inspeção de `_get_state_filtrado` não
+# acha parâmetro e cai no State INTEIRO. O filtro existe no protocolo
+# (BCMessage.stateFilterPath, campo 601, repetido); a coleta o usa por
+# `estado_da_sessao`. Formato CONFERIDO num rádio da mina (10.188.99.4,
+# 26/09/2026): "gps" e "/gps" devolvem só os ramos pedidos (2307 bytes
+# contra 9318 do State inteiro); "State.gps" e "state.gps" voltam vazios.
 CAMINHOS_ESTADO = ("gps", "wireless", "system")
 
 
@@ -11088,8 +11088,9 @@ def _get_state_filtrado(bc):
 #
 #   · `get_message()` faz UM `recv(65535)` e interpreta o que veio. Pelo
 #     TLS, um recv devolve no máximo um registro (~16 KB); o State de um
-#     rádio com dezenas de vizinhos passa disso, e a leitura falha como
-#     "sem resposta" — sem erro nenhum que diga por quê.
+#     rádio com muitos vizinhos pode passar disso (o 10.188.99.4, com
+#     poucos, já tinha 19 KB descomprimidos e 9 KB na rede), e a leitura
+#     falha como "sem resposta" — sem erro nenhum que diga por quê.
 #   · `get_state()` faz um ping de sistema antes de CADA consulta.
 #   · não há filtro útil (get_state_filter anexa um caminho só) nem TRACE.
 #
@@ -11232,25 +11233,99 @@ def _descomprimir_saida(dados, compressao=None):
     return dados
 
 
+# A saída do TRACE, como um rádio de verdade a devolveu (10.188.99.4, papel
+# VIEW, 26/09/2026): TEXTO da ferramenta `imtrace` do firmware, em gzip,
+# sem `compression` nem `content` no TaskOutput:
+#
+#   Target IP(s):  10.188.96.11(396)
+#   Target MAC(s): 00:00:0C:9F:F1:8C
+#   imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)):peer=84:8D:84:F0:82:75/
+#     wlan0wds50/128433 cost=9225 hop cost=6352 channel=6 display channel=6
+#     freq=2437 signal=-42 rssi=53 rate=58.5
+#
+# Os mesmos campos do traceInfo.path do MeshMapper: `peer` é
+# MAC/interface/encap (o encap é o sufixo do serial do vizinho), `cost` o
+# do caminho, `hop cost` o do salto, `rssi` o SNR em dB.
+_RX_IMTRACE = {
+    "destino": re.compile(r"Target IP\(s\):\s*([0-9.]+)"),
+    "peer":    re.compile(r"\bpeer=(\S+)"),
+    "custo":   re.compile(r"(?<!hop )\bcost=(\d+)"),
+    "salto":   re.compile(r"\bhop cost=(\d+)"),
+    "canal":   re.compile(r"(?<!display )\bchannel=(\d+)"),
+    "freq":    re.compile(r"\bfreq=(\d+)"),
+    "sinal":   re.compile(r"\bsignal=(-?\d+)"),
+    "snr":     re.compile(r"\brssi=(-?\d+)"),
+    "taxa":    re.compile(r"\brate=([\d.]+)"),
+}
+
+
+def _custo_de_rota(v):
+    """0 não é custo de rota; o máximo de int32 OU de uint32 é sem rota."""
+    if v is None or v == 0:
+        return None
+    return CUSTO_SEM_ROTA if v >= CUSTO_SEM_ROTA else v
+
+
+def trace_de_texto(txt):
+    """O texto do `imtrace` → o dict de `_trace_para_dict`. None quando
+    não há linha de trace com custo — o formato de "sem rota" em texto não
+    foi visto em campo, e ausência de número não vira número."""
+    linha = next((l for l in txt.replace("\x00", "").splitlines()
+                  if l.strip().startswith("imtrace")), None)
+    if not linha:
+        return None
+    def achar(chave, conv, onde=linha):
+        m = _RX_IMTRACE[chave].search(onde)
+        return conv(m.group(1)) if m else None
+    custo = achar("custo", int)
+    if custo is None:
+        return None
+    mac = iface = encap = None
+    peer = achar("peer", str)
+    if peer:
+        partes = peer.split("/")
+        mac = partes[0] or None
+        iface = partes[1] if len(partes) > 1 else None
+        encap = int(partes[2]) if len(partes) > 2 and partes[2].isdigit() else None
+    salto = achar("salto", int)
+    sinal, snr = achar("sinal", int), achar("snr", int)
+    return {
+        "destino": achar("destino", str, txt),
+        "tipo": ("WIRELESS_PEER" if iface and iface.startswith("wlan")
+                 else iface),
+        "saida": iface, "mac": mac.lower() if mac else None, "encap": encap,
+        "custo_caminho": _custo_de_rota(custo),
+        "custo_saida": (None if _custo_de_rota(salto) in (None, CUSTO_SEM_ROTA)
+                        else salto),
+        "sinal": sinal or None, "snr": snr or None,
+        "taxa": achar("taxa", float),
+        "canal": achar("canal", int), "freq": achar("freq", int),
+    }
+
+
 def trace_de_bytes(dados, compressao=None):
-    """Interpreta a saída do TRACE como a mensagem `Trace` do Common.proto
-    — binária ou em texto. None quando não é um Trace com caminho."""
-    from rajant_api import Common_pb2
+    """Interpreta a saída do TRACE. Na ordem: o texto do `imtrace` (o que o
+    rádio devolve de fato), a mensagem `Trace` binária e a `Trace` em
+    text-format — as duas últimas pelo Common.proto, para firmware que as
+    use. Devolve o dict de `_trace_para_dict`, ou None."""
     dados = _descomprimir_saida(dados, compressao)
+    texto = dados.decode("utf-8", "replace")
+    if "imtrace" in texto:
+        return trace_de_texto(texto)
+    from rajant_api import Common_pb2
     t = Common_pb2.Trace()
     try:
         t.ParseFromString(dados)
         if t.HasField("path"):
-            return t
+            return _trace_para_dict(t)
     except Exception:
         pass
     try:
         from google.protobuf import text_format
         t = Common_pb2.Trace()
-        text_format.Parse(dados.decode("utf-8", "replace"), t,
-                          allow_unknown_field=True)
+        text_format.Parse(texto, t, allow_unknown_field=True)
         if t.HasField("path"):
-            return t
+            return _trace_para_dict(t)
     except Exception:
         pass
     return None
@@ -11269,7 +11344,8 @@ def _trace_para_dict(t):
         "tipo": tipo,
         "saida": (p.name or "").strip() or None,
         "mac": p.mac.hex(":") if p.mac else None,
-        "custo_caminho": custo or None,
+        "encap": p.encapid if p.HasField("encapid") else None,
+        "custo_caminho": _custo_de_rota(custo),
         "custo_saida": (None if salto is None or salto >= CUSTO_SEM_ROTA
                         else salto or None),
         "sinal": (p.signal or None) if p.HasField("signal") else None,
@@ -11280,14 +11356,15 @@ def _trace_para_dict(t):
     }
 
 
-def bc_trace(bc, destino, espera_s=2.0, registro=None):
+def bc_trace(bc, destino, espera_s=3.0, registro=None):
     """Por onde o rádio sai até `destino`, pelo TRACE do próprio rádio.
 
     Pelo Common.proto e pelo Message.proto: pede-se a tarefa em
     `runTask` (TaskCommand.TRACE, `arguments` = destino); o rádio responde
     em `runTaskResult` (com o id); a saída é baixada por
-    `taskOutputRequest`, em fragmentos até SUCCESS. O formato da saída não
-    é declarado — ver `trace_de_bytes`.
+    `taskOutputRequest`, em fragmentos até SUCCESS. A saída não é a
+    mensagem `Trace`: é o texto do `imtrace` em gzip — ver
+    `trace_de_texto`, conferido num rádio da mina.
 
     SÓ TRACE. A mesma mensagem pede REBOOT, ZEROIZE, CLEAR e KICK; a ação
     é uma constante aqui, nunca um parâmetro.
@@ -11310,7 +11387,12 @@ def bc_trace(bc, destino, espera_s=2.0, registro=None):
         raise TraceIndisponivel(res.description or "o rádio recusou a tarefa")
     tid = res.id if res.HasField("id") else None
 
+    # Em campo a saída ficou pronta em ~0,8 s, depois de 3 FAILED e 5
+    # UNAVAILABLE a cada ~90 ms. Esperar um pouco antes da primeira
+    # pergunta e perguntar a cada 100 ms dá o mesmo tempo com metade das
+    # mensagens na malha.
     prazo = time.monotonic() + espera_s
+    time.sleep(0.3)
     dados, pos, ultimo = b"", 0, None
     while True:
         def montar_saida(m, pos=pos):
@@ -11341,7 +11423,7 @@ def bc_trace(bc, destino, espera_s=2.0, registro=None):
             raise TraceIndisponivel(
                 "saída do trace indisponível: "
                 + type(o).Status.Name(o.status))
-        time.sleep(0.05)
+        time.sleep(0.1)
 
     compressao = (ultimo.output.compression
                   if ultimo is not None and ultimo.HasField("output")
@@ -11349,11 +11431,13 @@ def bc_trace(bc, destino, espera_s=2.0, registro=None):
     if registro is not None:
         import base64
         registro.append(("saída (base64)", base64.b64encode(dados).decode()))
+        registro.append(("saída (texto)", _descomprimir_saida(
+            dados, compressao).decode("utf-8", "replace").replace("\x00", "")))
     t = trace_de_bytes(dados, compressao)
     if t is None:
-        raise TraceIndisponivel("a saída do trace não é uma mensagem Trace")
-    _reg("Trace interpretado", t)
-    return _trace_para_dict(t)
+        raise TraceIndisponivel("a saída do trace não trouxe caminho com custo")
+    _reg("trace interpretado", "\n".join(f"{k}: {v}" for k, v in t.items()))
+    return t
 
 
 class CapturaGPS:

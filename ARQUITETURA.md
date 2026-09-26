@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 578, em 81 classes |
+| testes | 586, em 81 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 578 testes e as âncoras de seção (§26).
+segura isso são os 586 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -712,10 +712,30 @@ não). A ação é constante; nenhuma outra tarefa existe no código. A
 o `.proto` do repositório não tem — os mesmos campos do `traceInfo` do
 MeshMapper.
 
-Formato do filtro e da resposta do trace **não estão no .proto**: os
-testes usam um rádio simulado com as mensagens reais da biblioteca, e o
-`--testar-trace` grava a resposta de um rádio de verdade para fechar os
-dois.
+Formato do filtro e da resposta do trace **não estão no .proto**; foram
+fechados com o `--testar-trace` num rádio da mina (10.188.99.4, papel
+VIEW, 26/09/2026):
+
+- filtro: `"gps"` (e `"/gps"`) devolvem só os ramos pedidos — 2307 bytes
+  contra 9318; `"State.gps"` e `"state.gps"` voltam vazios;
+- TRACE: aceito com VIEW; a saída responde FAILED e UNAVAILABLE por
+  ~0,8 s e então SUCCESS. Não é a mensagem `Trace`: é o **texto** do
+  `imtrace` do firmware, em gzip, com `TaskOutput` sem `compression` nem
+  `content`. `trace_de_texto` o interpreta (`peer=MAC/interface/encap`,
+  `cost`, `hop cost`, `channel`, `freq`, `signal`, `rssi`, `rate`); a
+  `Trace` binária continua aceita, para firmware que a use.
+
+O rádio simulado dos testes responde como aquele rádio: texto em gzip,
+pronto depois de FAILED/UNAVAILABLE, entregue em pedaços espaçados.
+
+**Nome dos vizinhos na coleta.** `State.Peer` não tem nome. A coleta
+entrava o IP no lugar, e `cobertura_disponivel` — que reconhece infra por
+`PADRAO_INFRA` no NOME — nunca achava ERB/ERM: o `sinal_cob` da coleta ao
+vivo era o melhor vizinho de qualquer tipo. `Coleta(malha=...)` recebe o
+resultado da descoberta (nome e serial por IP) e resolve cada vizinho por
+encap (= sufixo do serial) ou por IP, com `REDE_CONHECIDA` de reserva. O
+vizinho de saída do trace ganha nome do mesmo jeito; sem nome conhecido,
+fica a interface (`wlan0wds50`), como no MeshMapper.
 
 **`survey_resumo`**: `mediana` é a mediana (o `med` é a média, e o
 semanal a rotula assim); `pior5` segue o sentido da grandeza — os 5%
