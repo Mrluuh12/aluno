@@ -8,7 +8,7 @@ de campo:
 
     python autoteste_survey.py
 
-A suíte completa (531 testes) fica no projeto principal; aqui o objetivo
+A suíte completa (552 testes) fica no projeto principal; aqui o objetivo
 é outro — provar que ESTA cópia, nesta máquina, gera o que promete.
 """
 import sys, io, zipfile, tempfile, shutil
@@ -120,20 +120,20 @@ def main():
 
         kmz = [f for f in feitos if f.suffix == ".kmz"]
         if kmz:
+            import re as _re
             z = zipfile.ZipFile(kmz[0])
             doc = z.read("doc.kml").decode()
-            checa("<GroundOverlay>" in doc, "KMZ tem o rastro de calor")
-            checa("<LatLonBox>" in doc, "o calor está georreferenciado")
-            pngs = [n for n in z.namelist() if n.endswith(".png")]
-            checa(bool(pngs), f"raster embutido ({len(pngs)})")
-            if pngs:
-                import matplotlib; matplotlib.use("Agg")
-                import matplotlib.image as mpimg
-                img = mpimg.imread(io.BytesIO(z.read(pngs[0])))
-                transp = (img[..., 3] < 0.02).mean()
-                checa(transp > 0.3,
-                      f"o calor só cobre onde passou ({transp*100:.0f}% "
-                      f"transparente)")
+            checa("<name>Trajeto" in doc and "<LineString>" in doc,
+                  "KMZ tem o trajeto colorido")
+            checa("<ScreenOverlay>" in doc, "legenda na tela do mapa")
+            # Toda cor de fita tem de ser uma faixa da legenda — e mais
+            # nenhuma. É a garantia de que a cor confere com a régua.
+            usadas = set(_re.findall(r"<styleUrl>#l([0-9A-F]{6})</styleUrl>",
+                                     doc))
+            legenda = {c for cp in rm.FAIXAS_KML.values() for _, c in cp}
+            checa(bool(usadas) and usadas <= legenda,
+                  f"cores do trajeto só da legenda ({len(usadas)} usadas)",
+                  str(sorted(usadas - legenda)))
 
         ppt = [f for f in feitos if f.suffix == ".pptx"]
         if ppt:

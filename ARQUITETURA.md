@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 531, em 77 classes |
+| testes | 552, em 78 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 531 testes e as âncoras de seção (§26).
+segura isso são os 552 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -584,7 +584,7 @@ As grandezas medidas e seus requisitos (Modular Mining):
 |---|---|---|---|---|---|
 | `sinal` | RSSI do enlace | dBm | −90 … −55 | > −75 | alto |
 | `snr` | SNR | dB | 5 … 45 | > 20 | alto |
-| `ruido` | Ruído | dBm | −100 … −70 | < −85 | baixo |
+| `ruido` | Ruído | dBm | −110 … −80 | < −95 *(derivado)* | baixo |
 | `rtt` | Latência | ms | 0 … 200 | < 100 | baixo |
 | `perda` | Perda | % | 0 … 10 | < 2 | baixo |
 | `interf` | Interferência | % | 0 … 60 | < 20 | baixo |
@@ -666,32 +666,51 @@ Com as posições dos fixos e o RSSI medido, ajusta `A` e `n` por banda e
 guarda `rms` e nº de amostras. Serve para estimar alcance — e a estimativa
 **nunca** é desenhada junto com a medição sem distinção visual (§23).
 
-### A cor do raster é a cor da legenda
+### Uma régua só, rastreável, com a fronteira certa
 
-O rastro de calor era pintado com um **gradiente contínuo** de 256 tons
-entre `ESCALAS[campo]["lo"]` e `["hi"]`, enquanto a legenda do balão e os
-pontos usavam as faixas discretas de `FAIXAS_KML`. **As duas réguas não
-coincidem em ponto nenhum.**
+`FAIXAS_KML` é a régua de cada grandeza, e **tudo** pinta por ela: a fita
+do trajeto, os pontos, o calor opcional, a legenda na tela do KMZ, o balão
+do documento, o slide de Metodologia, a barra de escala dos slides de
+grandeza e o gráfico de distribuição. Rótulos, cores e classes saem de
+`_faixas_rotuladas()`; a classificação, de `cor_da_leitura()`.
 
-Um pixel de −78 dBm caía em 34% do gradiente e saía laranja; a legenda
-diz que −80 a −75 é vermelho. Quem conferisse cor contra legenda
-encontrava outra coisa — e num laudo de aprovação isso basta para
-invalidar a leitura.
+**Origem dos valores** (em `FONTE_FAIXAS`, impressa no rodapé da legenda):
 
-`_png_calor(..., faixas=FAIXAS_KML[campo])` pinta em **degraus**, com
-exatamente as cores da legenda. Raster, pontos, linhas e legenda passam a
-ter uma régua só.
+| grandeza | faixas | fonte |
+|---|---|---|
+| RSSI | −90 · −80 · **−75** · −70 · −67 | MetaGeek/Oscium; −75 é o requisito Modular |
+| SNR | 20 · 30 | oficial Rajant: `goodRSSI`/`greatRSSI` do `data.json` do MeshMapper |
+| ruído | −105 · −95 | derivado: cor do SNR que −75 dBm teria sobre aquele ruído |
 
-A vetorização precisa casar com `_bucket_cor()`, que usa `v < lim` com
-`<` **estrito**: o equivalente é `np.searchsorted(..., side="right")`.
-Com `"left"`, o valor exatamente igual a um limite cai na faixa de baixo
-e cada fronteira vira uma linha de cor errada no mapa. Há teste para os
-sete limites.
+Cores: `FF0000`, `F26A00`, `3EAD30` são as chapadas dos `LineStyle` do
+`doc.kml` do MeshMapper; `DD9F17` e `B70404`, os tons dos alfinetes dele;
+`5C0000` é o único tom próprio (o vermelho Rajant escurecido).
 
-**A régua em si** segue a prática dos surveys comerciais e o requisito do
-contrato: cortes em −85, −80, **−75 (requisito Modular)**, −70, −67, −60
-e −50 dBm. O −67 é o limiar clássico para voz e vídeo; o −70, para dados.
-SNR corta em 10, 15, 20 (requisito), 25, 30 e 40 dB.
+O MeshMapper não classifica o Signal em dBm — no balão dele o valor sai sem
+cor, conferido em 11.216 células. Daí a convenção MetaGeek para o RSSI.
+
+**A fronteira exata.** O rádio reporta inteiro (int32 no `State.proto`),
+então o valor exato de cada limite é uma leitura comum. Cada limite tem um
+lado:
+
+- o do **requisito** sai do operador em `REQUISITOS`/`limite_de`: em `>`
+  (RSSI > −75, SNR > 20) o valor exato é reprovado e fica na faixa de baixo;
+- os demais seguem a fonte: são mínimos atingidos na igualdade (−67 já é
+  "muito bom", SNR 30 já é "great"), exceto −90, que na MetaGeek já é
+  "unusable" (`_CONVENCAO_NA_FAIXA_DE_BAIXO`).
+
+`limites_na_faixa_de_baixo(campo)` junta os dois; `_faixa_idx`,
+`_png_calor(na_de_baixo=...)` e `distribuicao` usam o mesmo conjunto. Há
+teste percorrendo todos os inteiros de cada grandeza: **nenhuma faixa
+contém aprovado e reprovado**, e cada rótulo lista exatamente os inteiros
+que a faixa pinta.
+
+Antes, com a faixa sempre `[a, b)`, o −75 caía no laranja de "atende"
+enquanto o Sumário e a pasta Fora do requisito o contavam como reprovado.
+
+**Pendência:** SNR 20 exato. O requisito está escrito "> 20" e o
+MeshMapper pinta 20 como "good". Se a Modular for "≥ 20", troca-se o
+operador e cor e contagem mudam juntas — há teste para isso.
 
 ### A pegada de cada repetidora
 
@@ -790,9 +809,14 @@ duas pontas: é ela que limita o enlace e decide se falta rádio ali.
 
 ## 12. Survey: o mapa de calor
 
-A rota sai como **raster georreferenciado** (`GroundOverlay`), não como
-linha. Cada amostra pinta um núcleo de raio limitado à sua volta; fora dele,
-transparente.
+**Opcional desde que o rastro virou a fita do trajeto** (§ "Estrutura do
+arquivo" e "Uma régua só"): só sai com `kmz_com_calor = true`, e desligado
+no painel. Com amostras a 60–80 m e raio de 25 m, o calor saía em bolhas
+soltas no mapa do cliente — é um limite do método, descrito abaixo, e a
+fita não o tem. O que segue descreve o calor quando pedido.
+
+O calor é um **raster georreferenciado** (`GroundOverlay`). Cada amostra
+pinta um núcleo de raio limitado à sua volta; fora dele, transparente.
 
 **Isso não é superfície de cobertura.** Cobertura interpola valor sobre
 terreno onde ninguém passou — afirma sinal em lugar não medido. Há teste
@@ -868,25 +892,26 @@ melhor" (rtt, perda, interferência, ruído).
 
 ```
 doc.kml
-  ├── Estilos (um por cor usada — 40 passos de gradiente)
+  ├── Estilos: l<cor> (fita, opaca, 7 px) por faixa · lcontorno · q<cor> (pontos usados)
   ├── [BreadCrumbs]        (opcional, kmz_com_equipamentos)
   ├── Aba: RSSI            ← visível
-  │     ├── GroundOverlay "Calor — RSSI"
-  │     ├── [Rotas]        (opcional, kmz_com_rotas)
-  │     ├── Medições
-  │     └── Fora do requisito
+  │     ├── Trajeto        todos os contornos, depois todas as fitas, depois os pontos isolados
+  │     ├── ScreenOverlay "Legenda"   (files/legenda_<campo>.png)
+  │     ├── [GroundOverlay "Calor"]   (opcional, kmz_com_calor, desligado)
+  │     ├── Medições       (desligada)
+  │     └── Fora do requisito (desligada)
   ├── Aba: SNR             ← invisível
   ├── Aba: Ruído / Latência / Perda / Interferência
-files/calor_<campo>.png
+files/legenda_<campo>.png
 ```
 
-Uma aba por grandeza, **só a primeira visível**: ligadas juntas, os
-overlays se cobrem e nada se lê.
+Uma aba por grandeza, **só a primeira visível**: ligadas juntas, as fitas
+se sobrepõem e nada se lê.
 
-**Cor:** gradiente contínuo de 40 passos (`PASSOS_COR`), vermelho → verde,
-invertido para as grandezas "menor é melhor". As oito faixas fixas antigas
-davam degrau — duas leituras de −74,9 e −75,1 dBm saíam em cores diferentes
-e o traçado virava confete.
+**Fita:** `_fita_por_amostra()` dá a cada amostra o caminho entre os pontos
+médios com as vizinhas; trechos consecutivos na mesma faixa viram uma
+polilinha. `_trechos_continuos()` parte o trajeto nos buracos de medição;
+`_amostras_do_rastro()` tira quem não se deslocou.
 
 **Estilos órfãos:** só são emitidos os estilos das cores efetivamente
 usadas, e há teste para estilo declarado e não referenciado (e vice-versa —
@@ -1126,7 +1151,7 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 | `painel_html` | caminho do painel próprio |
 | `survey_no_semanal` | `true` volta ao deck único |
 | `identidade_anglo` | `false` mantém o visual original do template |
-| `kmz_com_rotas` | `true` acrescenta a linha ligando amostras |
+| `kmz_com_calor` | `true` acrescenta o calor, desligado no painel |
 | `kmz_com_equipamentos` | `true` devolve os alfinetes dos BCs |
 | `imagens_no_ppt` | `false` = molduras vazias para colar print |
 | `zonas_grade_m` | lado da célula na agregação |

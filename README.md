@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 531 testes
+python3 teste_parser.py                        # 552 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -23,7 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
-| `teste_parser.py` | 531 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 552 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -73,7 +73,7 @@ fundo_local  = orto.png                     # alternativa; exige fundo_bbox
 fundo_bbox   = -27.7250,-27.7400,-50.0580,-50.0760
 zonas_grade_m = 50
 imagens_no_ppt = false             # false = molduras vazias p/ colar print
-kmz_com_rotas        = false       # true = também a linha ligando amostras
+kmz_com_calor        = false       # true = também o calor, desligado
 kmz_com_equipamentos = false       # true = devolve os alfinetes dos BCs
 ```
 
@@ -92,7 +92,7 @@ O projeto tem **dois executáveis**, com públicos e dependências distintos:
 survey_meshmapper Meshmapper_2026-09-10_12-59-11.kmz
 ```
 
-Saem três arquivos: o **KMZ** com o rastro de calor, o **PPT** na
+Saem três arquivos: o **KMZ** com o trajeto colorido, o **PPT** na
 identidade Anglo e o **Excel** — este com uma aba que só existe aqui, a de
 todos os vizinhos visíveis ponto a ponto.
 
@@ -182,71 +182,60 @@ como *"medi e deu tudo fora"*, que é o oposto de *"não medi"*.
 - **Ponto sem enlace** vem com tipo `N/A` e custo 2147483647 (INT_MAX).
   Vira amostra *sem sinal*, não amostra com sinal ruim.
 
-## O KMZ: rastro em calor, não linha
+## O KMZ: o trajeto, como o MeshMapper desenha
 
-A rota sai como **mapa de calor**, e só onde o rádio passou: cada amostra
-pinta um núcleo de raio limitado à sua volta e o resto do raster fica
-transparente.
+O rastro é uma **fita contínua** por onde o rádio passou, colorida pela
+faixa da legenda. Era calor — um núcleo de raio fixo por amostra —, e com
+amostras a 60–80 m (o espaçamento que a coleta ao vivo produzia) o mapa
+saía em bolhas soltas e borradas, com o chão avermelhado da cava tingindo
+a cor pela transparência. O MeshMapper da Rajant desenha linha; o laudo
+passou a desenhar também.
 
-Isso **não** é a superfície de cobertura que foi retirada a pedido. Aquela
-interpolava valor sobre terreno onde ninguém passou — afirmava sinal em
-lugar não medido. Esta só pinta o que foi medido, e há teste exigindo que a
-maior parte da imagem continue transparente. A diferença entre *"medi aqui
-e deu isto"* e *"acho que lá deve dar aquilo"* é o que separa um laudo de
-um chute.
-
-**Só entra quem andou.** Rádio parado dá dezenas de amostras no mesmo ponto:
-virava uma bola isolada no mapa e, como BC fixo enxerga o vizinho de perto,
-saía verde. Eram essas as bolas espalhadas e desconectadas — e boa parte do
-verde que não batia com a realidade da mina.
-
-O raio sai do **espaçamento real das amostras** (0,9×, entre 25 e 150 m).
-Aqui há um limite físico, não de desenho: **com amostras a 200 m não existe
-faixa estreita e contínua**. Ou saem contas separadas, ou sai um borrão
-largo afirmando medição a centenas de metros da estrada. O jeito de ter
-rastro fino *e* contínuo é baixar o intervalo — a 1 s são ~11 m entre
-amostras e o raio cai para o piso.
-
-A opacidade vem do núcleo **mais forte** que cobre o pixel, não da soma
-deles: pela soma, um equipamento parado ficava sólido e ainda puxava a
-referência para cima, apagando o rastro de quem andou.
-
-### Cada pixel mostra uma leitura real
-
-O valor do pixel é o da **amostra mais próxima** — não uma média.
+**Cada trecho mostra uma leitura real.** A amostra é dona do caminho até
+o ponto médio com a vizinha: a cor troca no meio entre duas leituras, e
+nenhum trecho mostra média nem cor interpolada. É a mesma regra que o
+calor usava ("vale a amostra mais próxima"), levada para a linha.
 
 Isso foi decidido medindo, não por gosto. No mesmo trajeto de um arquivo
 real:
 
-| regra | % da imagem fora do requisito |
+| regra | % fora do requisito |
 |---|---|
 | amostras cruas (referência) | 81,1% *(estatística de tempo)* |
-| **vizinho mais próximo** | **92,1%** *(estatística de área)* |
+| **leitura mais próxima** | **92,1%** *(estatística de área)* |
 | média ponderada | 100,0% |
 
 A média não escondia problema: ela **apagava o que era bom**. As poucas
-leituras de −45 dBm sumiam ao serem promediadas com as vizinhas ruins, e
-o mapa dizia que 100% do trajeto reprovava quando as medições diziam 81%.
+leituras de −45 dBm sumiam ao serem promediadas com as vizinhas ruins.
 
-> Área e tempo não são comparáveis: veículo parado gera muitas amostras
-> num ponto só, e trecho percorrido rápido cobre área com poucas
-> amostras. Os dois números respondem perguntas diferentes.
+**A fita parte nos buracos de medição** — tempo acima de 3× a mediana do
+próprio trajeto (piso 30 s) ou salto de posição acima de 250 m. Era a reta
+cortando a cava que tinha tirado a linha do padrão. Leitura isolada entre
+dois buracos sai como ponto: sem linha a traçar, mas é medição.
 
-**Passar duas vezes no mesmo lugar:** vale a pior das leituras. A operação
-enfrenta as duas, e é a ruim que para o caminhão. O empate é aferido na
-**resolução da grade** — com tolerância maior, ele disparava entre
-amostras consecutivas e o mapa inteiro pendia para o lado ruim (95,8%
-contra 92,1%), o que não é ser conservador, é distorcer.
+**Só entra quem andou.** Rádio parado dá dezenas de amostras no mesmo
+ponto: vira um rabisco de GPS verde, porque BC fixo enxerga o vizinho de
+perto.
 
-A linha continua disponível em `kmz_com_rotas = true`, e quando ligada ela
-é **partida nos buracos de medição** — o limiar vem da mediana do próprio
-survey, não de número mágico. Ligar duas amostras distantes é afirmar que
-o veículo passou pela reta entre elas; com amostragem espaçada isso virava
-aresta reta cortando a cava.
+**Opaca, com contorno escuro por baixo.** Todos os contornos vão antes de
+todas as cores: com um contorno por veículo intercalado, o de um cobria a
+cor do outro no cruzamento de pistas.
 
-> Detalhe que custou depuração: o contorno escuro da rota era **uma linha
-> por trajeto**. Mesmo quebrando os segmentos coloridos, ele sozinho
-> redesenhava a reta que a quebra tinha acabado de tirar.
+**A legenda vai na tela**, em cada aba, gerada das mesmas faixas que
+pintam a linha, com a fonte da régua no rodapé. O print colado no slide
+leva a própria régua.
+
+O calor continua disponível, desligado: `kmz_com_calor = true`.
+
+### A régua de cores
+
+Cores do Rajant MeshMapper; faixas de RSSI da convenção MetaGeek/Oscium
+mais o −75 Modular; SNR pela régua oficial da Rajant (20/30); ruído
+derivado das duas. Tabelas e fontes em `LEIAME_SURVEY.md`.
+
+O rádio reporta inteiro e o requisito é estrito (RSSI **> −75**): o −75
+exato é reprovado e sai vermelho. Cada faixa contém só aprovados ou só
+reprovados — há teste percorrendo todos os inteiros de cada grandeza.
 
 ## Captura contínua
 
@@ -467,7 +456,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 531 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 552 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

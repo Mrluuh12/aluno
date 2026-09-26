@@ -473,40 +473,59 @@ se empilham no mesmo lugar e o mapa não diz nada.
 
 ### Como o mapa é desenhado
 
-A rota é a leitura: **cada medição pinta o seu trecho** com a cor exata do valor
-na escala, num gradiente contínuo de 40 passos. Duas amostras de −74,9 e
-−75,1 dBm ficam praticamente na mesma cor, como devem — com faixas fixas elas
-caíam em cores diferentes e o traçado virava confete.
+O rastro é uma **fita contínua** por onde o rádio passou, como o MeshMapper
+da Rajant desenha. Cada amostra é dona do caminho até o ponto médio com a
+vizinha: qualquer ponto da linha mostra a **leitura real mais próxima**, sem
+média e sem cor interpolada. Trechos vizinhos na mesma faixa viram uma
+polilinha só.
 
-O ponto de medição usa **o mesmo gradiente** da linha: ponto e rota discordarem
-de cor no mesmo lugar seria confuso.
+A fita **parte nos buracos de medição** (tempo acima de 3× a mediana do
+trajeto, piso 30 s, ou salto acima de 250 m) em vez de traçar reta por onde
+ninguém passou. Leitura isolada entre dois buracos sai como ponto.
 
-A linha leva um **contorno escuro discreto** por baixo, que a mantém legível
-sobre satélite claro e escuro sem virar malha preta onde uma dezena de
-equipamentos cruza a mesma pista. Início e fim de cada trajeto vêm marcados.
+A linha é **opaca**, com contorno escuro por baixo. Opaca porque, com
+transparência, o chão avermelhado da cava tingia o verde e a cor vista
+deixava de ser a da faixa. Todos os contornos vão antes de todas as cores,
+para o contorno de um veículo não cobrir a cor de outro no cruzamento.
+
+O ponto de medição usa **a mesma faixa** da linha.
 
 O KMZ tem **uma pasta por grandeza** e só a primeira — o RSSI — nasce
-visível: ligadas juntas, os pontos de todas se empilham no mesmo lugar e
-o mapa não diz nada. Dentro de cada uma:
+visível. Dentro de cada uma:
 
 | camada | estado inicial |
 |---|---|
-| **Calor** (o rastro) | ligada |
+| **Trajeto** (a fita) | ligada |
+| **Legenda** (na tela) | ligada |
+| Medições (pontos com balão) | desligada — com milhares, cobrem a fita |
 | Fora do requisito | desligada — ligada, cobre os pontos bons |
-
-A **linha** do trajeto vem desligada: era ela que produzia arestas retas
-ligando pontos por onde ninguém passou. Quem quiser o traço cru liga em
-`[relatorio] kmz_com_rotas = true`.
+| Calor | só com `[relatorio] kmz_com_calor = true`, desligado |
 
 A pasta **Zonas-problema** saiu do laudo de survey — ver "Diagnóstico e
-conclusões", adiante.
+conclusões", acima.
 
 ### Cores
 
-A escala do RSSI segue a convenção dos survey comerciais (Ekahau, NetSpot):
-faixa útil de **−90 a −45 dBm**, gradiente vermelho→verde, com os cortes de
-qualidade em −50 / −60 / −67 / −70 / −80 dBm. O −75 do requisito Modular ganha
-faixa própria, para aprovado e reprovado não dividirem a mesma cor.
+Uma régua por grandeza, rastreável, impressa no rodapé da legenda do mapa:
+
+- **cores** do Rajant MeshMapper (`FF0000`, `F26A00`, `3EAD30`, e os tons
+  `DD9F17` e `B70404` dos alfinetes dele);
+- **RSSI**: convenção MetaGeek/Oscium (−90, −80, −70, −67) mais o −75 do
+  requisito Modular;
+- **SNR**: régua oficial da Rajant, `goodRSSI = 20` e `greatRSSI = 30` do
+  `data.json` do MeshMapper;
+- **ruído**: derivado — a cor do SNR que um sinal de −75 dBm teria sobre
+  aquele ruído.
+
+Tabelas completas em `LEIAME_SURVEY.md`. A barra de escala dos slides de
+cada grandeza é desenhada das **mesmas faixas**, com o intervalo de cada uma
+e o operador real do requisito.
+
+**A fronteira exata.** O rádio reporta inteiro e os requisitos são estritos:
+RSSI −75 e SNR 20 exatos são reprovados e saem vermelhos. Cada faixa contém
+só aprovados ou só reprovados, e o lado de cada limite sai do operador do
+requisito (`limites_na_faixa_de_baixo`) — trocar `>` por `>=` em
+`REQUISITOS` muda a cor junto com a contagem.
 
 O PPT, por padrão, sai com **molduras vazias** em vez das imagens geradas. Cada
 moldura diz qual arquivo abrir e qual camada ligar:

@@ -593,10 +593,13 @@ def main():
         if c and c.inicio:
             s = c.status()
             passo = f"{s['passo_m']:g} m" if s["passo_m"] else "—"
+            lei = (f"{s['leitura_ms']} ms/leitura"
+                   if s.get("leitura_ms") is not None else "")
             v_stat.set(
                 f"{int(s['duracao_s'])//60:02d}:{int(s['duracao_s'])%60:02d}"
                 f"   {s['amostras']} amostras   {s['equipamentos']} equipamentos"
-                f"   {s['leituras_s']:.1f} leituras/s   passo real {passo}"
+                f"   {s['leituras_s']:.1f} leituras/s   {lei}"
+                f"   passo real {passo}"
                 f"   {s['repetidos']} posições repetidas   {s['falhas']} falhas")
         jan.after(300, bombear)
 

@@ -1,6 +1,6 @@
 # Site Survey — Rajant
 
-Gera os KMZ com rastro de calor, o PPT na identidade Anglo e o Excel.
+Gera os KMZ com o trajeto colorido, o PPT na identidade Anglo e o Excel.
 
 **Duplo clique** no `site_survey.exe`. A janela tem duas abas:
 
@@ -21,6 +21,26 @@ survey_meshmapper *.kmz --separado          # um relatório por arquivo
 coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios
 ```
 
+## Coleta ao vivo: densidade de leituras
+
+O que se escolhe na tela é o **passo em metros** entre leituras do mesmo
+equipamento — padrão **10 m**, a densidade do MeshMapper (1 leitura por
+segundo a ~40 km/h). Parado, o rádio é lido a cada 10 s, só para
+perceber quando sair.
+
+Até a versão anterior o espaçamento real ficava em 60–80 m com o alvo
+pedindo 15 m. Três causas, todas corrigidas:
+
+| causa | efeito | agora |
+|---|---|---|
+| leitura em **lotes**: esperava o rádio mais lento do lote | um rádio fora de alcance travava todos por até 6 s — 67 m de caminhão | 24 leituras independentes; cada uma já pega o próximo rádio |
+| `gpsVel` é opcional no `Gps.proto` | sem velocidade, o caminhão caía no ritmo de parado (30 s) | velocidade estimada pelo próprio deslocamento |
+| parado lido a cada 30 s | até 300 m sem leitura na arrancada | 10 s |
+
+A linha de status mostra **ms/leitura** ao lado do **passo real**. Se o
+passo real ficar acima do pedido com leitura lenta, o gargalo é a rede
+até os rádios, não a ferramenta.
+
 ## Entradas aceitas
 
 | arquivo | observação |
@@ -33,7 +53,7 @@ coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios
 
 | arquivo | o que tem |
 |---|---|
-| `Survey_*_24GHz.kmz` | rastro de calor de 2,4 GHz, uma aba por grandeza |
+| `Survey_*_24GHz.kmz` | trajeto de 2,4 GHz, uma aba por grandeza, com a legenda na tela |
 | `Survey_*_58GHz.kmz` | idem, 5,8 GHz |
 | `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, uma página por grandeza/banda e duas páginas em branco para diagnóstico e conclusões |
 | `Survey_*.xlsx` | origens, resumo, por grandeza e amostras |
@@ -76,22 +96,83 @@ Quanto o enlace escolhido deixou na mesa é a coluna *Δ não usado (dB)* do
 Excel. Vale conferi-la: delta grande com cobertura boa não é falta de
 rádio, é escolha de caminho, e repetidora nova não resolveria.
 
-**A cor do mapa é exatamente a da legenda.** O rastro é pintado em
-degraus por faixa, não em gradiente contínuo: um pixel de −78 dBm sai com
-a mesma cor que a legenda mostra para a faixa −80 a −75. Antes o raster
-interpolava 256 tons entre −90 e −55, e cor conferida contra legenda dava
-outra coisa.
+## O mapa: trajeto contínuo, como o MeshMapper
 
-| faixa | leitura |
-|---|---|
-| acima de −50 dBm | excelente |
-| −60 a −50 | muito bom |
-| −67 a −60 | bom — limiar clássico de voz e vídeo |
-| −70 a −67 | aceitável |
-| **−75 a −70** | **limite do requisito Modular** |
-| −80 a −75 | fraco |
-| −85 a −80 | muito fraco |
-| abaixo de −85 | inutilizável |
+O rastro é uma **fita contínua** por onde o rádio passou, como o
+MeshMapper da Rajant desenha — não mais bolhas de calor. Com amostras
+espaçadas, o calor de raio fixo saía em bolhas soltas e borradas, com o
+chão da cava tingindo a cor pela transparência.
+
+- **Cada trecho mostra a leitura real mais próxima.** A amostra é dona do
+  caminho até o ponto médio com a vizinha; nenhum trecho mostra média nem
+  cor interpolada entre duas leituras.
+- **A fita parte onde houve buraco** de medição (tempo ou salto de
+  posição), em vez de traçar uma reta por onde ninguém passou.
+- **Opaca, com contorno escuro por baixo**: a cor vista é a cor da faixa.
+- **A legenda vai na tela**, dentro de cada aba. O print do Google Earth
+  que vai para o slide leva junto a régua com que foi pintado.
+
+O calor continua disponível, desligado: `[relatorio] kmz_com_calor = true`.
+
+## A régua de cores: de onde vem cada valor
+
+Nada é inventado; a fonte de cada régua vai impressa no rodapé da legenda.
+
+**Cores** — as oficiais do Rajant MeshMapper, lidas do `doc.kml` que o
+BC|Commander 11.29.1 gerou na mina: `FF0000` (poor), `F26A00` (good),
+`3EAD30` (great). O amarelo `DD9F17` e o vermelho-escuro `B70404` são os
+tons dos alfinetes do mesmo MeshMapper. O `5C0000` da pior faixa é o único
+tom que não vem da Rajant: o vermelho dela escurecido.
+
+**RSSI (dBm)** — o MeshMapper **não** classifica o Signal: no balão dele o
+dBm sai sem cor (conferido em 11.216 células). A régua é a convenção de
+Wi-Fi mais citada, MetaGeek/Oscium (−67 muito bom, mínimo para voz e
+vídeo, a mesma borda de célula do guia de site survey da Cisco; −70 ok;
+−80 conectividade básica; −90 inutilizável), mais o −75 do requisito
+Modular.
+
+| RSSI (dBm) | cor | leitura |
+|---|---|---|
+| ≥ −67 | verde `3EAD30` | muito bom |
+| −70 a −68 | amarelo `DD9F17` | ok |
+| −74 a −71 | laranja `F26A00` | atende o requisito |
+| **−80 a −75** | vermelho `FF0000` | **reprovado** |
+| −89 a −81 | `B70404` | abaixo da conectividade básica |
+| ≤ −90 | `5C0000` | inutilizável |
+
+**SNR (dB)** — a régua **oficial da Rajant**, gravada pelo MeshMapper no
+`data.json` (`goodRSSI = 20`, `greatRSSI = 30`; no vocabulário Rajant
+"RSSI" é o SNR em dB) e conferida célula a célula nos seus arquivos.
+
+| SNR (dB) | cor | leitura |
+|---|---|---|
+| ≥ 30 | verde `3EAD30` | ótimo |
+| 21 a 29 | laranja `F26A00` | bom |
+| ≤ 20 | vermelho `FF0000` | ruim |
+
+**Ruído (dBm)** — não existe régua oficial. É **derivado** das duas acima:
+um sinal no mínimo Modular (−75 dBm) sobre um ruído N chega com
+SNR = −75 − N, e leva a cor desse SNR. O corte antigo, −85, era incoerente
+com os próprios requisitos: −75 sobre −85 é SNR 10.
+
+| Ruído (dBm) | cor | um sinal de −75 dBm chegaria com |
+|---|---|---|
+| ≤ −105 | verde | SNR ≥ 30 |
+| −104 a −96 | laranja | SNR 21 a 29 |
+| ≥ −95 | vermelho | SNR ≤ 20 |
+
+### A fronteira exata
+
+O rádio reporta dBm e dB **inteiros**: −75 exato é uma leitura comum. O
+requisito é RSSI **> −75**, então −75 é reprovado — e sai vermelho. Antes
+ele caía no laranja de "atende" enquanto o Sumário o contava como
+reprovado. Agora cada faixa contém só aprovados ou só reprovados, e a
+legenda escreve o intervalo exato em inteiros.
+
+Um ponto a confirmar com a Modular: **SNR 20 exato**. O código segue o
+requisito como está escrito, "> 20", e pinta 20 de vermelho; o MeshMapper
+da Rajant considera 20 "good". Se o documento da Modular disser "≥ 20",
+basta trocar o operador em `REQUISITOS` e a cor muda junto com a contagem.
 
 O PPT traz um slide de **Metodologia** logo após o sumário: ficha técnica
 do levantamento — instrumento, número de equipamentos e amostras, a
@@ -141,10 +222,10 @@ arquivo, e entrega o produto certo para cada uma.
 | | veículo andando | MeshMapper ligado numa repetidora |
 |---|---|---|
 | o que o arquivo é | um **trajeto**: cada ponto é um lugar | uma **janela de tempo** num lugar só |
-| produto | rastro de calor + PPT + Excel | censo de vizinhos + pino no mapa |
+| produto | trajeto colorido + PPT + Excel | censo de vizinhos + pino no mapa |
 | pergunta que responde | como está a cobertura **nesta rota** | quem fala com **este rádio** e como |
 
-Captura parada **não vira rastro de calor**. Sairia uma mancha de um
+Captura parada **não vira trajeto**. Sairia uma mancha de um
 pixel pintada com a escala de área — parece um mapa e não é. No lugar
 dela vai o censo: uma linha por vizinho, com RSSI, SNR, banda e
 **presença** (em que fração dos pontos aquele vizinho esteve visível).

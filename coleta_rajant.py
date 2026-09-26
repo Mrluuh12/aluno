@@ -31,13 +31,24 @@ TITULO = "Coleta Rajant — Site Survey"
 
 # Alvo de espaçamento, em metros, entre amostras do MESMO equipamento.
 # É o que o usuário controla, em vez de segundos: o que o mapa precisa é
-# densidade no espaço. Um caminhão a 40 km/h percorre 15 m em 1,35 s;
-# parado, não gasta leitura nenhuma.
-PASSO_M_PADRAO = 15.0
+# densidade no espaço. 10 m é a densidade do MeshMapper — uma leitura por
+# segundo a ~40 km/h. Parado, não gasta leitura nenhuma.
+PASSO_M_PADRAO = 10.0
 
-# Rádio parado ainda é lido de vez em quando, só para confirmar que
-# continua parado e para o censo de vizinhos dele seguir vivo.
-INTERVALO_PARADO_S = 30.0
+# Rádio parado ainda é lido de vez em quando: para confirmar que continua
+# parado e, principalmente, para perceber quando SAIU. Com 30 s, um
+# caminhão que arrancava rodava até 300 m antes da primeira leitura em
+# movimento — um buraco no começo de cada viagem.
+INTERVALO_PARADO_S = 10.0
+
+# O GPS do rádio atualiza ~1 vez por segundo. Ler de novo antes disso
+# devolve a mesma posição, que é descartada — leitura gasta à toa.
+MIN_RELEITURA_S = 1.0
+
+# Leituras simultâneas. A consulta é enxuta (só gps, wireless e system) e
+# cada uma vai para um rádio diferente; o que limita a densidade do mapa
+# é quantas cabem por segundo.
+LEITURAS_SIMULTANEAS = 24
 
 
 # ══════════════════════════════════════════════════════════════
@@ -55,23 +66,53 @@ INTERVALO_PARADO_S = 30.0
 class Agenda:
     """Decide quem ler agora, por distância percorrida e não por relógio."""
 
-    def __init__(self, passo_m=PASSO_M_PADRAO, parado_s=INTERVALO_PARADO_S):
+    def __init__(self, passo_m=PASSO_M_PADRAO, parado_s=INTERVALO_PARADO_S,
+                 min_releitura_s=MIN_RELEITURA_S):
         self.passo_m  = float(passo_m)
         self.parado_s = float(parado_s)
-        self.ultimo   = {}      # ip -> {"ts", "lat", "lon", "vel"}
+        self.min_releitura_s = float(min_releitura_s)
+        self.ultimo   = {}      # ip -> {"ts", "lat", "lon", "vel"}: última posição NOVA
+        self.tentativa = {}     # ip -> quando foi lido, com ou sem posição nova
+        self._lock    = threading.Lock()
 
     def registrar(self, ip, ts, lat, lon, vel_kmh=None):
-        self.ultimo[ip] = {"ts": ts, "lat": lat, "lon": lon,
-                           "vel": vel_kmh}
+        """Leitura com posição nova (ou falha, com lat/lon None).
+
+        `gpsVel` é opcional no Gps.proto. Sem ele, a agenda caía no ritmo
+        do rádio parado — um caminhão a 40 km/h lido a cada 30 s, amostras
+        a 300 m uma da outra. A velocidade sai então do próprio
+        deslocamento entre as duas últimas posições.
+        """
+        with self._lock:
+            self.tentativa[ip] = ts
+            u = self.ultimo.get(ip)
+            if (vel_kmh is None and lat is not None and lon is not None
+                    and u and u.get("lat") is not None):
+                dt = ts - u["ts"]
+                if dt >= 0.5:
+                    vel_kmh = (rm._dist_m(u["lat"], u["lon"], lat, lon)
+                               / dt * 3.6)
+            self.ultimo[ip] = {"ts": ts, "lat": lat, "lon": lon,
+                               "vel": vel_kmh}
+
+    def adiar(self, ip, ts):
+        """Leu, mas o GPS não tinha posição nova. Não mexe na base do
+        deslocamento — só segura a releitura até o próximo fix."""
+        with self._lock:
+            self.tentativa[ip] = ts
 
     def prioridade(self, ip, agora):
         """Quanto este rádio está 'devendo'. Maior = ler antes.
 
         Sem posição conhecida ainda, prioridade máxima: é a primeira
         leitura dele. Com posição, estima o quanto andou desde a última
-        pela velocidade que o próprio rádio reportou — é o que permite
-        ler o caminhão rápido mais vezes sem ler o parado à toa.
+        pela velocidade — a reportada pelo rádio ou, sem ela, a do
+        deslocamento. É o que permite ler o caminhão rápido mais vezes
+        sem ler o parado à toa.
         """
+        t = self.tentativa.get(ip)
+        if t is not None and agora - t < self.min_releitura_s:
+            return 0.0
         u = self.ultimo.get(ip)
         if u is None:
             return float("inf")
@@ -105,7 +146,8 @@ class Coleta:
     """
 
     def __init__(self, alvos, role="co", senha="", porta=2300,
-                 passo_m=PASSO_M_PADRAO, max_threads=12, timeout_s=6,
+                 passo_m=PASSO_M_PADRAO, max_threads=LEITURAS_SIMULTANEAS,
+                 timeout_s=6,
                  cfg=None, nome=None, reencontro_s=60.0,
                  parado_s=INTERVALO_PARADO_S, aviso=print):
         self.alvos    = {ip: (nomes or ip) for ip, nomes in dict(alvos).items()}
@@ -139,6 +181,8 @@ class Coleta:
         self.n_falhas    = 0
         self.inicio      = None
         self.fim         = None
+        self.em_voo      = {}   # ip -> quando a leitura em curso começou
+        self.duracoes    = []   # segundos das últimas leituras, para a tela
 
     def parar(self):
         self._parar.set()
@@ -195,21 +239,25 @@ class Coleta:
         lat, lon = s.get("gps_lat"), s.get("gps_lon")
         fix = s.get("gps_time")
 
-        self.agenda.registrar(ip, agora, lat, lon, s.get("gps_vel"))
-
         if lat is None or lon is None:
             # Sem posição não vai para o mapa. Não é erro: parte da frota
             # não tem módulo de GPS, e o rádio ainda serve ao censo.
+            self.agenda.registrar(ip, agora, None, None, None)
             return None
         # Posição repetida: o módulo não atualizou desde a última gravada.
         # Comparar o gpsTime BRUTO funciona em qualquer formato — não
         # depende de saber a unidade, que o Gps.proto não declara.
         if fix is not None and self.ultimo_fix.get(ip) == fix:
+            # Não vira base de deslocamento: registrar a posição velha com
+            # o relógio de agora faria a velocidade estimada dar zero, e o
+            # caminhão em movimento cairia no ritmo de parado.
+            self.agenda.adiar(ip, agora)
             with self.lock:
                 self.n_repetidos += 1
             return None
         if fix is not None:
             self.ultimo_fix[ip] = fix
+        self.agenda.registrar(ip, agora, lat, lon, s.get("gps_vel"))
 
         # O melhor enlace do ponto, e TUDO que ele mede junto. Guardar só
         # o RSSI deixava o laudo sem SNR e sem ruído — as duas grandezas
@@ -270,76 +318,126 @@ class Coleta:
         }, vizinhos
 
     # ── o laço ───────────────────────────────────────────────
+    def _proximo(self):
+        """O rádio que mais está devendo leitura e não está sendo lido."""
+        with self.lock:
+            livres = [ip for ip in self.alvos if ip not in self.em_voo]
+            eleitos = self.agenda.eleger(livres, time.monotonic(), 1)
+            if not eleitos:
+                return None
+            self.em_voo[eleitos[0]] = time.monotonic()
+            return eleitos[0]
+
+    def _tratar(self, ip, d, dur):
+        """Resultado de UMA leitura: amostra, falha ou posição repetida."""
+        if isinstance(d, Exception) or d is None:
+            with self.lock:
+                self.n_falhas += 1
+                motivo = (f"{type(d).__name__}: {d}"
+                          if isinstance(d, Exception) else "sem resposta")
+                # Um contador subindo não diz nada. Cada motivo NOVO vai
+                # para a tela uma vez; repetido só conta. Foi um "139
+                # falhas" mudo que escondeu uma troca de argumentos por
+                # quase uma hora.
+                novo = motivo not in self.motivos
+                self.motivos[motivo] = self.motivos.get(motivo, 0) + 1
+            if novo:
+                nome = self.alvos.get(ip, ip)
+                self.aviso(f"falha em {nome} ({ip}): {motivo}")
+            self.agenda.registrar(ip, time.monotonic(), None, None, None)
+            return
+        with self.lock:
+            self.n_lidos += 1
+            self.duracoes.append(dur)
+            del self.duracoes[:-200]
+        saida = self._amostra(ip, d, time.monotonic())
+        if not saida:
+            return
+        am, viz = saida
+        with self.lock:
+            # `ponto` é a POSIÇÃO da amostra na lista: `cobertura_disponivel`
+            # casa vizinho e amostra por ela. Com várias leituras
+            # terminando ao mesmo tempo, o número tem de sair da própria
+            # lista, dentro da trava, e não de um contador à parte.
+            self.amostras.append(am)
+            ponto = len(self.amostras)
+            for v in viz:
+                v["ponto"] = ponto
+                v["ts"] = am["ts"]
+                v["lat"] = am["lat"]; v["lon"] = am["lon"]
+                v["movel"] = am["radio"]
+                v["ruido"] = ((v["sinal"] - v["snr"])
+                              if v.get("sinal") is not None
+                              and v.get("snr") is not None else None)
+                self.peers.append(v)
+
     def rodar(self, minutos=0):
-        """Coleta até `parar()` ou até `minutos` (0 = sem limite)."""
+        """Coleta até `parar()` ou até `minutos` (0 = sem limite).
+
+        Cada trabalhador pega o rádio mais atrasado, lê, grava e já pega o
+        próximo. Antes era em LOTES: elegia 12, esperava os 12 terminarem
+        e só então elegia de novo. Um rádio lento ou fora de alcance
+        segurava o lote inteiro até o timeout de 6 s — e um caminhão a
+        40 km/h anda 67 m em 6 s. Era esse o espaçamento de 60–80 m entre
+        as bolhas do mapa, com o alvo pedindo 15 m.
+        """
         if not self.alvos:
             raise RuntimeError("nenhum equipamento selecionado")
         self.inicio = time.time()
         limite = (self.inicio + minutos * 60.0) if minutos else None
         self.aviso(f"coletando {len(self.alvos)} equipamento(s)")
-        ponto = 0
+        fim = threading.Event()
+        trabalhadores = []
 
-        while not self._parar.is_set():
-            if limite and time.time() >= limite:
-                break
-            agora = time.monotonic()
-            eleitos = self.agenda.eleger(list(self.alvos), agora, self.max_thr)
-            if not eleitos:
-                # Ninguém venceu o alvo de metros ainda. Dorme pouco: o
-                # caminhão rápido vence em pouco mais de um segundo.
-                self._parar.wait(0.2)
-                continue
-
-            res, ths = {}, []
-            def _w(x):
+        def _trabalhar():
+            while not fim.is_set():
+                ip = self._proximo()
+                if ip is None:
+                    # Ninguém venceu o alvo de metros ainda. O caminhão
+                    # rápido vence em pouco mais de um segundo.
+                    fim.wait(0.1)
+                    continue
+                t0 = time.monotonic()
                 try:
-                    res[x] = self._ler(x)
+                    d = self._ler(ip)
                 except Exception as e:
-                    res[x] = e
-            for ip in eleitos:
-                t = threading.Thread(target=_w, args=(ip,), daemon=True)
-                ths.append(t); t.start()
-            for t in ths:
-                t.join(timeout=self.timeout + 5)
-
-            for ip, d in res.items():
-                if isinstance(d, Exception) or d is None:
+                    d = e
+                try:
+                    self._tratar(ip, d, time.monotonic() - t0)
+                except Exception as e:
+                    self.aviso(f"falha interna ao gravar {ip}: {e}")
+                finally:
                     with self.lock:
-                        self.n_falhas += 1
-                        motivo = (f"{type(d).__name__}: {d}"
-                                  if isinstance(d, Exception) else "sem resposta")
-                        # Um contador subindo não diz nada. Cada motivo
-                        # NOVO vai para a tela uma vez; repetido só conta.
-                        # Foi um "139 falhas" mudo que escondeu uma troca
-                        # de argumentos por quase uma hora.
-                        if motivo not in self.motivos:
-                            self.motivos[motivo] = 0
-                            novo = True
-                        else:
-                            novo = False
-                        self.motivos[motivo] += 1
-                    if novo:
-                        nome = self.alvos.get(ip, ip)
-                        self.aviso(f"falha em {nome} ({ip}): {motivo}")
-                    self.agenda.registrar(ip, time.monotonic(), None, None, None)
-                    continue
-                with self.lock: self.n_lidos += 1
-                saida = self._amostra(ip, d, time.monotonic())
-                if not saida:
-                    continue
-                am, viz = saida
-                ponto += 1
+                        self.em_voo.pop(ip, None)
+
+        def _novo():
+            t = threading.Thread(target=_trabalhar, daemon=True)
+            t.start(); trabalhadores.append(t)
+
+        for _ in range(self.max_thr):
+            _novo()
+        repostos = 0
+        try:
+            while not self._parar.is_set():
+                if limite and time.time() >= limite:
+                    break
+                # A rajant-api não recebe timeout: uma consulta pendurada
+                # prende o trabalhador para sempre. Cada leitura presa além
+                # do prazo ganha um substituto, com teto, para a coleta
+                # não ir perdendo fôlego ao longo do turno.
+                agora = time.monotonic()
                 with self.lock:
-                    self.amostras.append(am)
-                    for v in viz:
-                        v["ponto"] = ponto
-                        v["ts"] = am["ts"]
-                        v["lat"] = am["lat"]; v["lon"] = am["lon"]
-                        v["movel"] = am["radio"]
-                        v["ruido"] = ((v["sinal"] - v["snr"])
-                                      if v.get("sinal") is not None
-                                      and v.get("snr") is not None else None)
-                        self.peers.append(v)
+                    presos = sum(1 for t0 in self.em_voo.values()
+                                 if agora - t0 > self.timeout + 5)
+                if presos > repostos and len(trabalhadores) < 2 * self.max_thr:
+                    repostos += 1
+                    _novo()
+                self._parar.wait(0.2)
+        finally:
+            fim.set()
+            prazo = time.monotonic() + self.timeout + 5
+            for t in trabalhadores:
+                t.join(max(0.0, prazo - time.monotonic()))
 
         self.fim = time.time()
         for ses in self.sessoes.values():
@@ -360,12 +458,17 @@ class Coleta:
             n_am = len(self.amostras)
             moveis = len({a["radio"] for a in self.amostras})
             dur = (time.time() - self.inicio) if self.inicio else 0.0
+            ds = sorted(self.duracoes)
             return {
                 "amostras": n_am, "vizinhos": len(self.peers),
                 "equipamentos": moveis, "lidos": self.n_lidos,
                 "falhas": self.n_falhas, "repetidos": self.n_repetidos,
                 "duracao_s": dur,
                 "leituras_s": (self.n_lidos / dur) if dur > 0 else 0.0,
+                # Quanto demora UMA leitura. Com o passo real acima do
+                # pedido, é este número que diz por quê: leitura lenta
+                # pede mais leituras simultâneas.
+                "leitura_ms": (round(ds[len(ds) // 2] * 1000) if ds else None),
                 "passo_m": self._passo_real(),
             }
 

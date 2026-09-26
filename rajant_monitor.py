@@ -1977,10 +1977,10 @@ DEFAULTS_RELATORIO = {
     # dezena de BCs a camada de alfinetes cobre a medicao, que e o assunto
     # do arquivo. true devolve a pasta "BreadCrumbs".
     "kmz_com_equipamentos": "false",
-    # false = a rota sai como MAPA DE CALOR (nucleo por medicao, so onde o
-    # radio passou). true devolve tambem a linha ligando as amostras — e a
-    # linha inventa aresta reta entre pontos distantes.
-    "kmz_com_rotas": "false",
+    # O rastro do KMZ e a FITA do trajeto, colorida pela faixa da legenda
+    # e partida onde houve buraco de medicao. true acrescenta tambem o
+    # MAPA DE CALOR (nucleo de raio fixo por amostra), desligado no painel.
+    "kmz_com_calor": "false",
     # false = o PPT sai com MOLDURAS VAZIAS, cada uma dizendo qual KMZ
     # abrir e qual camada ligar para tirar o print no Google Earth. É o
     # caminho de quem quer o satélite real no slide, que o PNG não tem
@@ -5845,12 +5845,63 @@ def limpar_coords(pontos):
             and abs(p[1]) <= 90 and abs(p[2]) <= 180]
     return bons, len(pontos) - len(bons)
 
-def _bucket_cor(v, faixas):
-    """faixas: [(limite, 'RRGGBB')] em ordem crescente de qualidade."""
-    for lim, cor in faixas:
-        if v is None: return "808080"
-        if v < lim: return cor
-    return faixas[-1][1]
+def _faixa_idx(v, faixas, na_de_baixo=()):
+    """Índice da faixa de `v`. faixas: [(limite, 'RRGGBB')], limite crescente.
+
+    Por padrão o valor EXATO de um limite vai para a faixa de cima
+    ([a, b)). Os limites em `na_de_baixo` ficam com a faixa de baixo —
+    ver `limites_na_faixa_de_baixo`.
+    """
+    for k, (lim, _cor) in enumerate(faixas):
+        if v < lim or (v == lim and lim in na_de_baixo):
+            return k
+    return len(faixas) - 1
+
+
+def _bucket_cor(v, faixas, na_de_baixo=()):
+    """faixas: [(limite, 'RRGGBB')] em ordem crescente de limite."""
+    if v is None: return "808080"
+    return faixas[_faixa_idx(v, faixas, na_de_baixo)][1]
+
+
+def atende(v, op, lim):
+    """A leitura cumpre o requisito? Um lugar só para os quatro operadores:
+    o Sumário, a pasta Fora do requisito e a cor do mapa decidem aqui."""
+    return {">": v > lim, ">=": v >= lim,
+            "<": v < lim, "<=": v <= lim}[op]
+
+
+def limites_na_faixa_de_baixo(campo):
+    """Limites cujo valor EXATO pertence à faixa de baixo, nesta grandeza.
+
+    A convenção de origem define a maioria (`_CONVENCAO_NA_FAIXA_DE_BAIXO`);
+    o limite do REQUISITO é decidido pelo operador dele. O rádio reporta
+    inteiro, −75 dBm exato é comum, e o requisito é RSSI > −75: −75 é
+    reprovado. Com a faixa sempre [a, b), ele caía no laranja de "atende",
+    enquanto o Sumário e a pasta Fora do requisito o contavam como
+    reprovado — o mapa dizia uma coisa e o número outra.
+
+    Tirado do operador e não escrito à mão: se o requisito mudar para
+    `>=`, o −75 muda de faixa sozinho, e cor e contagem seguem juntas.
+    """
+    out = set(_CONVENCAO_NA_FAIXA_DE_BAIXO.get(campo, ()))
+    req = limite_de(campo)
+    if req:
+        op, lim = req[0], float(req[1])
+        # O valor exato do limite vai para o lado que o operador decide:
+        # reprovado em ">" e "<"; aprovado em ">=" e "<=". Em grandeza em
+        # que alto é melhor, o lado reprovado é a faixa de baixo; em que
+        # baixo é melhor, a de cima.
+        if op in (">", "<="):
+            out.add(lim)
+        else:
+            out.discard(lim)
+    return frozenset(out)
+
+
+def cor_da_leitura(v, campo):
+    """A cor da leitura na legenda da grandeza — a régua única do laudo."""
+    return _bucket_cor(v, FAIXAS_KML[campo], limites_na_faixa_de_baixo(campo))
 
 # ──────────────────────────────────────────────────────────────
 # KML DO SURVEY PARA O GOOGLE EARTH
@@ -5864,37 +5915,95 @@ def _bucket_cor(v, faixas):
 # fontes divergiriam e o relatório contradiria o mapa.
 # ──────────────────────────────────────────────────────────────
 
-# Faixas de cor por grandeza: (limite_superior, RRGGBB). O corte do meio
-# é sempre o requisito Modular, para a leitura ser imediata.
+# Faixas de cor por grandeza: (limite, RRGGBB), limite crescente. De que
+# lado de cada limite fica o valor EXATO está em `limites_na_faixa_de_baixo`.
+#
+# De onde vem cada régua — nada aqui é inventado, e a legenda de cada mapa
+# imprime a fonte (FONTE_FAIXAS):
+#
+#   CORES. As chapadas oficiais do Rajant MeshMapper, lidas do doc.kml
+#   que o BC|Commander 11.29.1 gerou na mina: ff0000ff / ff006af2 /
+#   ff30ad3e (aabbggrr) = FF0000 poor, F26A00 good, 3EAD30 great. Amarelo
+#   e vermelho-escuro não existem chapados no MeshMapper; vêm do tom
+#   dominante dos alfinetes dele (yellow_pin DD9F17, red_pin B70404). O
+#   5C0000 da faixa inutilizável é o único tom que não é da Rajant: o
+#   vermelho dela escurecido, para a pior faixa não ser confundida com a
+#   penúltima.
+#
+#   RSSI (dBm). O MeshMapper NÃO classifica o Signal — no balão ele sai
+#   sem cor, conferido em 11.216 células. A régua é a convenção de Wi-Fi
+#   mais citada (MetaGeek/Oscium, "Understanding RSSI"): -67 muito bom,
+#   mínimo para voz e vídeo — a mesma borda de célula de voz do guia de
+#   site survey da Cisco —; -70 ok, mínimo para entrega confiável; -80
+#   ruim, mínimo para conectividade básica; -90 inutilizável. Mais o -75
+#   do requisito Modular, para aprovado e reprovado não dividirem cor.
+#
+#   SNR (dB). A régua OFICIAL da Rajant, gravada pelo próprio MeshMapper
+#   no data.json (goodRSSI = 20, greatRSSI = 30 — no vocabulário Rajant
+#   "RSSI" é o SNR em dB) e conferida célula a célula: 19 vermelho, 20
+#   laranja, 29 laranja, 30 verde.
+#
+#   RUÍDO (dBm). Sem régua oficial em lugar nenhum. É DERIVADO das duas
+#   oficiais: um sinal no mínimo Modular (-75) sobre ruído N chega com
+#   SNR = -75 - N, classificado pela régua Rajant. N <= -105 dá SNR >= 30;
+#   N >= -95 dá SNR <= 20. O corte de -85 que havia aqui era incoerente
+#   com os próprios requisitos: -75 sobre -85 é SNR 10, reprovado.
 FAIXAS_KML = {
-    # RSSI segue a convenção dos survey comerciais (Ekahau, NetSpot):
-    # escala útil de -90 a -45 dBm, gradiente vermelho→verde, e os cortes
-    # de qualidade em -50 / -60 / -67 / -70 / -80 dBm. O -75 do requisito
-    # Modular cai entre -70 e -80, então fica como faixa própria: assim
-    # aprovado e reprovado não dividem a mesma cor.
-    "sinal": [(-85, "8B1A1A"), (-80, "C0392B"), (-75, "E74C3C"),
-              (-70, "E67E22"), (-67, "F1C40F"), (-60, "9ACD32"),
-              (-50, "27AE60"), (999, "1E8449")],
+    "sinal": [(-90, "5C0000"), (-80, "B70404"), (-75, "FF0000"),
+              (-70, "F26A00"), (-67, "DD9F17"), (999, "3EAD30")],
     # Cobertura usa as MESMAS faixas do RSSI: e a mesma grandeza, lida de
     # outra fonte. Faixas proprias fariam duas reguas para o mesmo dBm.
-    "sinal_cob": [(-85, "8B1A1A"), (-80, "C0392B"), (-75, "E74C3C"),
-                  (-70, "E67E22"), (-67, "F1C40F"), (-60, "9ACD32"),
-                  (-50, "27AE60"), (999, "1E8449")],
-    "snr":   [(10, "8B1A1A"), (15, "C0392B"), (20, "E74C3C"),
-              (25, "E67E22"), (30, "F1C40F"), (40, "9ACD32"),
-              (999, "27AE60")],
+    "sinal_cob": [(-90, "5C0000"), (-80, "B70404"), (-75, "FF0000"),
+                  (-70, "F26A00"), (-67, "DD9F17"), (999, "3EAD30")],
+    "snr":   [(20, "FF0000"), (30, "F26A00"), (999, "3EAD30")],
     "rtt":   [(20, "27AE60"), (50, "9ACD32"), (100, "F1C40F"),
               (200, "E67E22"), (400, "E74C3C"), (99999, "C0392B")],
     "perda": [(0.5, "27AE60"), (1, "9ACD32"), (2, "F1C40F"),
               (5, "E67E22"), (10, "E74C3C"), (101, "C0392B")],
     "interf": [(5, "27AE60"), (10, "9ACD32"), (20, "F1C40F"),
                (35, "E67E22"), (50, "E74C3C"), (101, "C0392B")],
-    # Piso de ruído: quanto mais negativo, mais limpo. O corte de -85 dBm
-    # é o mesmo de ESCALAS, e sem esta entrada o slide de Noise Floor
-    # ficava sem KMZ para o print.
-    "ruido": [(-95, "27AE60"), (-90, "9ACD32"), (-85, "F1C40F"),
-              (-80, "E67E22"), (-75, "E74C3C"), (999, "C0392B")],
+    # Piso de ruído: quanto mais negativo, mais limpo. Derivado — ver acima.
+    "ruido": [(-105, "3EAD30"), (-95, "F26A00"), (999, "FF0000")],
 }
+
+# Limites cujo valor EXATO pertence à faixa de BAIXO pela convenção de
+# origem, sem contar o requisito (que `limites_na_faixa_de_baixo` acerta
+# pelo operador). O rádio reporta dBm e dB INTEIROS, então o valor exato
+# de cada limite é comum — e cada um tem de cair onde a fonte diz:
+#   -90 dBm   "unusable" na MetaGeek: o próprio -90 já é inutilizável.
+#   -105 dBm  derivado de SNR >= 30 (Rajant, inclusivo): -75 - (-105) = 30.
+# Os demais limites de convenção são mínimos atingidos na igualdade
+# (-67 é muito bom, -70 é ok, -80 é conectividade básica, SNR 30 é great)
+# e ficam na faixa de cima, que é o comportamento padrão.
+_CONVENCAO_NA_FAIXA_DE_BAIXO = {
+    "sinal": {-90.0}, "sinal_cob": {-90.0}, "ruido": {-105.0},
+}
+
+# Classificação de cada faixa, na ordem de FAIXAS_KML (limite crescente).
+CLASSES_FAIXA = {
+    "sinal":     ["inutilizável", "abaixo da conectividade básica",
+                  "reprovado", "atende o requisito", "ok", "muito bom"],
+    "snr":       ["ruim", "bom", "ótimo"],
+    "ruido":     ["ótimo", "bom", "reprova"],
+}
+CLASSES_FAIXA["sinal_cob"] = CLASSES_FAIXA["sinal"]
+CLASSES_RSSI = CLASSES_FAIXA["sinal"]
+
+# Fonte de cada régua, impressa no rodapé da legenda do mapa e no slide
+# de Metodologia: a cor só é conferível se a régua for rastreável.
+FONTE_FAIXAS = {
+    "sinal": "Faixas: MetaGeek/Oscium (-90, -80, -70, -67) e requisito "
+             "Modular (-75). Cores: Rajant MeshMapper.",
+    "snr":   "Faixas e cores: Rajant MeshMapper (goodRSSI 20, greatRSSI 30).",
+    "ruido": "Derivado: sinal de -75 dBm (Modular) sobre este ruído, "
+             "SNR pela régua Rajant.",
+}
+FONTE_FAIXAS["sinal_cob"] = FONTE_FAIXAS["sinal"]
+
+# Grandezas que o rádio reporta em INTEIRO (int32 no State.proto e no
+# arquivo do MeshMapper). Nelas a legenda escreve o intervalo exato em
+# inteiros — "-74 a -71" —, sem ambiguidade de fronteira.
+_CAMPOS_INTEIROS = {"sinal", "sinal_cob", "snr", "ruido"}
 
 _ICONES_KML = {
     "ERB":   ("http://maps.google.com/mapfiles/kml/shapes/triangle.png", "F1C40F"),
@@ -5927,7 +6036,7 @@ def _balao_amostra(a):
         if c in REQUISITOS:
             op, lim, _, _ = REQUISITOS[c]
             try:
-                ruim = (float(v) <= lim) if op == ">" else (float(v) >= lim)
+                ruim = not atende(float(v), op, lim)
                 fora = " <b style='color:#C0392B'>(fora)</b>" if ruim else ""
             except (TypeError, ValueError): pass
         linhas.append(f"<tr><td>{rot}</td><td><b>{_esc(txt)} {un}</b>{fora}</td></tr>")
@@ -6131,7 +6240,8 @@ def _calor_da_rota(am, campo, bb, raio_m, n=760, esc=None):
     return valor, alfa
 
 
-def _png_calor(valor, alfa, cmap, vmin, vmax, caminho, faixas=None):
+def _png_calor(valor, alfa, cmap, vmin, vmax, caminho, faixas=None,
+               na_de_baixo=()):
     """Raster RGBA com transparência POR PIXEL.
 
     O `_png_overlay` usa alfa constante, que serve a heatmap de área
@@ -6165,13 +6275,17 @@ def _png_calor(valor, alfa, cmap, vmin, vmax, caminho, faixas=None):
         cores = np.array(
             [[int(c[i:i+2], 16) / 255.0 for i in (0, 2, 4)] + [1.0]
              for _, c in faixas], dtype=float)
-        # `_bucket_cor` devolve a primeira faixa cujo limite SUPERA o
-        # valor: `v < lim`, com `<` estrito. O equivalente vetorizado é
-        # `side="right"` — com "left", o valor exatamente igual a um
-        # limite caía na faixa de BAIXO, e cada fronteira de faixa virava
-        # uma linha de cor errada no mapa.
+        # O MESMO lado da fronteira de `_faixa_idx`. `v < lim` estrito é
+        # `side="right"`; os limites de `na_de_baixo` puxam o valor exato
+        # para a faixa de baixo, um a um. Errar o lado punha o valor exato
+        # de cada limite na faixa errada, e cada fronteira virava uma
+        # linha de cor errada no mapa.
         v = np.nan_to_num(valor, nan=lims[-1])
-        idx = np.clip(np.searchsorted(lims, v, side="right"), 0, len(faixas) - 1)
+        idx = np.searchsorted(lims, v, side="right")
+        for k, lim in enumerate(lims):
+            if lim in na_de_baixo:
+                idx = np.where(v == lim, k, idx)
+        idx = np.clip(idx, 0, len(faixas) - 1)
         rgba = cores[idx]
     else:
         norm = np.clip((valor - vmin) / max(vmax - vmin, 1e-9), 0, 1)
@@ -6195,7 +6309,8 @@ def _cfg_bool(cfg, secao, chave, padrao=False):
         return padrao
 
 
-def _trechos_continuos(pts, fator=3.0, piso_s=30.0, salto_m=250.0):
+def _trechos_continuos(pts, fator=3.0, piso_s=30.0, salto_m=250.0,
+                       manter_isolados=False):
     """Parte o trajeto onde houve BURACO na medição.
 
     Ligar dois pontos consecutivos é afirmar que o veículo passou pela
@@ -6210,9 +6325,14 @@ def _trechos_continuos(pts, fator=3.0, piso_s=30.0, salto_m=250.0):
     `piso_s` evita que uma captura muito rápida quebre o trajeto ao menor
     engasgo da malha, e `salto_m` pega o caso em que o tempo está normal
     mas a posição pulou (perda de fix, GPS voltando).
+
+    `manter_isolados` devolve também os trechos de UMA leitura só — a
+    que ficou sozinha entre dois buracos. Sem linha a traçar, mas é
+    medição e não pode sumir do mapa.
     """
+    minimo = 1 if manter_isolados else 2
     if len(pts) < 2:
-        return [pts] if pts else []
+        return [pts] if len(pts) >= minimo else []
     dts = []
     for a, b in zip(pts, pts[1:]):
         ta, tb = a.get("ts"), b.get("ts")
@@ -6236,7 +6356,177 @@ def _trechos_continuos(pts, fator=3.0, piso_s=30.0, salto_m=250.0):
         else:
             atual.append(b)
     trechos.append(atual)
-    return [t for t in trechos if len(t) >= 2]
+    return [t for t in trechos if len(t) >= minimo]
+
+
+def _amostras_do_rastro(amostras, fixos=None, andou_m=30.0):
+    """Só as amostras de quem se DESLOCOU — é o que vira rastro.
+
+    O rádio parado dá dezenas de amostras no mesmo ponto: vira uma bola
+    (ou um rabisco de GPS) isolada no mapa, e como BC fixo enxerga o
+    vizinho de perto, ela sai verde. Eram essas as "bolas espalhadas e
+    desconectadas" — e boa parte do verde que não batia com a mina.
+
+    Com a lista de fixos, tira os fixos; sem ela (chamada solta, teste),
+    separa pelo próprio dado. Lista vazia quando NINGUÉM andou — captura
+    feita parada, tipicamente o MeshMapper ligado numa repetidora: 115
+    leituras empilhadas em 0,5 m viravam uma mancha com a escala de ÁREA,
+    a leitura errada mais cara que existe, porque parece um mapa.
+    """
+    parados = set(fixos or {})
+    if parados:
+        moveis = [a for a in amostras if a.get("radio") not in parados]
+        return moveis or list(amostras)
+    por_r = {}
+    for a in amostras:
+        if a.get("lat") is None: continue
+        por_r.setdefault(a["radio"], []).append(a)
+    andou = set()
+    for r, ps in por_r.items():
+        if len(ps) < 2: continue
+        d = max(_dist_m(ps[0]["lat"], ps[0]["lon"], q["lat"], q["lon"])
+                for q in ps)
+        if d > andou_m: andou.add(r)
+    return [a for a in amostras if a.get("radio") in andou]
+
+
+def _fita_por_amostra(corrida, campo, faixas):
+    """Uma corrida contínua → [(cor, [(lat, lon)...], [valores])].
+
+    Cada amostra é dona do caminho entre o ponto médio com a anterior e o
+    ponto médio com a seguinte — a mesma regra do calor, "vale a leitura
+    real mais próxima", levada para a linha. Nenhum trecho mostra média
+    de duas leituras nem cor interpolada entre elas.
+
+    Trechos vizinhos na MESMA faixa viram uma polilinha só: um Placemark
+    por par de pontos dava milhares de objetos, pesados de abrir e com
+    emenda visível entre segmentos.
+    """
+    n = len(corrida)
+    xy = [(p["lat"], p["lon"]) for p in corrida]
+    meios = [((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+             for a, b in zip(xy, xy[1:])]
+    pedacos = []
+    for i, p in enumerate(corrida):
+        geo = (([meios[i - 1]] if i > 0 else []) + [xy[i]]
+               + ([meios[i]] if i < n - 1 else []))
+        v = p.get(campo)
+        cor = _bucket_cor(v, faixas, limites_na_faixa_de_baixo(campo))
+        if pedacos and pedacos[-1][0] == cor:
+            # O primeiro vértice é o ponto médio que o pedaço anterior já
+            # terminou — repeti-lo daria segmento de comprimento zero.
+            pedacos[-1][1].extend(geo[1:])
+            pedacos[-1][2].append(v)
+        else:
+            pedacos.append([cor, geo, [v]])
+    return [tuple(p) for p in pedacos]
+
+
+def _rotulo_trecho(vals, un):
+    """Nome do trecho no Google Earth: a faixa MEDIDA nele, não a da
+    legenda — clicar na linha diz o que foi lido ali."""
+    vs = [v for v in vals if isinstance(v, (int, float))]
+    if not vs:
+        return "sem medição"
+    lo, hi = min(vs), max(vs)
+    return (f"{lo:.0f} {un}" if round(lo) == round(hi)
+            else f"{lo:.0f} a {hi:.0f} {un}")
+
+
+def _faixas_rotuladas(campo):
+    """[(rótulo da faixa, 'RRGGBB', classificação)] na ordem de FAIXAS_KML.
+
+    O rótulo diz exatamente quais valores a faixa contém, fronteira
+    incluída. "-75 a -70" deixava em aberto onde ficava o -75 — e ele é
+    reprovado. Nas grandezas inteiras sai o intervalo em inteiros
+    ("-74 a -71"); nas demais, a desigualdade ("≥ 2 e < 5").
+
+    Fonte única dos rótulos: legenda do KMZ, balão, slide de Metodologia
+    e gráfico de distribuição leem daqui.
+    """
+    faixas = FAIXAS_KML[campo]
+    baixo = limites_na_faixa_de_baixo(campo)
+    classes = CLASSES_FAIXA.get(campo, [])
+    inteiro = campo in _CAMPOS_INTEIROS
+    out, ant = [], None
+    for k, (lim, cor) in enumerate(faixas):
+        ultimo = k == len(faixas) - 1
+        # O limite de baixo desta faixa pertence a ela se NÃO foi puxado
+        # para a faixa anterior; o de cima, se foi puxado para esta.
+        tem_ant = ant is not None and ant not in baixo
+        tem_lim = lim in baixo
+        if inteiro:
+            lo = None if ant is None else int(ant if tem_ant else ant + 1)
+            hi = None if ultimo else int(lim if tem_lim else lim - 1)
+            if lo is None:   rng = f"≤ {hi}"
+            elif hi is None: rng = f"≥ {lo}"
+            elif lo == hi:   rng = f"{lo}"
+            else:            rng = f"{lo} a {hi}"
+        else:
+            s_lo = None if ant is None else (f"≥ {ant:g}" if tem_ant
+                                             else f"> {ant:g}")
+            s_hi = None if ultimo else (f"≤ {lim:g}" if tem_lim
+                                        else f"< {lim:g}")
+            rng = " e ".join(x for x in (s_lo, s_hi) if x)
+        out.append((rng, cor, classes[k] if k < len(classes) else ""))
+        ant = lim
+    return out
+
+
+def _legenda_de_faixas_png(caminho, campo):
+    """A legenda da grandeza como imagem, para o ScreenOverlay do KMZ.
+
+    Melhor faixa em cima, pior embaixo, em qualquer grandeza — em RSSI o
+    alto é bom, em ruído o baixo, e a ordem de FAIXAS_KML segue o valor,
+    não a qualidade. O requisito vai no rodapé.
+    """
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    esc = ESCALAS.get(campo) or {}
+    un = esc.get("un", "")
+    linhas = _faixas_rotuladas(campo)
+    if esc.get("melhor", "alto") == "alto":
+        linhas = list(reversed(linhas))
+    req = limite_de(campo)
+    fonte = FONTE_FAIXAS.get(campo, "")
+    titulo = esc.get("rot", campo)
+    n = len(linhas)
+    import textwrap as _tw
+    linhas_fonte = _tw.wrap(fonte, 62) if fonte else []
+    lg, alt = (350, 46 + 21 * n + (22 if req else 0)
+               + (12 * len(linhas_fonte) + 12 if linhas_fonte else 0))
+    fig = plt.figure(figsize=(lg / 100, alt / 100), dpi=100)
+    fig.patch.set_facecolor("#FFFFFF"); fig.patch.set_alpha(0.93)
+    ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
+    ax.set_xlim(0, lg); ax.set_ylim(alt, 0)
+    ax.text(12, 16, titulo, color="#1A1A1A", fontsize=8.5, fontweight="bold",
+            va="center")
+    ax.text(12, 31, un, color="#5A6478", fontsize=7.5, va="center")
+    for i, (rng, cor, cls) in enumerate(linhas):
+        y = 46 + 21 * i
+        ax.add_patch(plt.Rectangle((12, y), 34, 15, facecolor="#" + cor,
+                                   edgecolor="#141008", linewidth=0.6))
+        ax.text(54, y + 7.5, rng, color="#1A1A1A", fontsize=8, va="center")
+        if cls:
+            ax.text(130, y + 7.5, cls, color="#5A6478", fontsize=7.5,
+                    va="center")
+    y = 46 + 21 * n + 6
+    if req:
+        op, lim, un_r, _rot = req
+        # Só é "Modular" o que está em REQUISITOS. O corte do ruído é
+        # derivado dos requisitos, e chamá-lo de requisito seria afirmar
+        # uma cláusula que o contrato não tem.
+        nome_req = ("Requisito Modular" if campo in REQUISITOS
+                    or campo == "sinal_cob" else "Referência")
+        ax.text(12, y + 8, f"{nome_req}: {op} {lim:g} {un_r}",
+                color="#031795", fontsize=7.5, fontweight="bold", va="center")
+        y += 22
+    if linhas_fonte:
+        ax.text(12, y + 2, "\n".join(linhas_fonte), color="#5A6478",
+                fontsize=6.5, va="top", linespacing=1.3)
+    fig.savefig(caminho, facecolor=fig.get_facecolor(), transparent=False)
+    plt.close(fig)
+    return caminho
 
 
 def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
@@ -6295,7 +6585,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     # do Google Earth, que desenha linha branca.
     # Cores do gradiente efetivamente usadas: cada uma vira um <Style>.
     # Coletadas ao montar as abas e emitidas antes do documento.
-    cores_linha, cores_ponto = set(), set()
+    cores_ponto = set()
     cores_todas = {c for cp in campos for _, c in FAIXAS_KML[cp]}
     cores_todas.add("808080")          # trecho sem medição
     estilos = []
@@ -6305,24 +6595,20 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             f'<scale>0.4</scale><Icon><href>http://maps.google.com/mapfiles/'
             f'kml/shapes/placemark_circle.png</href></Icon></IconStyle>'
             f'<LabelStyle><scale>0</scale></LabelStyle></Style>')
-        # Rota e CONTEXTO, nao a medida. Linha grossa e opaca virava
-        # rastro de GPS cobrindo o terreno e competindo com o heatmap,
-        # que e onde a informacao esta.
-        # Largura e opacidade de survey de verdade: a fita colorida E o
-        # dado. Com 2,6 px e 170 de alfa a rota sumia sobre o satelite da
-        # cava, que ja e claro e cheio de textura — parecia um risco de
-        # GPS, nao uma medicao.
+        # A fita colorida E o dado. Largura de survey de verdade: com
+        # 2,6 px a rota sumia sobre o satelite da cava, que e claro e
+        # cheio de textura — parecia risco de GPS, nao medicao.
+        # OPACA: com alfa, o vermelho do chao da cava tingia o verde e a
+        # cor vista deixava de ser a da faixa da legenda.
         estilos.append(
-            f'<Style id="l{cor}"><LineStyle><color>{_kml_cor(cor, 235)}</color>'
+            f'<Style id="l{cor}"><LineStyle><color>{_kml_cor(cor, 255)}</color>'
             f'<width>7</width></LineStyle></Style>')
-    # Contorno da rota: mais grosso, escuro e por baixo.
-    # Contorno discreto: com uma dezena de equipamentos passando pela
-    # mesma pista, contorno grosso e opaco de um veiculo cobre a COR do
-    # outro no cruzamento — vira uma malha escura por cima da medicao.
-    # O contorno acompanha a fita: mais largo que ela, para virar borda, e
-    # discreto no alfa para nao empastar cruzamento de dois veiculos.
+    # Contorno da fita: mais largo, escuro e por baixo — separa a cor do
+    # terreno. Pode ser firme porque TODOS os contornos vão antes de todas
+    # as cores (ver `_aba`): o de um veículo não cobre mais a cor de outro
+    # no cruzamento de pistas, que era o motivo de ele ser quase apagado.
     estilos.append(
-        '<Style id="lcontorno"><LineStyle><color>60201510</color>'
+        '<Style id="lcontorno"><LineStyle><color>c8141008</color>'
         '<width>10</width></LineStyle></Style>')
     estilos.append(
         '<Style id="pFora"><IconStyle><color>ff0000ff</color><scale>0.55</scale>'
@@ -6382,10 +6668,8 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     # Todas no mesmo arquivo, só a primeira visível: ligadas juntas, os
     # pontos de seis grandezas se empilham no mesmo lugar e o mapa não diz
     # nada. O operador liga a que quer no painel de camadas.
-    # A rota agora e CALOR. A linha continua disponivel para quem quiser
-    # o traco cru, mas desligada: era ela que produzia as arestas retas
-    # ligando pontos por onde ninguem passou.
-    com_rotas = _cfg_bool(cfg, "relatorio", "kmz_com_rotas", False)
+    # O rastro é a FITA do trajeto (ver `_aba`). O calor fica opcional.
+    com_calor = _cfg_bool(cfg, "relatorio", "kmz_com_calor", False)
 
     # PNGs do calor, embutidos no KMZ. Em KML solto nao ha onde guardar a
     # imagem, e overlay apontando para arquivo ausente nao desenha nada —
@@ -6395,39 +6679,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     def _calor_no_kmz(amostras_aba, campo, visivel, sufixo="", rotulo=None):
         if not comprimir:
             return ""
-        # SÓ quem andou. O rádio parado dá dezenas de amostras no mesmo
-        # ponto: vira uma bola isolada no mapa, e como BC fixo enxerga o
-        # vizinho de perto, ela sai verde. Eram essas as "bolas espalhadas
-        # e desconectadas" — e boa parte do verde que não batia com a mina.
-        # O que se quer é a rota, então o calor usa quem se deslocou.
-        parados = set(fixos or {})
-        moveis = [a for a in amostras_aba if a.get("radio") not in parados]
-        if not parados:
-            # Sem a lista de fixos (chamada solta, teste), separa pelo
-            # próprio dado: quem não mudou de lugar não é rota.
-            por_r = {}
-            for a in amostras_aba:
-                if a.get("lat") is None: continue
-                por_r.setdefault(a["radio"], []).append(a)
-            andou = set()
-            for r, ps in por_r.items():
-                if len(ps) < 2: continue
-                d = max(_dist_m(ps[0]["lat"], ps[0]["lon"], q["lat"], q["lon"])
-                        for q in ps)
-                if d > 30.0: andou.add(r)
-            if not andou:
-                # NINGUEM andou — captura feita parada, tipicamente do
-                # MeshMapper ligado numa repetidora. Antes caia no `or`
-                # abaixo e pintava tudo: 115 leituras empilhadas em 0,5 m
-                # viravam uma mancha de um pixel com a escala de AREA. E
-                # a leitura errada mais cara que existe, porque parece um
-                # mapa. Sem rastro, o laudo da captura parada e o censo de
-                # vizinhos (ver `censo_vizinhos`) e o KMZ de pontos fixos.
-                log.info("[kml] nenhuma amostra em deslocamento: "
-                         "sem rastro de calor nesta aba")
-                return ""
-            moveis = [a for a in amostras_aba if a.get("radio") in andou]
-        amostras_aba = moveis or amostras_aba
+        amostras_aba = _amostras_do_rastro(amostras_aba, fixos)
+        if not amostras_aba:
+            log.info("[kml] nenhuma amostra em deslocamento: "
+                     "sem rastro de calor nesta aba")
+            return ""
         pts = [(a["lat"], a["lon"]) for a in amostras_aba
                if a.get("lat") is not None and a.get("lon") is not None
                and a.get(campo) is not None]
@@ -6482,7 +6738,8 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             _png_calor(valor, alfa,
                        _cmap_rf(invertido=(esc.get("melhor") == "baixo")),
                        float(esc["lo"]), float(esc["hi"]), cam,
-                       faixas=FAIXAS_KML.get(campo))
+                       faixas=FAIXAS_KML.get(campo),
+                       na_de_baixo=limites_na_faixa_de_baixo(campo))
             with open(cam, "rb") as fh:
                 extras.append((f"files/{nome_png}", fh.read()))
         except Exception as e:
@@ -6498,68 +6755,110 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 f"<east>{bb['leste']:.7f}</east>"
                 f"<west>{bb['oeste']:.7f}</west></LatLonBox></GroundOverlay>")
 
+    def _legenda_na_tela(campo_a):
+        # A legenda vai NO MAPA, não só no balão do documento: o print do
+        # Google Earth que vai para o slide leva junto a régua com que foi
+        # pintado, e a cor pode ser conferida contra ela na própria imagem.
+        # Sai das mesmas FAIXAS_KML que pintam a linha — desenhada à parte,
+        # divergiria do mapa na primeira vez que uma faixa mudasse.
+        if not comprimir:
+            return ""
+        try:
+            import tempfile as _tf, os as _os
+            nome_png = f"legenda_{campo_a}.png"
+            cam = _os.path.join(_tf.mkdtemp(), nome_png)
+            _legenda_de_faixas_png(cam, campo_a)
+            with open(cam, "rb") as fh:
+                extras.append((f"files/{nome_png}", fh.read()))
+        except Exception as e:
+            log.warning(f"[kml] legenda de {campo_a} falhou: {e}")
+            return ""
+        return (f"<ScreenOverlay><name>Legenda</name>"
+                f"<Icon><href>files/{nome_png}</href></Icon>"
+                f'<overlayXY x="0" y="0" xunits="fraction" yunits="fraction"/>'
+                f'<screenXY x="12" y="30" xunits="pixels" yunits="pixels"/>'
+                f'<size x="0" y="0" xunits="pixels" yunits="pixels"/>'
+                f"</ScreenOverlay>")
+
     def _aba(campo_a, visivel):
         faixas_a = FAIXAS_KML[campo_a]
         op_a, lim_a, un_a, rot_a = (limite_de(campo_a)
                                     or (">", None, "", campo_a.upper()))
         dentro = []
 
-        # ── mapa de calor do rastro ──
-        # A rota vira CALOR: um núcleo por medição, só onde o rádio
-        # passou. Substitui a fita de segmentos porque a linha, além de
-        # fina sobre o satélite da cava, ligava pontos distantes por retas
-        # que ninguém percorreu. O calor não tem aresta para inventar.
-        png = _calor_no_kmz(am, campo_a, visivel)
-        if png:
-            dentro.append(png)
-
-        # ── rotas (opcional) ──
-        # UM segmento por medição, com a cor exata daquela amostra na
-        # escala contínua. Antes eram oito faixas fixas: duas leituras de
-        # -74,9 e -75,1 dBm caíam em cores diferentes e o traçado virava
-        # confete. Com o gradiente, a rota vira uma fita que muda de tom
-        # junto com o sinal.
-        esc_a = ESCALAS.get(campo_a)
-        blocos = []
-        for radio, pts in (sorted(por_radio_geral.items()) if com_rotas else []):
+        # ── o trajeto: fita contínua, como o MeshMapper desenha ──
+        # Uma linha por onde o rádio passou, colorida pela leitura. Era
+        # calor — um núcleo de raio fixo por amostra —, e com amostras a
+        # 60-80 m e raio de 25 m o rastro saía em bolhas soltas, borradas
+        # nas bordas, com o chão da cava tingindo a cor pela transparência.
+        #
+        # FIDELIDADE À LEGENDA, por construção:
+        #   · a cor é a FAIXA da legenda (`_bucket_cor` sobre FAIXAS_KML),
+        #     não um gradiente — a mesma régua do balão, da legenda na
+        #     tela e do slide de Metodologia;
+        #   · cada amostra é dona do caminho entre o ponto médio com a
+        #     anterior e o ponto médio com a seguinte. Qualquer ponto da
+        #     linha mostra a leitura REAL mais próxima — sem média, sem
+        #     interpolação entre duas leituras;
+        #   · a linha é opaca: com transparência, o vermelho do chão da
+        #     cava tingia o verde e a cor vista deixava de ser a da faixa.
+        #
+        # E a linha não inventa caminho: `_trechos_continuos` a parte onde
+        # houve buraco de medição (tempo ou salto de posição). Foi a reta
+        # atravessando a cava que tinha tirado a linha do padrão antes.
+        contornos, fitas, soltos, n_trechos = [], [], [], 0
+        do_rastro = _amostras_do_rastro(am, fixos)
+        por_radio_rastro = {}
+        for a in do_rastro:
+            por_radio_rastro.setdefault(a["radio"], []).append(a)
+        for radio, pts in sorted(por_radio_rastro.items()):
             pts = sorted(pts, key=lambda x: x.get("ts") or 0)
-            if len(pts) < 2: continue
-
-            # Trajeto partido nos buracos de medição: o que não foi medido
-            # não vira linha. Sem isto, um vão de vários minutos aparecia
-            # como uma reta atravessando a cava, com cor de uma leitura que
-            # não vale para nada naquele caminho.
-            continuos = _trechos_continuos(pts)
-            if not continuos: continue
-            trechos, n_pts = [], 0
-            for corrida in continuos:
-                n_pts += len(corrida)
-                # O contorno escuro é moldura: uma linha por TRECHO — não
-                # por trajeto —, senão ele mesmo redesenha a reta que a
-                # quebra acabou de tirar. Vai antes, para ficar por baixo.
-                trechos.append(_placemark(
+            for corrida in _trechos_continuos(pts, manter_isolados=True):
+                if len(corrida) == 1:
+                    # Leitura isolada entre dois buracos: não há linha a
+                    # traçar, mas a medida não pode sumir do mapa.
+                    a_ = corrida[0]
+                    cor = cor_da_leitura(a_.get(campo_a), campo_a)
+                    cores_ponto.add(cor)
+                    soltos.append(_placemark(
+                        _rotulo_trecho([a_.get(campo_a)], un_a),
+                        _balao_amostra(a_), f"q{cor}",
+                        ponto=(a_["lat"], a_["lon"])))
+                    continue
+                n_trechos += 1
+                # O contorno escuro é moldura, um por TRECHO — por trajeto
+                # ele redesenharia a reta que a quebra acabou de tirar.
+                contornos.append(_placemark(
                     None, None, "lcontorno",
                     linha=[(q["lat"], q["lon"]) for q in corrida]))
-                for a_, b_ in zip(corrida, corrida[1:]):
-                    v = a_.get(campo_a)
-                    if v is None: v = b_.get(campo_a)
-                    cor = cor_continua(v, esc_a) or "9E9E9E"
-                    cores_linha.add(cor)
-                    rot = (f"{v:.1f} {un_a}" if isinstance(v, (int, float))
-                           else "sem medição")
-                    trechos.append(_placemark(
-                        rot, None, f"r{cor}",
-                        linha=((a_["lat"], a_["lon"]), (b_["lat"], b_["lon"]))))
-
-            corte = (f" · {len(continuos)} trechos" if len(continuos) > 1
-                     else "")
-            blocos.append(
-                f"<Folder><name>{_esc(radio)} ({n_pts} pontos{corte})</name>"
-                f"<open>0</open>{''.join(trechos)}</Folder>")
-        if blocos and com_rotas:
+                for cor, geo, vals in _fita_por_amostra(corrida, campo_a,
+                                                        faixas_a):
+                    fitas.append(_placemark(
+                        _rotulo_trecho(vals, un_a),
+                        f"<![CDATA[{_esc(radio)} · {len(vals)} "
+                        f"leitura{'s' if len(vals) != 1 else ''}]]>",
+                        f"l{cor}", linha=geo))
+        if contornos or soltos:
+            # TODOS os contornos antes de TODAS as cores: com um contorno
+            # por veículo intercalado, o de um cobria a cor do outro no
+            # cruzamento de pistas.
             dentro.append(
-                f"<Folder><name>Rotas ({len(blocos)})</name>"
-                f"<open>0</open>{''.join(blocos)}</Folder>")
+                f"<Folder><name>Trajeto ({len(por_radio_rastro)} "
+                f"rádio{'s' if len(por_radio_rastro) != 1 else ''})</name>"
+                f"<open>0</open>{''.join(contornos)}{''.join(fitas)}"
+                f"{''.join(soltos)}</Folder>")
+        leg = _legenda_na_tela(campo_a)
+        if leg and (contornos or soltos):
+            dentro.append(leg)
+
+        # ── calor (opcional, desligado) ──
+        # Fica para quem quiser a mancha em vez da fita. Opcional porque
+        # o raio fixo em volta de cada amostra é justamente o que deixava
+        # buraco entre leituras espaçadas.
+        if com_calor:
+            png = _calor_no_kmz(am, campo_a, False)
+            if png:
+                dentro.append(png)
 
         # pontos de medição, com balão e linha do tempo
         usados, passo = _decimar(sorted(am, key=lambda x: x.get("ts") or 0),
@@ -6567,9 +6866,9 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         marcas = []
         for a in usados:
             v = a.get(campo_a)
-            # Mesmo gradiente da rota: ponto e linha discordarem de cor no
-            # mesmo lugar seria confuso.
-            cor = cor_continua(v, esc_a) or "9E9E9E"
+            # A MESMA faixa da linha: ponto e linha discordarem de cor no
+            # mesmo lugar tiraria a confiança nos dois.
+            cor = cor_da_leitura(v, campo_a)
             cores_ponto.add(cor)
             quando_a = (datetime.fromtimestamp(a["ts"]).strftime(
                 "%Y-%m-%dT%H:%M:%S") if a.get("ts") else None)
@@ -6579,8 +6878,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                                      ponto=(a["lat"], a["lon"]),
                                      quando=quando_a))
         nota = (f" — 1 a cada {passo} amostras" if passo > 1 else "")
+        # Desligada: com milhares de leituras, os pontos cobrem a fita.
+        # Ligada, dá o balão de cada leitura com todas as grandezas.
         dentro.append(
             f"<Folder><name>Medições ({len(marcas)})</name><open>0</open>"
+            f"<visibility>0</visibility>"
             f"<description><![CDATA[Clique num ponto para ver todas as "
             f"grandezas medidas ali.{nota}]]></description>"
             f"{''.join(marcas)}</Folder>")
@@ -6588,8 +6890,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         # fora do requisito — desligada: ligada, cobre os pontos bons
         if lim_a is not None:
             ruins = [a for a in am if a.get(campo_a) is not None
-                     and ((a[campo_a] <= lim_a) if op_a == ">"
-                          else (a[campo_a] >= lim_a))]
+                     and not atende(a[campo_a], op_a, lim_a)]
             ruins, _ = _decimar(ruins, max_pontos // 2)
             if ruins:
                 itens = [_placemark(f"{a[campo_a]:.0f} {un_a}",
@@ -6665,15 +6966,9 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 f"cada ERB/ERM, na posição do veículo.]]></description>"
                 f"{''.join(itens_r)}</Folder>")
 
-    # Agora que se sabe QUAIS cores apareceram, emite so essas: gerar as
-    # 40 do gradiente vezes seis grandezas encheria o arquivo de estilo
-    # morto.
-    # Linha e ponto tem conjuntos SEPARADOS: uma cor que so aparece em
-    # ponto nao precisa de estilo de linha, e vice-versa.
-    for cor in sorted(cores_linha):
-        estilos.append(
-            f'<Style id="r{cor}"><LineStyle><color>{_kml_cor(cor, 255)}</color>'
-            f'<width>3.2</width></LineStyle></Style>')
+    # Agora que se sabe QUAIS cores de ponto apareceram, emite so essas.
+    # A fita usa os estilos `l<cor>`, um por faixa da legenda, emitidos no
+    # começo; o antigo `r<cor>` era do gradiente de 40 tons, que saiu.
     for cor in sorted(cores_ponto):
         estilos.append(
             f'<Style id="q{cor}"><IconStyle><color>{_kml_cor(cor)}</color>'
@@ -6703,15 +6998,10 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                       f"<open>1</open>{''.join(itens_m)}</Folder>")
 
     # ── descrição do documento: legenda e procedência ──
-    legenda = []
-    ant = None
-    for lim, cor in faixas:
-        if ant is None:      rng = f"até {lim:g}"
-        elif lim > 900:      rng = f"acima de {ant:g}"
-        else:                rng = f"{ant:g} a {lim:g}"
-        legenda.append(f"<tr><td bgcolor='#{cor}' width='26'>&nbsp;</td>"
-                       f"<td>{rng} {unid}</td></tr>")
-        ant = lim
+    # Os MESMOS rótulos da legenda na tela e do slide de Metodologia.
+    legenda = [f"<tr><td bgcolor='#{cor}' width='26'>&nbsp;</td>"
+               f"<td>{_esc(rng)} {unid}</td><td><i>{_esc(cls)}</i></td></tr>"
+               for rng, cor, cls in _faixas_rotuladas(campo)]
     ef = sv.get("intervalo_efetivo_s") or sv.get("intervalo_s")
     n_cache = sum(1 for a in am if a.get("fonte") == "cache")
     # Título e descrição carregam grandeza e banda: com seis arquivos
@@ -8480,7 +8770,7 @@ def survey_resumo(amostras):
         if not vs:
             out[campo] = None
             continue
-        dentro = sum(1 for v in vs if (v > lim if op == ">" else v < lim))
+        dentro = sum(1 for v in vs if atende(v, op, lim))
         vs_ord = sorted(vs)
         out[campo] = {
             "n": len(vs), "pct_ok": round(dentro / len(vs) * 100, 1),
@@ -9573,7 +9863,10 @@ ESCALAS = {
               "melhor": "alto"},
     "snr":   {"rot": "SNR",  "un": "dB",  "lo": 5,   "hi": 45,  "req": 20,
               "melhor": "alto"},
-    "ruido": {"rot": "Ruído","un": "dBm", "lo": -100,"hi": -70, "req": -85,
+    # -95 é DERIVADO, não contratual: é o ruído acima do qual um sinal no
+    # mínimo Modular (-75 dBm) já não chega a SNR 20. O -85 de antes dava
+    # SNR 10 nesse sinal — aprovava ruído que reprova o enlace.
+    "ruido": {"rot": "Ruído","un": "dBm", "lo": -110,"hi": -80, "req": -95,
               "melhor": "baixo"},
     "rtt":   {"rot": "Latência","un":"ms","lo": 0,   "hi": 200, "req": 100,
               "melhor": "baixo"},
@@ -11805,14 +12098,13 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     # mao ela divergiria do mapa na primeira vez que as faixas mudassem.
     _txt_anglo(s, 8.15, 1.5, 4.65, 0.3, "Escala de classificação — RSSI",
                10, True, ANGLO["texto"])
-    faixas_s = FAIXAS_KML["sinal_cob"]
-    leitura = ["inutilizável", "muito fraco", "fraco", "limite do requisito",
-               "aceitável", "bom", "muito bom", "excelente"]
+    # Rótulos, cores e classes de `_faixas_rotuladas`: a mesma fonte da
+    # legenda na tela do KMZ. Pior embaixo, como no mapa.
     y = 1.85
-    for k, (lim, cor) in enumerate(faixas_s):
+    faixas_s = FAIXAS_KML["sinal_cob"]
+    for k, (rot, cor, cls) in reversed(list(enumerate(
+            _faixas_rotuladas("sinal_cob")))):
         ant = faixas_s[k - 1][0] if k else None
-        rot = (f"< {lim:g}" if ant is None else
-               f"> {ant:g}" if lim > 900 else f"{ant:g} a {lim:g}")
         try:
             from pptx.util import Inches as _In
             from pptx.enum.shapes import MSO_SHAPE
@@ -11823,17 +12115,17 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
             cx.line.fill.background(); cx.shadow.inherit = False
         except Exception:
             pass
-        cls = leitura[k] if k < len(leitura) else ""
         _txt_anglo(s, 8.70, y - 0.03, 4.1, 0.3,
-                   f"{rot} dBm   {cls}", 9.5,
+                   f"{rot} dBm   {cls}".rstrip(), 9.5,
                    negrito=(ant == req_s), cor=ANGLO["texto"])
         y += 0.30
     _txt_anglo(s, 8.15, y + 0.05, 4.65, 0.5,
-               f"Corte em {req_s:g} dBm: requisito contratual.", 9,
+               f"Requisito Modular Mining: RSSI > {req_s:g} dBm. "
+               f"{req_s:g} dBm exato é reprovado.", 9,
                False, ANGLO["suave"])
-    _txt_anglo(s, 0.55, 6.8, 7.5, 0.4,
-               "O raster do KMZ usa esta mesma tabela, em degraus por "
-               "faixa.", 9, False, ANGLO["suave"])
+    _txt_anglo(s, 0.55, 6.8, 12.25, 0.4,
+               f"{FONTE_FAIXAS['sinal_cob']} O mapa do KMZ usa esta mesma "
+               f"tabela.", 9, False, ANGLO["suave"])
 
     # ── Laudo das capturas feitas paradas ──
     # Uma por slide. Vem antes das paginas de area de proposito: quem
@@ -12064,16 +12356,14 @@ def distribuicao(amostras, campo):
     vals = [a[campo] for a in amostras if a.get(campo) is not None]
     if not vals: return [], [], un
 
-    rotulos, contas, ant = [], [], None
-    for lim, _cor in faixas:
-        if ant is None:        rot = f"< {lim:g}"
-        elif abs(lim) > 900:   rot = f"> {ant:g}"
-        else:                  rot = f"{ant:g} a {lim:g}"
-        n = sum(1 for v in vals
-                if (ant is None or v >= ant) and v < lim)
-        if abs(lim) > 900:
-            n = sum(1 for v in vals if v >= ant)
-        rotulos.append(rot); contas.append(n); ant = lim
+    # A MESMA classificação do mapa, fronteira incluída: contar aqui com
+    # outra regra faria a barra de "reprovado" discordar da cor do ponto
+    # justamente nas leituras exatas de limite, que são as mais comuns.
+    baixo = limites_na_faixa_de_baixo(campo)
+    contas = [0] * len(faixas)
+    for v in vals:
+        contas[_faixa_idx(v, faixas, baixo)] += 1
+    rotulos = [r for r, _c, _k in _faixas_rotuladas(campo)]
     tot = len(vals)
     return rotulos, [round(100.0*c/tot, 1) for c in contas], un
 
@@ -12183,67 +12473,59 @@ def _linha_anglo(s, x, y, w):
     return cx
 
 
-def _escala_anglo(s, x, y, w, campo, blocos=28):
-    """Barra da escala de cores, com os extremos e o requisito marcados.
+def _escala_anglo(s, x, y, w, campo):
+    """Barra da escala de cores do slide, com o requisito marcado.
 
-    O slide mostrava o mapa colorido e o gráfico de distribuição sem dizer
-    o que cada cor significa: quem abrisse o deck sem ter feito a medição
-    via uma fita vermelha-e-verde e tinha de adivinhar o limiar.
-
-    A cor sai de `cor_continua`, a MESMA função que pinta a rota no KMZ e
-    o traçado do PNG. Redesenhar a escala com um gradiente próprio faria
-    ela divergir do mapa na primeira vez que a paleta mudasse — e uma
-    legenda que discorda do mapa é pior que legenda nenhuma.
+    Um bloco por FAIXA da legenda, com a cor e o intervalo exatos de
+    `_faixas_rotuladas` — a mesma fonte da legenda impressa no mapa do
+    Google Earth que é colado ao lado. Era um gradiente contínuo de 28
+    tons: o print mostrava as faixas e a barra do slide mostrava outra
+    régua, e ainda escrevia "requisito ≥ -75" com o requisito sendo > -75.
     """
     from pptx.util import Inches, Pt
     from pptx.enum.shapes import MSO_SHAPE
     from pptx.enum.text import PP_ALIGN
 
     esc = ESCALAS.get(campo)
-    if not esc:
+    faixas = FAIXAS_KML.get(campo)
+    if not esc or not faixas:
         return None
-    lo, hi = float(esc["lo"]), float(esc["hi"])
-    un, req = esc.get("un", ""), esc.get("req")
-    maior_melhor = esc.get("melhor") == "alto"
+    un = esc.get("un", "")
+    rotulos = _faixas_rotuladas(campo)
 
     _txt_anglo(s, x, y, w, 0.24,
                f"Escala — {esc.get('rot', campo)} ({un})", 9.5, True,
                ANGLO["suave"])
 
     yb, hb = y + 0.24, 0.26
-    lb = w / blocos
-    for i in range(blocos):
-        v = lo + (hi - lo) * (i + 0.5) / blocos
-        cor = cor_continua(v, esc)
-        if not cor: continue
+    lb = w / len(rotulos)
+    for i, (rng, cor, _cls) in enumerate(rotulos):
         r = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x + i * lb),
                                Inches(yb), Inches(lb + 0.004), Inches(hb))
         r.fill.solid(); r.fill.fore_color.rgb = _rgb(cor)
         r.line.fill.background(); r.shadow.inherit = False
+        t = _txt_anglo(s, x + i * lb, yb + hb + 0.02, lb, 0.22, rng, 7.5,
+                       False, ANGLO["suave"])
+        t.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
-    # Extremos: "pior" e "melhor" ficam do lado certo conforme a grandeza,
-    # senão a legenda inverte o sentido em ruído, perda, RTT e interf.
-    _txt_anglo(s, x, yb + hb + 0.02, w / 2, 0.22,
-               f"{lo:g}", 8.5, False, ANGLO["suave"])
-    cx = _txt_anglo(s, x + w / 2, yb + hb + 0.02, w / 2, 0.22,
-                    f"{hi:g}", 8.5, False, ANGLO["suave"])
-    cx.text_frame.paragraphs[0].alignment = PP_ALIGN.RIGHT
-
-    if req is not None and lo != hi:
-        f = (float(req) - lo) / (hi - lo)
-        if 0.0 <= f <= 1.0:
-            # Marca no ponto exato do requisito, não no meio do bloco: é
-            # a linha que separa aprovado de reprovado.
+    req = limite_de(campo)
+    if req is not None:
+        op, lim = req[0], float(req[1])
+        k = next((i for i, (l, _c) in enumerate(faixas) if l == lim), None)
+        if k is not None:
+            # Marca na divisa entre as duas faixas que o requisito separa:
+            # é a linha entre aprovado e reprovado.
+            fx = x + (k + 1) * lb
             mk = s.shapes.add_shape(MSO_SHAPE.RECTANGLE,
-                                    Inches(x + f * w - 0.008), Inches(yb - 0.05),
+                                    Inches(fx - 0.008), Inches(yb - 0.05),
                                     Inches(0.016), Inches(hb + 0.10))
             mk.fill.solid(); mk.fill.fore_color.rgb = _rgb(ANGLO["texto"])
             mk.line.fill.background(); mk.shadow.inherit = False
-            op = "≥" if maior_melhor else "≤"
-            _txt_anglo(s, x, yb + hb + 0.24, w, 0.22,
-                       f"requisito {op} {float(req):g} {un}", 8.5, True,
-                       ANGLO["azul"])
-    return yb + hb + 0.46
+        nome = ("requisito" if campo in REQUISITOS or campo == "sinal_cob"
+                else "referência")
+        _txt_anglo(s, x, yb + hb + 0.26, w, 0.22,
+                   f"{nome} {op} {lim:g} {un}", 8.5, True, ANGLO["azul"])
+    return yb + hb + 0.50
 
 
 def _moldura_anglo(s, x, y, w, h, arquivo, detalhe):

@@ -2500,8 +2500,10 @@ class TestTodosOsKmz(unittest.TestCase):
     def test_ruido_tem_escala_de_cor(self):
         # Sem ela o slide de Noise Floor ficava sem KMZ para o print.
         self.assertIn("ruido", rm.FAIXAS_KML)
-        self.assertEqual(rm._bucket_cor(-98, rm.FAIXAS_KML["ruido"]), "27AE60")
-        self.assertEqual(rm._bucket_cor(-70, rm.FAIXAS_KML["ruido"]), "C0392B")
+        # Os dois pisos reais do arquivo do cliente: 5,8 GHz limpo,
+        # 2,4 GHz onde um sinal de -75 já não chega a SNR 20.
+        self.assertEqual(rm.cor_da_leitura(-109, "ruido"), "3EAD30")
+        self.assertEqual(rm.cor_da_leitura(-94, "ruido"), "FF0000")
 
     def test_grandeza_sem_medicao_e_pulada_com_motivo(self):
         con = rm.banco()
@@ -3093,14 +3095,14 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertIn("<visibility>0</visibility>", txt)
 
     def test_cor_segue_a_faixa_da_grandeza(self):
-        # Escala alinhada aos survey comerciais: -90..-45 dBm, cortes em
-        # -50/-60/-67/-70/-80, e o -75 do requisito com faixa propria.
-        for v, esperado in ((-95, "8B1A1A"), (-83, "C0392B"),
-                            (-77, "E74C3C"), (-72, "E67E22"),
-                            (-68, "F1C40F"), (-63, "9ACD32"),
-                            (-55, "27AE60"), (-45, "1E8449")):
-            self.assertEqual(rm._bucket_cor(v, rm.FAIXAS_KML["sinal"]),
-                             esperado, f"{v} dBm")
+        # MetaGeek/Oscium (-90, -80, -70, -67) mais o -75 Modular, nas
+        # cores do Rajant MeshMapper. Um valor dentro de cada faixa.
+        for v, esperado in ((-95, "5C0000"), (-85, "B70404"),
+                            (-78, "FF0000"), (-72, "F26A00"),
+                            (-69, "DD9F17"), (-60, "3EAD30"),
+                            (-40, "3EAD30")):
+            self.assertEqual(rm.cor_da_leitura(v, "sinal"), esperado,
+                             f"{v} dBm")
 
     def test_faixas_sao_monotonas(self):
         # Limites fora de ordem fariam _bucket_cor devolver a cor errada
@@ -3157,21 +3159,34 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertIn("Cava", raiz.find(self.NS + "Document")
                       .find(self.NS + "name").text)
 
-    def test_rota_sai_como_mapa_de_calor(self):
-        # A SUPERFICIE de cobertura continua fora: ela pintava terreno
-        # onde ninguem passou. O que entrou e o RASTRO em calor, com raio
-        # limitado em volta de cada medicao — pedido depois de ver que a
-        # linha ficava fina no satelite e ligava pontos distantes por
-        # retas que ninguem percorreu.
+    def _com_calor(self):
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        cfg.set("relatorio", "kmz_com_calor", "true")
+        return cfg
+
+    def test_rastro_sai_como_fita_do_trajeto(self):
+        # O calor de raio fixo saía em bolhas soltas com amostras a 60-80 m
+        # (o print do cliente). O rastro padrão é a fita, como o MeshMapper
+        # desenha — e o calor não entra no arquivo sem ser pedido.
         import zipfile, io as _io
         dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
                                        campo="sinal")
         z = zipfile.ZipFile(_io.BytesIO(dados))
-        pngs = [n for n in z.namelist() if n.endswith(".png")]
-        self.assertTrue(pngs, "KMZ saiu sem o raster do calor")
         doc = z.read("doc.kml").decode()
-        self.assertIn("<GroundOverlay>", doc)
+        self.assertIn("<name>Trajeto", doc)
+        self.assertIn("<LineString>", doc)
+        self.assertNotIn("<GroundOverlay>", doc)
+        self.assertFalse([n for n in z.namelist() if "calor_" in n])
+
+    def test_calor_volta_quando_pedido_e_desligado(self):
+        import zipfile, io as _io
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self._com_calor(),
+                                       campo="sinal")
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        i = doc.index("<GroundOverlay>")
         self.assertIn("<LatLonBox>", doc)   # sem georreferencia ele escorrega
+        self.assertIn("<visibility>0</visibility>", doc[i:i + 200],
+                      "o calor pedido nasce ligado por cima da fita")
 
     def test_calor_so_onde_passou(self):
         # O que separa "medi aqui" de "acho que la deve dar": fora do raio
@@ -3179,10 +3194,10 @@ class TestKmlSurvey(unittest.TestCase):
         import zipfile, io as _io, numpy as np
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.image as mpimg
-        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self._com_calor(),
                                        campo="sinal")
         z = zipfile.ZipFile(_io.BytesIO(dados))
-        png = [n for n in z.namelist() if n.endswith(".png")][0]
+        png = [n for n in z.namelist() if "calor_" in n][0]
         img = mpimg.imread(_io.BytesIO(z.read(png)))
         alfa = img[..., 3]
         self.assertGreater((alfa < 0.02).mean(), 0.4,
@@ -3208,9 +3223,10 @@ class TestKmlSurvey(unittest.TestCase):
                        "sinal": -50.0, "snr": 42.0, "ruido": -95.0})
         dados, _ = rm.gerar_kml_survey(
             {"id": 1, "nome": "T", "inicio": 1756000000},
-            am, {"ERB-9": (-27.7255, -50.0669)}, cfg=self.cfg, campo="sinal")
+            am, {"ERB-9": (-27.7255, -50.0669)}, cfg=self._com_calor(),
+            campo="sinal")
         z = zipfile.ZipFile(_io.BytesIO(dados))
-        png = [n for n in z.namelist() if n.endswith(".png")][0]
+        png = [n for n in z.namelist() if "calor_" in n][0]
         img = mpimg.imread(_io.BytesIO(z.read(png)))
         rgb, alfa = img[..., :3], img[..., 3]
         pintado = alfa > 0.4
@@ -3246,18 +3262,19 @@ class TestKmlSurvey(unittest.TestCase):
         trecho = fonte[i:i+260]
         self.assertIn("raio", trecho)
 
-    def test_rotas_desligadas_por_padrao(self):
-        # A linha inventava aresta reta entre pontos distantes.
-        _, txt, _ = self._arvore()
-        self.assertNotIn("<name>Rotas", txt)
-
-    def test_rota_volta_quando_pedida(self):
-        self.cfg.set("relatorio", "kmz_com_rotas", "true")
-        try:
-            _, txt, _ = self._arvore()
-        finally:
-            self.cfg.set("relatorio", "kmz_com_rotas", "false")
-        self.assertIn("<name>Rotas", txt)
+    def test_fita_parte_onde_houve_buraco(self):
+        # A linha tinha saído do padrão por inventar reta entre pontos
+        # distantes. Voltou partida nos buracos de medição: um salto de
+        # 1 km no meio do trajeto vira dois trechos, não uma reta.
+        am = [dict(a) for a in self.am if a["radio"] == "CA-1001"]
+        for a in am[6:]:
+            a["lat"] += 0.01                 # ~1,1 km para o norte
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io, re as _re
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        contornos = _re.findall(r"#lcontorno</styleUrl><LineString>", doc)
+        self.assertEqual(len(contornos), 2)
 
     def test_cada_medicao_tem_a_cor_da_escala(self):
         # Cor por AMOSTRA, no gradiente continuo — nao mais oito faixas
@@ -3288,8 +3305,10 @@ class TestKmlSurvey(unittest.TestCase):
         # styleUrl sem Style faz o Google Earth desenhar linha branca.
         import re as _re
         _, txt, _ = self._arvore()
-        usados = set(_re.findall(r"<styleUrl>#([rq][0-9A-F]{6})</styleUrl>", txt))
-        defin = set(_re.findall(r'<Style id="([rq][0-9A-F]{6})">', txt))
+        usados = set(_re.findall(r"<styleUrl>#([lq][0-9A-F]{6}|lcontorno)"
+                                 r"</styleUrl>", txt))
+        defin = set(_re.findall(r'<Style id="([lq][0-9A-F]{6}|lcontorno)">',
+                                txt))
         self.assertTrue(usados)
         self.assertEqual(usados - defin, set())
 
@@ -3305,41 +3324,55 @@ class TestKmlSurvey(unittest.TestCase):
             self.assertNotIn(f"<styleUrl>#{sid}</styleUrl>", txt)
 
     def test_so_as_cores_usadas_viram_estilo(self):
-        # Emitir as 40 do gradiente vezes seis grandezas encheria o
-        # arquivo de estilo morto.
+        # Os pontos só emitem estilo para as cores que apareceram.
         import re as _re
         _, txt, _ = self._arvore()
-        usados = set(_re.findall(r"<styleUrl>#r([0-9A-F]{6})</styleUrl>", txt))
-        defin = set(_re.findall(r'<Style id="r([0-9A-F]{6})">', txt))
+        usados = set(_re.findall(r"<styleUrl>#q([0-9A-F]{6})</styleUrl>", txt))
+        defin = set(_re.findall(r'<Style id="q([0-9A-F]{6})">', txt))
         self.assertEqual(defin - usados, set(), "estilo definido sem uso")
+        # E o gradiente de 40 tons não existe mais em lugar nenhum.
+        self.assertNotRegex(txt, r'<Style id="r[0-9A-F]{6}">')
 
     def test_rota_funde_trechos_de_mesma_cor(self):
         # Um Placemark por PAR de pontos dava mais de mil objetos por
         # radio, pesados de abrir e com emenda visivel entre segmentos.
-        # A linha vem DESLIGADA no padrao (o rastro e o calor), entao o
-        # teste liga: sem isso ele passava de carona nos poligonos das
-        # zonas-problema e parou de cobrir a fusao quando elas sairam.
-        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
-        cfg.set("relatorio", "kmz_com_rotas", "true")
-        self.cfg = cfg
-        _, txt, _ = self._arvore()
+        # Conta só as FITAS coloridas — antes o teste passava de carona
+        # no contorno, que sempre tem todos os pontos.
         import re as _re
-        comp = [len(c.split()) for c in
-                _re.findall(r"<coordinates>([^<]*)</coordinates>", txt)]
-        self.assertTrue(any(c > 2 for c in comp),
-                        "nenhuma polilinha com mais de 2 pontos")
+        am = [{"radio": "CA-1", "ts": k, "lat": -27.73 + k * 1e-4,
+               "lon": -50.07, "sinal": -60.0 if k < 10 else -78.0}
+              for k in range(20)]
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        fitas = _re.findall(r"<styleUrl>#l([0-9A-F]{6})</styleUrl><LineString>"
+                            r".*?<coordinates>([^<]*)</coordinates>", doc)
+        self.assertEqual([c for c, _ in fitas], ["3EAD30", "FF0000"],
+                         "20 leituras em duas faixas viraram mais que 2 fitas")
+        self.assertEqual([len(xy.split()) for _, xy in fitas], [20, 20])
 
     def test_rota_tem_contorno_escuro(self):
         # Truque de cartografia: contorno por baixo deixa a linha legivel
-        # tanto sobre satelite claro quanto escuro. So vale com a linha
-        # ligada — no padrao o rastro e o calor.
-        self.cfg.set("relatorio", "kmz_com_rotas", "true")
-        try:
-            _, txt, _ = self._arvore()
-        finally:
-            self.cfg.set("relatorio", "kmz_com_rotas", "false")
+        # tanto sobre satelite claro quanto escuro.
+        _, txt, _ = self._arvore()
         self.assertIn('<Style id="lcontorno">', txt)
         self.assertIn("#lcontorno", txt)
+
+    def test_todo_contorno_vem_antes_de_toda_cor(self):
+        # Contorno intercalado por veículo cobria a cor do outro veículo
+        # no cruzamento de pistas.
+        am = self.am + [dict(a, radio="CA-2002", lon=a["lon"] + 2e-4)
+                        for a in self.am if a["radio"] == "CA-1001"]
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io, re as _re
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        seq = _re.findall(r"<styleUrl>#(lcontorno|l[0-9A-F]{6})</styleUrl>",
+                          doc)
+        ult_contorno = max(i for i, x in enumerate(seq) if x == "lcontorno")
+        pri_cor = min(i for i, x in enumerate(seq) if x != "lcontorno")
+        self.assertLess(ult_contorno, pri_cor)
 
     def test_rota_nao_marca_inicio_nem_fim(self):
         # Retirados a pedido: com uma dezena de equipamentos, viravam duas
@@ -3351,24 +3384,61 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertNotIn("rotaFim", txt)
 
     def test_cor_da_rota_nao_e_suavizada(self):
-        # Foi pedido explicitamente: cada medicao com a SUA cor. A
-        # mediana movel que existia aqui suavizava o tracado e escondia
-        # a variacao ponto a ponto.
+        # Foi pedido explicitamente: cada medicao com a SUA cor. Nem média
+        # móvel nem gradiente contínuo: a cor é a faixa da legenda.
         fonte = inspect.getsource(rm.gerar_kml_survey)
         self.assertNotIn("mediana movel", fonte.replace("ó", "o"))
-        self.assertIn("cor_continua(v, esc_a)", fonte)
+        self.assertNotIn("cor_continua(", fonte)
+        self.assertIn("_fita_por_amostra(", fonte)
 
-    def test_rota_ligada_sai_como_fita_visivel(self):
-        # Quando se pede a linha, ela tem de LER sobre o satelite da cava,
-        # que e claro e cheio de textura: com 2,6 px e alfa baixo parecia
-        # risco de GPS, nao medicao.
-        self.cfg.set("relatorio", "kmz_com_rotas", "true")
-        try:
-            _, txt, _ = self._arvore()
-        finally:
-            self.cfg.set("relatorio", "kmz_com_rotas", "false")
+    def test_cada_trecho_mostra_a_leitura_mais_proxima(self):
+        # A amostra é dona do caminho até o ponto médio com a vizinha. O
+        # ponto onde a cor troca é exatamente o meio entre as duas
+        # leituras — nenhum trecho mostra média nem cor interpolada.
+        corrida = [{"lat": 0.0, "lon": 0.0, "sinal": -60.0},
+                   {"lat": 0.0, "lon": 0.001, "sinal": -60.0},
+                   {"lat": 0.0, "lon": 0.002, "sinal": -78.0},
+                   {"lat": 0.0, "lon": 0.003, "sinal": -60.0}]
+        f = rm._fita_por_amostra(corrida, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual([c for c, _, _ in f], ["3EAD30", "FF0000", "3EAD30"])
+        self.assertEqual(f[0][1][-1], (0.0, 0.0015))   # meio entre 2ª e 3ª
+        self.assertEqual(f[1][1], [(0.0, 0.0015), (0.0, 0.002), (0.0, 0.0025)])
+        self.assertEqual(f[2][1][0], (0.0, 0.0025))
+        self.assertEqual([v for _, _, v in f], [[-60.0, -60.0], [-78.0], [-60.0]])
+
+    def test_fita_opaca_na_cor_exata_da_faixa(self):
+        # Com alfa, o vermelho do chão da cava tingia o verde e a cor vista
+        # deixava de ser a da faixa. Opaca = ff no alfa do KML (aabbggrr).
+        _, txt, _ = self._arvore()
         self.assertIn("<width>7</width>", txt)
-        self.assertIn('id="lcontorno"', txt)
+        self.assertIn('<Style id="l3EAD30"><LineStyle><color>ff30ad3e</color>',
+                      txt)
+
+    def test_leitura_isolada_nao_some_do_mapa(self):
+        # Uma leitura sozinha entre dois buracos não tem linha a traçar,
+        # mas é medição: sai como ponto na pasta do trajeto.
+        am = [{"radio": "CA-1", "ts": 0, "lat": -27.73, "lon": -50.07,
+               "sinal": -60.0},
+              {"radio": "CA-1", "ts": 500, "lat": -27.70, "lon": -50.07,
+               "sinal": -78.0}]
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        trajeto = doc[doc.index("<name>Trajeto"):doc.index("<name>Medições")]
+        self.assertEqual(trajeto.count("<Point>"), 2)
+        self.assertIn("#qFF0000", trajeto)
+
+    def test_legenda_vai_na_tela_de_cada_aba(self):
+        # O print do Google Earth colado no slide leva a própria régua.
+        import zipfile, io as _io
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                       campos=["sinal", "snr"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        self.assertEqual(doc.count("<ScreenOverlay>"), 2)
+        self.assertIn("files/legenda_sinal.png", z.namelist())
+        self.assertIn("files/legenda_snr.png", z.namelist())
 
     def test_interpolacao_nao_inventa_cobertura(self):
         # Fora do raio fica NaN -> transparente. Sem isso o mapa pintaria
@@ -4641,12 +4711,22 @@ class TestCapturaParada(unittest.TestCase):
 
     def test_nada_em_deslocamento_nao_gera_rastro_de_calor(self):
         # A regressao concreta: `moveis or amostras_aba` fazia a captura
-        # parada cair de volta no conjunto inteiro e pintar tudo.
-        import inspect
-        fonte = inspect.getsource(rm.gerar_kml_survey)
-        i = fonte.index("if not andou:")
-        self.assertIn("return \"\"", fonte[i:i + 700],
-                      "captura parada voltou a virar mancha de um pixel")
+        # parada cair de volta no conjunto inteiro e pintar tudo. Vale
+        # para a fita e para o calor, pedido ou não.
+        import zipfile, io as _io
+        am = [{"radio": "ERM-12", "ts": 100.0 + k, "lat": -18.92 + k * 1e-7,
+               "lon": -43.42, "sinal": -70.0, "banda": "5.8 GHz"}
+              for k in range(40)]
+        self.assertEqual(rm._amostras_do_rastro(am), [])
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        cfg.set("relatorio", "kmz_com_calor", "true")
+        dados, _ = rm.gerar_kml_survey({"nome": "p", "inicio": 100.0}, am,
+                                       cfg=cfg, campo="sinal")
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertNotIn("<name>Trajeto", doc,
+                         "captura parada voltou a virar rabisco no mapa")
+        self.assertNotIn("<GroundOverlay>", doc,
+                         "captura parada voltou a virar mancha de um pixel")
 
 
 class TestCensoDeVizinhos(unittest.TestCase):
@@ -5099,14 +5179,176 @@ class TestSlideDeMetodologia(unittest.TestCase):
                     cores.append(str(sh.fill.fore_color.rgb).upper())
             except Exception:
                 pass
+        # Melhor em cima, como na legenda do mapa.
         self.assertEqual(cores,
-                         [c.upper() for _, c in rm.FAIXAS_KML["sinal"]])
+                         [c.upper() for _, c in
+                          reversed(rm.FAIXAS_KML["sinal"])])
 
     def test_ping_pong_saiu_dos_cartoes(self):
         for s in self.p.slides:
             for sh in s.shapes:
                 if sh.has_text_frame:
                     self.assertNotIn("Ping-pong", sh.text_frame.text)
+
+    def test_metodologia_cita_a_fonte_da_regua(self):
+        s = self._slide("Metodologia")
+        texto = " ".join(sh.text_frame.text for sh in s.shapes
+                         if sh.has_text_frame)
+        self.assertIn("MetaGeek", texto)
+        self.assertIn("Rajant MeshMapper", texto)
+
+    def test_barra_do_slide_e_a_regua_do_mapa(self):
+        # A barra ao lado do print era um gradiente de 28 tons e escrevia
+        # "requisito ≥ -75" com o requisito sendo > -75.
+        s = self._slide("Intensidade de Sinal (RSSI)")
+        self.assertIsNotNone(s)
+        textos = [sh.text_frame.text for sh in s.shapes if sh.has_text_frame]
+        self.assertIn("requisito > -75 dBm", textos)
+        self.assertFalse([t for t in textos if "≥ -75" in t])
+        cores = []
+        for sh in s.shapes:
+            try:
+                if (sh.fill.type is not None and sh.height < 300000
+                        and sh.fill.fore_color.rgb is not None):
+                    cores.append(str(sh.fill.fore_color.rgb).upper())
+            except Exception:
+                pass
+        rotulos = rm._faixas_rotuladas("sinal_cob")
+        self.assertEqual([c for c in cores if c in {x[1] for x in rotulos}],
+                         [c for _, c, _ in rotulos])
+        for rng, _c, _k in rotulos:
+            self.assertIn(rng, textos)
+
+
+class TestReguaOficial(unittest.TestCase):
+    """A régua de cor de cada grandeza é rastreável a uma fonte, e a cor
+    de uma leitura nunca discorda da contagem de reprovados.
+
+    O rádio reporta dBm e dB INTEIROS. O valor exato de cada limite é,
+    por isso, uma das leituras mais comuns — e é justamente ali que uma
+    régua mal amarrada pinta de "atende" o que o Sumário conta como
+    reprovado.
+    """
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def test_snr_e_a_regua_oficial_da_rajant(self):
+        # Limites e cores lidos do próprio MeshMapper: goodRSSI e
+        # greatRSSI no data.json (em dB de SNR), FF0000/F26A00/3EAD30 nos
+        # LineStyle do doc.kml que ele gera.
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        sv, _, _ = rm.ler_meshmapper(str(self.EXEMPLO))
+        lim = sv["limiares_mm"]
+        self.assertEqual(rm.FAIXAS_KML["snr"],
+                         [(lim["goodRSSI"], "FF0000"),
+                          (lim["greatRSSI"], "F26A00"), (999, "3EAD30")])
+
+    def test_rssi_usa_os_cortes_da_convencao_e_o_do_requisito(self):
+        lims = [l for l, _ in rm.FAIXAS_KML["sinal"][:-1]]
+        self.assertEqual(lims, [-90, -80, -75, -70, -67])
+        self.assertEqual(rm.FAIXAS_KML["sinal_cob"], rm.FAIXAS_KML["sinal"])
+
+    def test_as_cores_sao_as_da_rajant(self):
+        rajant = {"FF0000", "F26A00", "3EAD30", "DD9F17", "B70404"}
+        for campo in ("sinal", "sinal_cob", "snr", "ruido"):
+            fora = {c for _, c in rm.FAIXAS_KML[campo]} - rajant - {"5C0000"}
+            self.assertFalse(fora, f"{campo}: cor sem origem {fora}")
+
+    def _requisito(self, campo):
+        return rm.limite_de(campo)
+
+    def test_nenhuma_faixa_mistura_aprovado_e_reprovado(self):
+        # A regra central: dentro de uma faixa, todo inteiro tem o MESMO
+        # resultado no requisito. Assim a cor nunca contradiz o Sumário.
+        for campo, faixa_de_valores in (("sinal", range(-110, -30)),
+                                        ("sinal_cob", range(-110, -30)),
+                                        ("snr", range(0, 60)),
+                                        ("ruido", range(-120, -60))):
+            op, lim = self._requisito(campo)[:2]
+            por_faixa = {}
+            for v in faixa_de_valores:
+                k = rm._faixa_idx(v, rm.FAIXAS_KML[campo],
+                                  rm.limites_na_faixa_de_baixo(campo))
+                por_faixa.setdefault(k, set()).add(rm.atende(v, op, lim))
+            misturadas = {k: r for k, r in por_faixa.items() if len(r) > 1}
+            self.assertFalse(misturadas, f"{campo}: faixa com aprovado e "
+                                         f"reprovado {misturadas}")
+
+    def test_o_valor_exato_do_requisito_cai_no_vermelho(self):
+        # RSSI > -75 e SNR > 20: o limite exato é reprovado.
+        self.assertEqual(rm.cor_da_leitura(-75, "sinal_cob"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(-74, "sinal_cob"), "F26A00")
+        self.assertEqual(rm.cor_da_leitura(20, "snr"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(21, "snr"), "F26A00")
+
+    def test_nos_demais_limites_vale_a_convencao(self):
+        # -67 é o mínimo de "muito bom" na MetaGeek: -67 é muito bom.
+        # -90 já é inutilizável. SNR 30 é "great" na Rajant.
+        self.assertEqual(rm.cor_da_leitura(-67, "sinal"), "3EAD30")
+        self.assertEqual(rm.cor_da_leitura(-68, "sinal"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(-70, "sinal"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(-80, "sinal"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(-81, "sinal"), "B70404")
+        self.assertEqual(rm.cor_da_leitura(-90, "sinal"), "5C0000")
+        self.assertEqual(rm.cor_da_leitura(30, "snr"), "3EAD30")
+        self.assertEqual(rm.cor_da_leitura(29, "snr"), "F26A00")
+
+    def test_mudar_o_operador_muda_a_faixa_junto(self):
+        # Se o requisito da Modular for >= 20, o SNR 20 passa a laranja —
+        # exatamente como o MeshMapper pinta —, sem mexer em faixa nenhuma.
+        orig = rm.REQUISITOS["snr"]
+        rm.REQUISITOS["snr"] = (">=", 20.0, "dB", "SNR")
+        try:
+            self.assertEqual(rm.cor_da_leitura(20, "snr"), "F26A00")
+            self.assertTrue(rm.atende(20, ">=", 20.0))
+        finally:
+            rm.REQUISITOS["snr"] = orig
+        self.assertEqual(rm.cor_da_leitura(20, "snr"), "FF0000")
+
+    def test_ruido_derivado_bate_com_a_regua_de_snr(self):
+        # Sobre ruído N, um sinal de -75 (mínimo Modular) chega com
+        # SNR = -75 - N. A cor do ruído tem de ser a cor desse SNR.
+        for n in range(-120, -70):
+            self.assertEqual(rm.cor_da_leitura(n, "ruido"),
+                             rm.cor_da_leitura(-75 - n, "snr"), f"ruído {n}")
+
+    def test_rotulo_diz_exatamente_quais_inteiros_a_faixa_tem(self):
+        import re as _re
+        for campo in ("sinal", "snr", "ruido"):
+            faixas = rm.FAIXAS_KML[campo]
+            baixo = rm.limites_na_faixa_de_baixo(campo)
+            rot = rm._faixas_rotuladas(campo)
+
+            def contem(txt, v):
+                m = _re.fullmatch(r"(-?\d+) a (-?\d+)", txt)
+                if m: return int(m.group(1)) <= v <= int(m.group(2))
+                m = _re.fullmatch(r"(≤|≥) (-?\d+)", txt)
+                if m: return v <= int(m.group(2)) if m.group(1) == "≤" \
+                    else v >= int(m.group(2))
+                return v == int(txt)
+
+            for v in range(-130, 80):
+                k = rm._faixa_idx(v, faixas, baixo)
+                donos = [i for i, (r, _c, _k) in enumerate(rot) if contem(r, v)]
+                self.assertEqual(donos, [k], f"{campo} {v}: rótulos {donos}, "
+                                             f"cor da faixa {k}")
+
+    def test_distribuicao_conta_com_a_mesma_regua(self):
+        am = [{"sinal_cob": v} for v in (-75, -75, -74, -67, -90, -80)]
+        rot, pct, _un = rm.distribuicao(am, "sinal_cob")
+        self.assertEqual(rot, [r for r, _c, _k in
+                               rm._faixas_rotuladas("sinal_cob")])
+        # -90 | - | -80,-75,-75 | -74 | - | -67
+        self.assertEqual(pct, [16.7, 0.0, 50.0, 16.7, 0.0, 16.7])
+
+    def test_legenda_cita_a_fonte(self):
+        import tempfile, os
+        for campo in ("sinal_cob", "snr", "ruido"):
+            self.assertTrue(rm.FONTE_FAIXAS.get(campo), campo)
+        cam = os.path.join(tempfile.mkdtemp(), "l.png")
+        rm._legenda_de_faixas_png(cam, "sinal_cob")
+        self.assertGreater(os.path.getsize(cam), 1000)
 
 
 class TestCorBateComALegenda(unittest.TestCase):
@@ -5131,38 +5373,41 @@ class TestCorBateComALegenda(unittest.TestCase):
         rm._png_calor(v, np.ones_like(v), rm._cmap_rf(),
                       float(rm.ESCALAS[campo]["lo"]),
                       float(rm.ESCALAS[campo]["hi"]), cam,
-                      faixas=rm.FAIXAS_KML[campo])
+                      faixas=rm.FAIXAS_KML[campo],
+                      na_de_baixo=rm.limites_na_faixa_de_baixo(campo))
         img = mpimg.imread(cam)[::-1]
         return ["".join(f"{int(round(c * 255)):02X}" for c in img[0, j][:3])
                 for j in range(len(valores))]
 
     def test_cada_faixa_de_rssi_sai_na_cor_da_legenda(self):
-        vals = [-95.0, -82.0, -78.0, -72.0, -68.0, -62.0, -55.0, -45.0]
+        vals = [-95.0, -85.0, -78.0, -72.0, -69.0, -62.0, -45.0]
         obtido = self._pinta("sinal", vals)
         for v, cor in zip(vals, obtido):
-            esperado = rm._bucket_cor(v, rm.FAIXAS_KML["sinal"])
+            esperado = rm.cor_da_leitura(v, "sinal")
             self.assertEqual(cor.upper(), esperado.upper(),
                              f"{v:g} dBm saiu {cor}, legenda diz {esperado}")
 
     def test_vale_para_as_grandezas_de_sentido_invertido(self):
         # Ruído: quanto MAIS NEGATIVO, melhor. Se o degrau usasse o
         # sentido errado, o mapa sairia espelhado.
-        for campo, vals in (("ruido", [-99.0, -92.0, -87.0, -82.0, -60.0]),
-                            ("snr", [5.0, 12.0, 18.0, 22.0, 28.0, 35.0, 50.0])):
+        for campo, vals in (("ruido", [-110.0, -100.0, -90.0, -60.0]),
+                            ("snr", [5.0, 18.0, 22.0, 28.0, 35.0, 50.0])):
             for v, cor in zip(vals, self._pinta(campo, vals)):
-                esperado = rm._bucket_cor(v, rm.FAIXAS_KML[campo])
+                esperado = rm.cor_da_leitura(v, campo)
                 self.assertEqual(cor.upper(), esperado.upper(),
                                  f"{campo} {v:g} saiu {cor}, "
                                  f"legenda diz {esperado}")
 
-    def test_o_valor_no_limite_cai_na_faixa_de_cima(self):
-        # `_bucket_cor` usa `v < lim`. O raster tem de concordar, senão a
-        # borda de cada faixa vira uma linha de cor errada no mapa.
-        for v in (-85.0, -80.0, -75.0, -70.0, -67.0, -60.0, -50.0):
-            cor = self._pinta("sinal", [v])[0]
-            self.assertEqual(cor.upper(),
-                             rm._bucket_cor(v, rm.FAIXAS_KML["sinal"]).upper(),
-                             f"limite {v:g} divergiu")
+    def test_o_valor_exato_de_cada_limite_concorda(self):
+        # O rádio reporta inteiro: o valor exato de cada limite é comum. O
+        # raster tem de pôr cada um na MESMA faixa da linha e da legenda,
+        # senão a borda de cada faixa vira uma linha de cor errada.
+        for campo in ("sinal", "sinal_cob", "snr", "ruido", "rtt",
+                      "perda", "interf"):
+            lims = [float(l) for l, _ in rm.FAIXAS_KML[campo][:-1]]
+            for v, cor in zip(lims, self._pinta(campo, lims)):
+                self.assertEqual(cor.upper(), rm.cor_da_leitura(v, campo),
+                                 f"{campo}: limite {v:g} divergiu")
 
     def test_sem_medicao_fica_transparente(self):
         import numpy as np, tempfile, os
@@ -5189,9 +5434,11 @@ class TestCorBateComALegenda(unittest.TestCase):
                "sinal": -60.0 - i * 1.5, "banda": "5.8 GHz"}
               for i in range(24)]
         sv = {"nome": "t", "inicio": 100.0, "fim": 124.0}
-        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"])
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        cfg.set("relatorio", "kmz_com_calor", "true")
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"], cfg=cfg)
         z = zipfile.ZipFile(_io.BytesIO(dados))
-        png = [n for n in z.namelist() if n.endswith(".png")][0]
+        png = [n for n in z.namelist() if "calor_" in n][0]
         img = mpimg.imread(_io.BytesIO(z.read(png)))
         vis = img[img[..., 3] > 0.5][:, :3]
         self.assertGreater(len(vis), 100, "raster saiu vazio")
@@ -5586,7 +5833,11 @@ def _rajant_falsa(frota, t0, latencia=0.0, gps_hz=10.0):
         def reachable(self):   return self.h in frota
         def authenticate(self): return True
         def get_state(self, *a, **k):
-            if latencia: _t.sleep(latencia)
+            # `latencia` pode ser por IP: é assim que se reproduz o rádio
+            # lento, atrás de bancada, no meio de uma frota que responde.
+            lat_ = (latencia.get(self.h, 0.0) if isinstance(latencia, dict)
+                    else latencia)
+            if lat_: _t.sleep(lat_)
             return _state(self.h)
     return FakeBC
 
@@ -5879,9 +6130,11 @@ class TestColetaAoVivo(unittest.TestCase):
 
     def test_posicao_repetida_nao_vira_amostra(self):
         # O caso que enche o arquivo de ponto empilhado: o módulo não
-        # atualizou, a leitura traz a posição velha. Com gpsTime a 1 Hz e
-        # alvo de 1 m, a coleta pede muito mais rápido que o GPS entrega.
-        c = self._rodar(segundos=3.0, passo_m=1.0, gps_hz=1.0)
+        # atualizou, a leitura traz a posição velha. A releitura mínima
+        # de 1 s já evita a maior parte com GPS a 1 Hz; com um módulo mais
+        # lento (0,5 Hz) e alvo de 1 m, a coleta ainda pede antes de o GPS
+        # entregar — e o descarte tem de segurar.
+        c = self._rodar(segundos=3.5, passo_m=1.0, gps_hz=0.5)
         self.assertGreater(c.n_repetidos, 0,
                            "nenhuma posicao repetida foi descartada")
         self.assertLess(len(c.amostras), c.n_lidos)
@@ -5913,6 +6166,62 @@ class TestColetaAoVivo(unittest.TestCase):
         for a in c.amostras:
             por[a["radio"]] = por.get(a["radio"], 0) + 1
         self.assertGreater(por.get("CA-1006", 0), por.get("ERB-07", 0))
+
+    def test_radio_lento_nao_segura_o_rapido(self):
+        # O buraco de 60-80 m entre bolhas no mapa do cliente: a coleta
+        # andava em LOTES e esperava o mais lento do lote. Um rádio de 3 s
+        # travava todos os outros por 3 s — 33 m de caminhão a 40 km/h
+        # sem leitura. Com trabalhadores independentes, o rápido segue
+        # sendo lido no ritmo dele.
+        import time as _t, threading as _th
+        frota = {"10.0.0.10": ("CA-1006", 40.0, 0.0),
+                 "10.0.0.11": ("CA-1048", 40.0, 90.0),
+                 "10.0.0.66": ("CA-LENTO", 40.0, 180.0)}
+        rm.Breadcrumb = _rajant_falsa(frota, self.t0, gps_hz=10.0,
+                                      latencia={"10.0.0.66": 3.0})
+        c = self.col.Coleta({ip: v[0] for ip, v in frota.items()},
+                            passo_m=5.0, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(4.0); c.parar(); th.join(15)
+        por = {}
+        for a in c.amostras:
+            por[a["radio"]] = por.get(a["radio"], 0) + 1
+        # Em 4 s: o lento cabe ~1 vez; os rápidos, com releitura mínima de
+        # 1 s, ~4 vezes. Em lote, os três andariam juntos no ritmo do lento.
+        self.assertLessEqual(por.get("CA-LENTO", 0), 2)
+        self.assertGreaterEqual(por.get("CA-1006", 0), 3, por)
+        self.assertGreaterEqual(por.get("CA-1048", 0), 3, por)
+
+    def test_sem_gpsvel_a_velocidade_sai_do_deslocamento(self):
+        # `gpsVel` é opcional no Gps.proto. Sem ele, o caminhão caía no
+        # ritmo do rádio parado — uma leitura a cada 30 s, 300 m entre
+        # amostras a 40 km/h.
+        ag = self.col.Agenda(passo_m=10.0, parado_s=30.0)
+        ag.registrar("ca", 0.0, -18.9000, -43.4, None)
+        ag.registrar("ca", 1.0, -18.9001, -43.4, None)     # ~11 m em 1 s
+        self.assertAlmostEqual(ag.ultimo["ca"]["vel"], 40.0, delta=1.5)
+        self.assertGreaterEqual(ag.prioridade("ca", 2.0), 1.0)
+
+    def test_posicao_repetida_nao_zera_a_velocidade_estimada(self):
+        # Registrar a posição velha com o relógio novo faria a velocidade
+        # estimada dar zero, e o caminhão iria para o ritmo de parado.
+        ag = self.col.Agenda(passo_m=10.0, parado_s=30.0)
+        ag.registrar("ca", 0.0, -18.9000, -43.4, None)
+        ag.registrar("ca", 1.0, -18.9001, -43.4, None)
+        ag.adiar("ca", 2.0)                    # leu, GPS sem posição nova
+        self.assertAlmostEqual(ag.ultimo["ca"]["vel"], 40.0, delta=1.5)
+        self.assertEqual(ag.prioridade("ca", 2.5), 0.0)    # releitura mínima
+        self.assertGreaterEqual(ag.prioridade("ca", 3.1), 1.0)
+
+    def test_numero_do_ponto_bate_com_a_posicao_da_amostra(self):
+        # `cobertura_disponivel` casa vizinho e amostra pela POSIÇÃO na
+        # lista. Com leituras terminando em paralelo, um contador à parte
+        # descasaria os dois e o RSSI de um ponto iria para outro.
+        c = self._rodar(segundos=3.0, passo_m=5.0)
+        for p in c.peers:
+            a = c.amostras[p["ponto"] - 1]
+            self.assertEqual((a["lat"], a["lon"], a["radio"]),
+                             (p["lat"], p["lon"], p["movel"]))
 
     def test_parar_no_meio_preserva_o_que_ja_foi_coletado(self):
         c = self._rodar(segundos=2.0)
