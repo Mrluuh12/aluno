@@ -5907,6 +5907,20 @@ def cor_da_leitura(v, campo):
 _OP_TXT = {">": ">", ">=": "≥", "<": "<", "<=": "≤"}
 
 
+def nome_da_aba(campo):
+    """O nome da pasta da grandeza no KMZ — e o que a moldura do slide
+    manda ligar. Uma função só para os dois: a moldura cortava o título do
+    slide ("Intensidade de Sinal", "Noise Floor") e mandava procurar no
+    Google Earth abas que se chamam "RSSI (melhor ERB/ERM do ponto)" e
+    "Ruído"."""
+    lim = limite_de(campo)
+    return lim[3] if lim else campo.upper()
+
+
+# A pasta de dentro da aba que traz o rastro colorido — o que o print mostra.
+CAMADA_DO_RASTRO = "Trajeto"
+
+
 def sem_rota(v, campo):
     """Custo do caminho = 2147483647 é o trace SEM rota até o destino.
 
@@ -6846,8 +6860,9 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
 
     def _aba(campo_a, visivel):
         faixas_a = FAIXAS_KML[campo_a]
-        op_a, lim_a, un_a, rot_a = (limite_de(campo_a)
-                                    or (">", None, "", campo_a.upper()))
+        op_a, lim_a, un_a, _r = (limite_de(campo_a)
+                                 or (">", None, "", campo_a.upper()))
+        rot_a = nome_da_aba(campo_a)
         dentro = []
 
         # ── o trajeto: fita contínua, como o MeshMapper desenha ──
@@ -6907,7 +6922,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             # por veículo intercalado, o de um cobria a cor do outro no
             # cruzamento de pistas.
             dentro.append(
-                f"<Folder><name>Trajeto ({len(por_radio_rastro)} "
+                f"<Folder><name>{CAMADA_DO_RASTRO} ({len(por_radio_rastro)} "
                 f"rádio{'s' if len(por_radio_rastro) != 1 else ''})</name>"
                 f"<open>0</open>{''.join(contornos)}{''.join(fitas)}"
                 f"{''.join(soltos)}</Folder>")
@@ -12765,14 +12780,19 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
             # Mapa a esquerda, distribuicao a direita: a moldura mostra
             # ONDE, o grafico mostra QUANTO.
             suf = f"_{b.replace(' ', '').replace('.', '')}" if b else ""
+            # A aba e a camada com os nomes EXATOS do painel do Google
+            # Earth. Era "camada: Rotas" — pasta que deixou de existir
+            # quando o rastro virou a fita do Trajeto.
             _moldura_anglo(s, 0.55, 1.45, 7.3, 5.4,
                            f"Survey_*_todas{suf}.kmz",
-                           f"aba: {rot.split('(')[0].strip()}   ·   "
-                           f"camada: Rotas" + (f"   ·   {b}" if b else ""))
+                           f"aba: {nome_da_aba(campo)}   ·   "
+                           f"camada: {CAMADA_DO_RASTRO}"
+                           + (f"   ·   {b}" if b else ""))
             rotulos, pcts, un = distribuicao(am_b, campo)
             if rotulos:
                 _grafico_anglo(s, 8.05, 1.45, 4.75, 3.4,
-                               f"Distribuição ({un}) — % das amostras",
+                               "Distribuição" + (f" ({un})" if un else "")
+                               + " — % das amostras",
                                rotulos, pcts, campo=campo)
             r_res = (survey_resumo(am_b) or {}).get(campo)
             if r_res:
@@ -13052,7 +13072,8 @@ def _escala_anglo(s, x, y, w, campo):
     rotulos = _faixas_rotuladas(campo)
 
     _txt_anglo(s, x, y, w, 0.24,
-               f"Escala — {esc.get('rot', campo)} ({un})", 9.5, True,
+               f"Escala — {esc.get('rot', campo)}" + (f" ({un})" if un else ""),
+               9.5, True,
                ANGLO["suave"])
 
     yb, hb = y + 0.24, 0.26

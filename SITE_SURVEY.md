@@ -402,11 +402,12 @@ Ou pelo botão **KML** no histórico da página. Camadas que se liga e desliga:
 
 | pasta | conteúdo |
 |---|---|
-| BreadCrumbs | subpastas ERB / ERM / Móvel |
-| Rotas | cada trecho colorido pela grandeza escolhida |
-| Medições | um ponto por amostra; o balão mostra tudo que foi medido ali |
-| **ZONAS-PROBLEMA** | polígono + alfinete com a recomendação |
-| FORA DO REQUISITO | só os pontos que violam o limite — **começa desligada** |
+| uma **aba por grandeza** | RSSI, SNR, Ruído, Custo do caminho… — só a primeira ligada |
+| ↳ Trajeto | a fita colorida pela grandeza |
+| ↳ Legenda | a régua da grandeza, na tela |
+| ↳ Medições | um ponto por amostra; o balão mostra tudo que foi medido ali — **começa desligada** |
+| ↳ Fora do requisito | só os pontos que violam o limite — **começa desligada** |
+| BreadCrumbs | subpastas ERB / ERM / Móvel — só com `kmz_com_equipamentos` |
 | Medições manuais | iperf e trace |
 
 Cada ponto leva `TimeStamp`: a barra de tempo do Google Earth **anima o
@@ -534,9 +535,13 @@ moldura diz qual arquivo abrir e qual camada ligar:
 
 ```
 COLAR AQUI O PRINT DO GOOGLE EARTH
-Survey_*_snr_58GHz.kmz
-camada: Medições   ·   5.8 GHz
+Survey_*_todas_58GHz.kmz
+aba: SNR   ·   camada: Trajeto   ·   5.8 GHz
 ```
+
+Aba e camada saem de `nome_da_aba()` e `CAMADA_DO_RASTRO`, as mesmas que
+nomeiam as pastas do KMZ: a moldura não pode mandar procurar uma pasta que
+não existe (era "camada: Rotas", e a aba vinha cortada do título do slide).
 
 Para voltar a inserir as imagens automaticamente:
 

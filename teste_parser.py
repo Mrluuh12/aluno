@@ -5190,6 +5190,37 @@ class TestSlideDeMetodologia(unittest.TestCase):
                 if sh.has_text_frame:
                     self.assertNotIn("Ping-pong", sh.text_frame.text)
 
+    def test_moldura_manda_ligar_pastas_que_existem_no_kmz(self):
+        # A moldura dizia "camada: Rotas" (pasta extinta) e cortava o título
+        # do slide para nomear a aba ("Noise Floor" no slide, "Ruído" no
+        # Google Earth). Cada moldura tem de apontar a aba e a camada com o
+        # nome exato do painel de camadas.
+        import zipfile, re as _re
+        from xml.etree import ElementTree as ET
+        NS = "{http://www.opengis.net/kml/2.2}"
+        pastas = {}
+        for k in self.tmp.glob("*.kmz"):
+            banda = "5.8 GHz" if "58GHz" in k.name else "2.4 GHz"
+            raiz = ET.fromstring(zipfile.ZipFile(k).read("doc.kml"))
+            for f in raiz.find(NS + "Document").findall(NS + "Folder"):
+                sub = [g.find(NS + "name").text for g in f.findall(NS + "Folder")]
+                pastas[(banda, f.find(NS + "name").text)] = sub
+        molduras = 0
+        for s in self.p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame and "COLAR AQUI" in sh.text_frame.text:
+                    m = _re.search(r"aba: (.+?)\s+·\s+camada: (.+?)\s+·\s+(\S+ GHz)",
+                                   sh.text_frame.text)
+                    self.assertIsNotNone(m, sh.text_frame.text)
+                    aba, camada, banda = m.groups()
+                    self.assertIn((banda, aba), pastas,
+                                  f"aba '{aba}' não existe no KMZ de {banda}")
+                    self.assertTrue(any(n.startswith(camada)
+                                        for n in pastas[(banda, aba)]),
+                                    f"camada '{camada}' não existe em '{aba}'")
+                    molduras += 1
+        self.assertGreaterEqual(molduras, 4)
+
     def test_metodologia_cita_a_fonte_da_regua(self):
         s = self._slide("Metodologia")
         texto = " ".join(sh.text_frame.text for sh in s.shapes
