@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 552, em 78 classes |
+| testes | 565, em 79 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 552 testes e as âncoras de seção (§26).
+segura isso são os 565 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -588,6 +588,7 @@ As grandezas medidas e seus requisitos (Modular Mining):
 | `rtt` | Latência | ms | 0 … 200 | < 100 | baixo |
 | `perda` | Perda | % | 0 … 10 | < 2 | baixo |
 | `interf` | Interferência | % | 0 … 60 | < 20 | baixo |
+| `custo_caminho` | Custo do caminho | — | 0 … 40000 | ≤ 20000 *(Rajant)* | baixo |
 | `sinal_cob` | RSSI (melhor ERB/ERM do ponto) | dBm | −90 … −55 | > −75 | alto |
 
 `sinal_cob` é o **mesmo RSSI lido de outra fonte** — o melhor vizinho de
@@ -681,6 +682,19 @@ grandeza e o gráfico de distribuição. Rótulos, cores e classes saem de
 | RSSI | −90 · −80 · **−75** · −70 · −67 | MetaGeek/Oscium; −75 é o requisito Modular |
 | SNR | 20 · 30 | oficial Rajant: `goodRSSI`/`greatRSSI` do `data.json` do MeshMapper |
 | ruído | −105 · −95 | derivado: cor do SNR que −75 dBm teria sobre aquele ruído |
+| custo do caminho | 10000 · 20000 | oficial Rajant: `greatPath`/`goodPath`; sem rota (2147483647) no vermelho |
+
+**`custo` × `custo_caminho`.** `custo` é sempre o do **enlace** (no arquivo
+do MeshMapper, o `hopcost` do primeiro salto; na coleta ao vivo, o do
+melhor vizinho). `custo_caminho` é o `traceInfo.path.cost`, o total até
+`traceInfo.host`. Antes o `custo` do arquivo era o do caminho e o da coleta
+o do enlace — a mesma coluna do Excel dizia coisas diferentes. A coleta ao
+vivo deixa `custo_caminho` em `None`: a rajant-api 0.1.1 não tem TRACE.
+
+**`survey_resumo`**: `mediana` é a mediana (o `med` é a média, e o
+semanal a rotula assim); `pior5` segue o sentido da grandeza — os 5%
+menores em RSSI e SNR, os 5% maiores em ruído, latência, perda e custo.
+O `p05` antigo fica para quem o lê pelo nome.
 
 Cores: `FF0000`, `F26A00`, `3EAD30` são as chapadas dos `LineStyle` do
 `doc.kml` do MeshMapper; `DD9F17` e `B70404`, os tons dos alfinetes dele;

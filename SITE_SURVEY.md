@@ -515,7 +515,9 @@ Uma régua por grandeza, rastreável, impressa no rodapé da legenda do mapa:
 - **SNR**: régua oficial da Rajant, `goodRSSI = 20` e `greatRSSI = 30` do
   `data.json` do MeshMapper;
 - **ruído**: derivado — a cor do SNR que um sinal de −75 dBm teria sobre
-  aquele ruído.
+  aquele ruído;
+- **custo do caminho** (*Trace Path Cost*): régua oficial da Rajant,
+  `greatPath = 10000` e `goodPath = 20000`; sem rota sai vermelho.
 
 Tabelas completas em `LEIAME_SURVEY.md`. A barra de escala dos slides de
 cada grandeza é desenhada das **mesmas faixas**, com o intervalo de cada uma

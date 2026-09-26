@@ -5220,6 +5220,154 @@ class TestSlideDeMetodologia(unittest.TestCase):
             self.assertIn(rng, textos)
 
 
+class TestCustoDoCaminho(unittest.TestCase):
+    """Trace Path Cost: o custo do caminho até o destino do trace, a métrica
+    pela qual o próprio MeshMapper pinta o trajeto."""
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        self.sv, self.am, self.pr = rm.ler_meshmapper(str(self.EXEMPLO))
+
+    def _json(self, pontos, cfg=None):
+        import tempfile, json as _j, os
+        base = _j.load(open(self.EXEMPLO))
+        base["points"] = pontos
+        if cfg: base["configuration"].update(cfg)
+        cam = os.path.join(tempfile.mkdtemp(), "data.json")
+        _j.dump(base, open(cam, "w"))
+        return cam
+
+    def test_caminho_e_enlace_sao_campos_distintos(self):
+        # No arquivo, `cost` é o caminho inteiro e `hopcost` o primeiro
+        # salto. `custo` tem de ser o do ENLACE, como na coleta ao vivo —
+        # antes a mesma coluna "Custo" mudava de sentido com a origem.
+        self.assertEqual(self.am[0]["custo_caminho"], 17952)
+        self.assertEqual(self.am[0]["custo"], 17951)
+        self.assertEqual(self.am[-1]["custo_caminho"], 20308)
+
+    def test_sem_rota_e_medicao_e_nao_zero(self):
+        import json as _j
+        pts = _j.load(open(self.EXEMPLO))["points"][:3]
+        pts[1]["traceInfo"]["path"] = {"type": "N/A", "cost": 2147483647}
+        pts[2]["traceInfo"]["path"]["cost"] = 0
+        _, am, _ = rm.ler_meshmapper(self._json(pts))
+        self.assertEqual(am[1]["custo_caminho"], 2147483647)
+        self.assertTrue(rm.sem_rota(am[1]["custo_caminho"], "custo_caminho"))
+        # Sem rota é a PIOR medição, no vermelho, como no MeshMapper.
+        self.assertEqual(rm.cor_da_leitura(am[1]["custo_caminho"],
+                                           "custo_caminho"), "FF0000")
+        self.assertEqual(rm.fmt_leitura(am[1]["custo_caminho"],
+                                        "custo_caminho"), "sem rota")
+        # 0 não é custo de rota nenhuma — vira None, nunca "medido 0".
+        self.assertIsNone(am[2]["custo_caminho"])
+
+    def test_regua_e_a_do_proprio_meshmapper(self):
+        lim = self.sv["limiares_mm"]
+        self.assertEqual([l for l, _ in rm.FAIXAS_KML["custo_caminho"][:2]],
+                         [lim["greatPath"], lim["goodPath"]])
+        self.assertEqual([c for _, c in rm.FAIXAS_KML["custo_caminho"]],
+                         ["3EAD30", "F26A00", "FF0000"])
+
+    def test_fronteiras(self):
+        for v, cor in ((1, "3EAD30"), (10000, "3EAD30"), (10001, "F26A00"),
+                       (20000, "F26A00"), (20001, "FF0000"),
+                       (43816, "FF0000")):
+            self.assertEqual(rm.cor_da_leitura(v, "custo_caminho"), cor, v)
+        self.assertEqual(rm.limite_de("custo_caminho")[:2], ("<=", 20000.0))
+        self.assertTrue(rm.atende(20000, "<=", 20000.0))
+
+    def test_nenhuma_faixa_mistura_dentro_e_fora(self):
+        op, lim = rm.limite_de("custo_caminho")[:2]
+        baixo = rm.limites_na_faixa_de_baixo("custo_caminho")
+        por = {}
+        for v in list(range(1, 40001)) + [2147483647]:
+            k = rm._faixa_idx(v, rm.FAIXAS_KML["custo_caminho"], baixo)
+            por.setdefault(k, set()).add(rm.atende(v, op, lim))
+        self.assertTrue(all(len(r) == 1 for r in por.values()), por)
+
+    def test_mediana_e_pior_5_nao_se_deixam_levar_pelo_sem_rota(self):
+        # Com um ponto sem rota, a MÉDIA do custo vira dez dígitos. O laudo
+        # escreve "Mediana", e o pior 5% de um custo é o de CIMA.
+        am = [{"radio": "x", "custo_caminho": v}
+              for v in [12000] * 10 + [18000] * 8 + [2147483647]]
+        r = rm.survey_resumo(am)["custo_caminho"]
+        self.assertEqual(r["mediana"], 12000)
+        self.assertGreater(r["med"], 1e8)              # a média, intacta
+        self.assertEqual(r["pior5"], 2147483647)
+        self.assertEqual(rm.fmt_leitura(r["pior5"], "custo_caminho"),
+                         "sem rota")
+
+    def test_pior_5_segue_o_sentido_da_grandeza(self):
+        am = [{"radio": "x", "sinal": float(v), "rtt": float(v + 200)}
+              for v in range(-100, -40)]
+        r = rm.survey_resumo(am)
+        self.assertEqual(r["sinal"]["pior5"], -97.0)    # os menores
+        self.assertEqual(r["rtt"]["pior5"], 157.0)      # os maiores
+
+    def test_coleta_ao_vivo_nao_inventa_caminho(self):
+        # A rajant-api 0.1.1 não tem TRACE: o campo existe e é None, e a
+        # grandeza não entra no laudo — nunca como zero.
+        import coleta_rajant as col
+        fonte = inspect.getsource(col.Coleta._amostra)
+        self.assertIn('"custo_caminho": None', fonte)
+        self.assertNotIn("custo_caminho", rm.campos_com_medicao(
+            [{"custo_caminho": None, "sinal": -70}]))
+
+    def test_destino_do_trace_vai_para_o_laudo(self):
+        import json as _j
+        pts = _j.load(open(self.EXEMPLO))["points"]
+        for p in pts:
+            p["traceInfo"]["host"] = "10.188.96.11"
+        sv, _, _ = rm.ler_meshmapper(self._json(pts))
+        self.assertEqual(sv["destino_trace"], "10.188.96.11")
+
+    def test_kmz_tem_aba_legenda_e_pasta_de_referencia(self):
+        import zipfile, io as _io
+        rm.cobertura_disponivel(self.am, self.pr)
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, campos=["custo_caminho"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        self.assertIn("<name>Custo do caminho</name>", doc)
+        self.assertIn("files/legenda_custo_caminho.png", z.namelist())
+        # Não é requisito do contrato: a pasta diz de quem é a régua.
+        self.assertIn("Fora da referência — ≤ 20000 (2)", doc)
+        self.assertNotIn("Fora do requisito", doc)
+
+    def _por_grandeza(self):
+        import io as _io
+        from openpyxl import load_workbook
+        rm.cobertura_disponivel(self.am, self.pr)
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        dados, _ = rm.excel_do_meshmapper(self.sv, self.am, self.pr, cfg)
+        ws = load_workbook(_io.BytesIO(dados))["Por Grandeza"]
+        return {r[0]: r for r in ws.iter_rows(min_row=5, values_only=True)
+                if r and r[0]}
+
+    def test_excel_mediana_nao_sai_mais_vazia(self):
+        # A coluna lia `r.get("mediana")`, chave que o resumo não tinha.
+        linhas = self._por_grandeza()
+        self.assertEqual(linhas["Custo do caminho"][3], 18088)
+        self.assertIsNotNone(linhas["SNR"][3])
+
+    def test_excel_nao_diz_nao_medido_para_o_que_foi_medido(self):
+        # O ruído estava no mapa e a aba dizia "não medido, 0 amostras".
+        linhas = self._por_grandeza()
+        self.assertEqual(linhas["Ruído"][2], 8)
+        self.assertNotEqual(linhas["Ruído"][3], "não medido")
+        self.assertEqual(linhas["Latência"][3], "não medido")
+
+    def test_balao_mostra_o_rssi_que_pinta_o_ponto(self):
+        b = rm._balao_amostra({"radio": "CA-1", "sinal": -89.0,
+                               "sinal_cob": -72.0, "servidor_cob": "ERM-09",
+                               "custo_caminho": 2147483647})
+        self.assertLess(b.index("melhor ERB/ERM: ERM-09"),
+                        b.index("RSSI do enlace"))
+        self.assertIn("sem rota", b)
+
+
 class TestReguaOficial(unittest.TestCase):
     """A régua de cor de cada grandeza é rastreável a uma fonte, e a cor
     de uma leitura nunca discorda da contagem de reprovados.

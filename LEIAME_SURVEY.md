@@ -75,6 +75,7 @@ Dentro de cada arquivo, uma aba por grandeza medida:
 | **RSSI (melhor ERB/ERM do ponto)** | a **cor do laudo** |
 | SNR | relação sinal/ruído do enlace |
 | Ruído | piso de ruído, recuperado de `signal − snr` |
+| Custo do caminho | o *Trace Path Cost* do MeshMapper: custo InstaMesh até o destino do trace |
 
 **RSSI aqui é o da melhor ERB/ERM visível no ponto**, não o do enlace que
 o InstaMesh escolheu. Outro caminhão passando dá sinal ótimo e vai
@@ -160,6 +161,32 @@ com os próprios requisitos: −75 sobre −85 é SNR 10.
 | ≤ −105 | verde | SNR ≥ 30 |
 | −104 a −96 | laranja | SNR 21 a 29 |
 | ≥ −95 | vermelho | SNR ≤ 20 |
+
+**Custo do caminho** — a régua **oficial da Rajant** (`greatPath = 10000`,
+`goodPath = 20000` no `data.json`), a mesma pela qual o MeshMapper pinta a
+linha do trajeto. Não é requisito da Modular: slides, legenda e pasta
+dizem "referência Rajant".
+
+| Custo do caminho | cor | leitura |
+|---|---|---|
+| ≤ 10000 | verde | ótimo |
+| 10001 a 20000 | laranja | bom |
+| ≥ 20001 ou **sem rota** | vermelho | ruim |
+
+É o custo **total** até o destino do trace (o MeshMapper grava o host em
+`traceInfo.host`; nos seus arquivos, `10.188.96.11`, que vai escrito no
+slide de Metodologia). Resume num número os saltos, a taxa e o SNR de cada
+enlace do caminho — é a medida mais próxima de "o Dispatch funciona aqui".
+
+- **Sem rota** (`2147483647`) é medição, a pior possível: sai vermelho,
+  como no MeshMapper, e escrito "sem rota" — nunca o número.
+- A estatística usa a **mediana**: um único ponto sem rota leva a média do
+  custo a dez dígitos.
+- O **custo do enlace** (primeiro salto, `hopcost`) continua na coluna
+  *Custo do enlace* do Excel; *Custo do caminho* fica ao lado.
+- A **coleta ao vivo não mede** o custo do caminho: ele vem de uma tarefa
+  TRACE do rádio, e a `rajant-api` 0.1.1 não tem método para ela. A aba e
+  o slide simplesmente não aparecem.
 
 ### A fronteira exata
 

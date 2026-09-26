@@ -45,9 +45,14 @@ INTERVALO_PARADO_S = 10.0
 # devolve a mesma posição, que é descartada — leitura gasta à toa.
 MIN_RELEITURA_S = 1.0
 
-# Leituras simultâneas. A consulta é enxuta (só gps, wireless e system) e
-# cada uma vai para um rádio diferente; o que limita a densidade do mapa
-# é quantas cabem por segundo.
+# Leituras simultâneas, cada uma para um rádio diferente; o que limita a
+# densidade do mapa é quantas cabem por segundo.
+#
+# ATENÇÃO: com a rajant-api 0.1.1 a consulta NÃO é enxuta. O filtro de
+# caminho não é parâmetro de `get_state()` — é outro método,
+# `get_state_filter()`, que aceita um caminho só —, então
+# `rm._get_state_filtrado` cai no State inteiro, configuração incluída. E
+# cada `get_state()` da biblioteca dispara um ping de sistema antes.
 LEITURAS_SIMULTANEAS = 24
 
 
@@ -305,6 +310,12 @@ class Coleta:
             # Latência e perda o rádio não mede — ficam None, e sem
             # medição a grandeza não vira aba nem slide.
             "rtt": None, "perda": None,
+            # Custo do CAMINHO até o gateway sai de uma tarefa TRACE
+            # (TaskCommand.TRACE no Common.proto), e a rajant-api 0.1.1 não
+            # tem método para ela — só get_state. Sem trace, fica None: a
+            # aba e o slide não aparecem, em vez de sair uma régua vazia.
+            # O `custo` abaixo é o do ENLACE com o melhor vizinho.
+            "custo_caminho": None,
             # Interferência a coleta ao vivo TEM, e o MeshMapper nunca deu:
             # é a fração do meio ocupada por transmissor alheio. Só aparece
             # a partir da segunda leitura do mesmo rádio (os contadores são

@@ -2935,7 +2935,7 @@ def aba_survey(wb, sv, resumo, calib, manuais, comp, amostras_n=0):
             lin += 1; continue
         op = ">" if campo in ("sinal","snr") else "<"
         _td(ws, lin, [r["rotulo"], f"{op} {r['limite']} {r['unidade']}",
-                      r["pct_ok"], r["med"], r["p05"],
+                      r["pct_ok"], r["med"], r["pior5"],
                       c.get("antes"), SETA.get(c.get("direcao"), "—")],
             zebra=(lin % 2 == 0))
         _semaforo(ws.cell(lin,3), r["pct_ok"], 95, tol_pct=5)
@@ -3610,8 +3610,8 @@ def preencher_analise_survey(p, sv, resumo, zonas, srv, amostras, banda=None,
         if not r: continue
         rot_c = (limite_de(c) or (None, None, None, c.upper()))[3]
         linhas_a.append(f"• {rot_c}: {r['pct_ok']:.1f}% dentro do requisito "
-                        f"(mediana {r['med']:g} {r['unidade']}, "
-                        f"pior 5% em {r['p05']:g} {r['unidade']}).")
+                        f"(mediana {r['mediana']:g} {r['unidade']}, "
+                        f"pior 5% em {r['pior5']:g} {r['unidade']}).")
     cob = list((srv or {}).get("cobertura", {}).items())[:3]
     if cob:
         linhas_a.append("• Cobertura: " + ", ".join(
@@ -3762,7 +3762,7 @@ def preencher_slides_survey(p, sv, resumo, calib, manuais, comp, amostras,
         frase = (f"{r['pct_ok']:.1f}% das amostras dentro do requerido "
                  f"({'>' if campo in ('sinal','snr') else '<'} "
                  f"{r['limite']:g} {r['unidade']}) — média {r['med']:g} "
-                 f"{r['unidade']}, pior 5% em {r['p05']:g} {r['unidade']}, "
+                 f"{r['unidade']}, pior 5% em {r['pior5']:g} {r['unidade']}, "
                  f"{r['n']} amostras.")
         if (_texto(s, "% da área", frase) or _texto(s, "requerido", frase)
                 or _texto(s, "requisito", frase)):
@@ -5903,6 +5903,36 @@ def cor_da_leitura(v, campo):
     """A cor da leitura na legenda da grandeza — a régua única do laudo."""
     return _bucket_cor(v, FAIXAS_KML[campo], limites_na_faixa_de_baixo(campo))
 
+
+_OP_TXT = {">": ">", ">=": "≥", "<": "<", "<=": "≤"}
+
+
+def sem_rota(v, campo):
+    """Custo do caminho = 2147483647 é o trace SEM rota até o destino.
+
+    É medição — a pior possível —, não ausência dela: fica no vermelho
+    da régua, como no MeshMapper. Mas escrever o número é ilegível e,
+    numa média, destrói o valor típico. Por isso se escreve "sem rota".
+    """
+    return (campo == "custo_caminho" and v is not None
+            and v >= CUSTO_SEM_ROTA)
+
+
+def fmt_leitura(v, campo, com_unidade=True):
+    """O valor como o laudo o escreve. None → "—"; sem rota → "sem rota".
+
+    `com_unidade=False` devolve o NÚMERO (para a célula do Excel continuar
+    numérica), trocando só o sem-rota por texto.
+    """
+    if v is None:
+        return "—" if com_unidade else None
+    if sem_rota(v, campo):
+        return "sem rota"
+    if not com_unidade:
+        return v
+    un = (ESCALAS.get(campo) or {}).get("un", "")
+    return f"{v:g} {un}".rstrip()
+
 # ──────────────────────────────────────────────────────────────
 # KML DO SURVEY PARA O GOOGLE EARTH
 #
@@ -5964,6 +5994,13 @@ FAIXAS_KML = {
                (35, "E67E22"), (50, "E74C3C"), (101, "C0392B")],
     # Piso de ruído: quanto mais negativo, mais limpo. Derivado — ver acima.
     "ruido": [(-105, "3EAD30"), (-95, "F26A00"), (999, "FF0000")],
+    # Custo do caminho até o destino do trace (Trace Path Cost). Régua
+    # OFICIAL da Rajant, do mesmo data.json: greatPath = 10000, goodPath =
+    # 20000 — e é por ela que o MeshMapper pinta a linha do trajeto (as
+    # "Average Cost" do doc.kml: laranja até 19200, vermelho a partir de
+    # 20308). Sem rota (2147483647) cai no vermelho, como no MeshMapper.
+    "custo_caminho": [(10000, "3EAD30"), (20000, "F26A00"),
+                      (2147483647, "FF0000")],
 }
 
 # Limites cujo valor EXATO pertence à faixa de BAIXO pela convenção de
@@ -5977,6 +6014,11 @@ FAIXAS_KML = {
 # e ficam na faixa de cima, que é o comportamento padrão.
 _CONVENCAO_NA_FAIXA_DE_BAIXO = {
     "sinal": {-90.0}, "sinal_cob": {-90.0}, "ruido": {-105.0},
+    # Custo: "great" ATÉ 10000. Por analogia com o SNR, cuja fronteira foi
+    # conferida célula a célula (20 é good, 30 é great): o limite pertence
+    # à classe melhor. Custo exatamente 10000 não aparece nos arquivos,
+    # então esta fronteira não pôde ser conferida na prática.
+    "custo_caminho": {10000.0},
 }
 
 # Classificação de cada faixa, na ordem de FAIXAS_KML (limite crescente).
@@ -5985,6 +6027,7 @@ CLASSES_FAIXA = {
                   "reprovado", "atende o requisito", "ok", "muito bom"],
     "snr":       ["ruim", "bom", "ótimo"],
     "ruido":     ["ótimo", "bom", "reprova"],
+    "custo_caminho": ["ótimo", "bom", "ruim ou sem rota"],
 }
 CLASSES_FAIXA["sinal_cob"] = CLASSES_FAIXA["sinal"]
 CLASSES_RSSI = CLASSES_FAIXA["sinal"]
@@ -5998,12 +6041,15 @@ FONTE_FAIXAS = {
     "ruido": "Derivado: sinal de -75 dBm (Modular) sobre este ruído, "
              "SNR pela régua Rajant.",
 }
+FONTE_FAIXAS["custo_caminho"] = ("Faixas e cores: Rajant MeshMapper (greatPath "
+                                  "10000, goodPath 20000). Sem rota conta como "
+                                  "ruim, como no MeshMapper.")
 FONTE_FAIXAS["sinal_cob"] = FONTE_FAIXAS["sinal"]
 
 # Grandezas que o rádio reporta em INTEIRO (int32 no State.proto e no
 # arquivo do MeshMapper). Nelas a legenda escreve o intervalo exato em
 # inteiros — "-74 a -71" —, sem ambiguidade de fronteira.
-_CAMPOS_INTEIROS = {"sinal", "sinal_cob", "snr", "ruido"}
+_CAMPOS_INTEIROS = {"sinal", "sinal_cob", "snr", "ruido", "custo_caminho"}
 
 _ICONES_KML = {
     "ERB":   ("http://maps.google.com/mapfiles/kml/shapes/triangle.png", "F1C40F"),
@@ -6019,8 +6065,14 @@ def _balao_amostra(a):
     zero seria lido como 'mediu e deu zero'.
     """
     linhas = []
-    campos = (("sinal", "RSSI", "dBm", 1), ("snr", "SNR", "dB", 1),
-              ("ruido", "Ruído", "dBm", 1), ("rtt", "Latência", "ms", 1),
+    # Primeiro o que PINTA o ponto — o RSSI da melhor ERB/ERM — e depois
+    # o enlace que atendeu. Antes o balão mostrava só o segundo, rotulado
+    # "RSSI": um ponto laranja a -72 abria com "RSSI -89 (fora)".
+    campos = (("sinal_cob", "RSSI (melhor ERB/ERM)", "dBm", 1),
+              ("sinal", "RSSI do enlace", "dBm", 1), ("snr", "SNR", "dB", 1),
+              ("ruido", "Ruído", "dBm", 1),
+              ("custo_caminho", "Custo do caminho", "", 0),
+              ("rtt", "Latência", "ms", 1),
               ("perda", "Perda", "%", 2), ("vazao", "Vazão", "Mbps", 2),
               ("taxa", "Taxa do enlace", "Mbps", 0),
               ("custo", "Custo do enlace", "", 0),
@@ -6030,11 +6082,15 @@ def _balao_amostra(a):
     for c, rot, un, casas in campos:
         v = a.get(c)
         if v is None: continue
+        if c == "sinal_cob" and a.get("servidor_cob"):
+            rot = f"RSSI (melhor ERB/ERM: {_esc(a['servidor_cob'])})"
         try: txt = f"{float(v):.{casas}f}".rstrip("0").rstrip(".") if casas else f"{v}"
         except (TypeError, ValueError): txt = str(v)
+        if sem_rota(v, c):
+            txt = "sem rota"
         fora = ""
-        if c in REQUISITOS:
-            op, lim, _, _ = REQUISITOS[c]
+        if c in REQUISITOS or c in ("sinal_cob", "custo_caminho"):
+            op, lim, _, _ = limite_de(c)
             try:
                 ruim = not atende(float(v), op, lim)
                 fora = " <b style='color:#C0392B'>(fora)</b>" if ruim else ""
@@ -6422,15 +6478,18 @@ def _fita_por_amostra(corrida, campo, faixas):
     return [tuple(p) for p in pedacos]
 
 
-def _rotulo_trecho(vals, un):
+def _rotulo_trecho(vals, un, campo=None):
     """Nome do trecho no Google Earth: a faixa MEDIDA nele, não a da
     legenda — clicar na linha diz o que foi lido ali."""
     vs = [v for v in vals if isinstance(v, (int, float))]
+    sr = [v for v in vs if sem_rota(v, campo)]
+    vs = [v for v in vs if not sem_rota(v, campo)]
     if not vs:
-        return "sem medição"
+        return "sem rota" if sr else "sem medição"
     lo, hi = min(vs), max(vs)
-    return (f"{lo:.0f} {un}" if round(lo) == round(hi)
-            else f"{lo:.0f} a {hi:.0f} {un}")
+    txt = (f"{lo:.0f} {un}" if round(lo) == round(hi)
+           else f"{lo:.0f} a {hi:.0f} {un}").rstrip()
+    return txt + (" · sem rota" if sr else "")
 
 
 def _faixas_rotuladas(campo):
@@ -6517,8 +6576,10 @@ def _legenda_de_faixas_png(caminho, campo):
         # derivado dos requisitos, e chamá-lo de requisito seria afirmar
         # uma cláusula que o contrato não tem.
         nome_req = ("Requisito Modular" if campo in REQUISITOS
-                    or campo == "sinal_cob" else "Referência")
-        ax.text(12, y + 8, f"{nome_req}: {op} {lim:g} {un_r}",
+                    or campo == "sinal_cob" else
+                    "Referência Rajant" if campo == "custo_caminho"
+                    else "Referência")
+        ax.text(12, y + 8, f"{nome_req}: {_OP_TXT[op]} {lim:g} {un_r}".rstrip(),
                 color="#031795", fontsize=7.5, fontweight="bold", va="center")
         y += 22
     if linhas_fonte:
@@ -6821,7 +6882,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                     cor = cor_da_leitura(a_.get(campo_a), campo_a)
                     cores_ponto.add(cor)
                     soltos.append(_placemark(
-                        _rotulo_trecho([a_.get(campo_a)], un_a),
+                        _rotulo_trecho([a_.get(campo_a)], un_a, campo_a),
                         _balao_amostra(a_), f"q{cor}",
                         ponto=(a_["lat"], a_["lon"])))
                     continue
@@ -6834,7 +6895,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 for cor, geo, vals in _fita_por_amostra(corrida, campo_a,
                                                         faixas_a):
                     fitas.append(_placemark(
-                        _rotulo_trecho(vals, un_a),
+                        _rotulo_trecho(vals, un_a, campo_a),
                         f"<![CDATA[{_esc(radio)} · {len(vals)} "
                         f"leitura{'s' if len(vals) != 1 else ''}]]>",
                         f"l{cor}", linha=geo))
@@ -6872,7 +6933,8 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             cores_ponto.add(cor)
             quando_a = (datetime.fromtimestamp(a["ts"]).strftime(
                 "%Y-%m-%dT%H:%M:%S") if a.get("ts") else None)
-            rotulo = (f"{v:.0f} {un_a}" if isinstance(v, (int, float))
+            rotulo = (_rotulo_trecho([v], un_a, campo_a)
+                      if isinstance(v, (int, float))
                       else a.get("radio", ""))
             marcas.append(_placemark(rotulo, _balao_amostra(a), f"q{cor}",
                                      ponto=(a["lat"], a["lon"]),
@@ -6893,13 +6955,14 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                      and not atende(a[campo_a], op_a, lim_a)]
             ruins, _ = _decimar(ruins, max_pontos // 2)
             if ruins:
-                itens = [_placemark(f"{a[campo_a]:.0f} {un_a}",
+                itens = [_placemark(_rotulo_trecho([a[campo_a]], un_a, campo_a),
                                     _balao_amostra(a), "pFora",
                                     ponto=(a["lat"], a["lon"]))
                          for a in ruins]
                 dentro.append(
-                    f"<Folder><name>Fora do requisito — {_esc(op_a)} {lim_a:g} "
-                    f"{un_a} ({len(ruins)})</name><open>0</open>"
+                    f"<Folder><name>{'Fora da referência' if campo_a == 'custo_caminho' else 'Fora do requisito'} — "
+                    f"{_esc(_OP_TXT.get(op_a, op_a))} "
+                    f"{(f'{lim_a:g} {un_a}').rstrip()} ({len(ruins)})</name><open>0</open>"
                     f"<visibility>0</visibility>{''.join(itens)}</Folder>")
 
         # A pasta ZONAS-PROBLEMA saiu a pedido: ela sugeria coordenada
@@ -7553,11 +7616,23 @@ def limpar_enlace(sig, snr, custo):
 
 def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
     """Uma amostra no formato interno, a partir do enlace servidor."""
+    # `custo` é o do ENLACE — o primeiro salto, `hopcost` no data.json e
+    # "Hop Cost" no CSV —, como na coleta ao vivo. Antes vinha o `cost`,
+    # que é o do CAMINHO inteiro: a mesma coluna "Custo" do Excel dizia
+    # coisas diferentes conforme a origem. O caminho vai em custo_caminho.
     sig, snr, custo, ruido = limpar_enlace(
         _mm_num(path.get("signal")),
         _mm_num(path.get("rssi")),            # sim: 'rssi' do arquivo é SNR
-        _mm_num(path.get("cost")))
+        _mm_num(path.get("hopcost")))
     freq = _mm_num(path.get("freq")) or _mm_num(path.get("frequency"))
+    # Custo do CAMINHO até o destino do trace — o "Trace Path Cost" do
+    # balão do MeshMapper, a métrica pela qual ele pinta o trajeto. É o
+    # mesmo número de `custo`, mas `custo` na coleta ao vivo é o custo do
+    # ENLACE com o melhor vizinho: mesmo nome, grandezas diferentes. Por
+    # isso campo próprio. 2147483647 (sem rota) fica: é a pior medição
+    # possível, não ausência dela. 0 não é custo de rota nenhuma — o
+    # `pathCost` do ponto vem sempre 0 nos arquivos — e vira None.
+    custo_cam = _mm_num(path.get("cost")) or None
     return {
         "radio": nome_movel,
         "ts": ts,
@@ -7569,6 +7644,7 @@ def _mm_amostra(nome_movel, ts, lat, lon, alt, path, n_peers):
         "ruido": ruido,
         "rtt": None, "perda": None, "interf": None, "vazao": None,
         "custo": custo,
+        "custo_caminho": custo_cam,
         "taxa": _mm_num(path.get("rate")),    # MCS em Mbps, apesar do rótulo
         "peers": n_peers,
         "banda": _norm_banda(freq) if freq else None,
@@ -7663,8 +7739,19 @@ def _mm_do_json(d, rotulo):
         "limiares_mm": {k: cfg_mm.get(k) for k in
                         ("goodCost", "greatCost", "goodRSSI", "greatRSSI",
                          "goodPath", "greatPath") if cfg_mm.get(k) is not None},
+        # Até onde o custo do caminho foi medido (traceInfo.host). O mais
+        # frequente: o MeshMapper traça sempre para o mesmo host.
+        "destino_trace": _mais_comum(
+            ((pt.get("traceInfo") or {}).get("host") for pt in pontos)),
     }
     return sv, amostras, peers
+
+
+def _mais_comum(valores):
+    """O valor não vazio mais frequente, ou None."""
+    from collections import Counter
+    c = Counter(v for v in valores if v)
+    return c.most_common(1)[0][0] if c else None
 
 
 def _mm_dos_csv(p):
@@ -7694,7 +7781,8 @@ def _mm_dos_csv(p):
         amostras.append(_mm_amostra(
             movel, _mm_ts(r.get("Timestamp")), lat, lon, None,
             {"signal": r.get("Signal"), "rssi": r.get("RSSI (SNR)"),
-             "cost": r.get("Cost"), "rate": r.get("Rate (Kb/s)"),
+             "cost": r.get("Cost"), "hopcost": r.get("Hop Cost"),
+             "rate": r.get("Rate (Kb/s)"),
              "channel": r.get("Channel"), "freq": r.get("Frequency"),
              "name": r.get("IP/MAC")}, None))
 
@@ -7748,6 +7836,7 @@ def importar_meshmapper(caminho, con=None, nome=None):
         radios = sorted({a["radio"] for a in amostras})
         sid = survey_criar(con, nome or sv["nome"], sv["inicio"],
                            sv.get("intervalo_s"), radios)
+        survey_destino_trace(con, sid, sv.get("destino_trace"))
         amostras_gravar(con, sid, amostras)
         resumo = survey_resumo(amostras)
         # n_moveis/n_fixos: no MeshMapper quem anda e o veiculo com o
@@ -7799,7 +7888,8 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
                         "amostras": len(am_i), "peers": len(pr_i),
                         "inicio": sv_i.get("inicio"), "fim": sv_i.get("fim"),
                         "versao_bcc": sv_i.get("versao_bcc"),
-                        "limiares_mm": sv_i.get("limiares_mm") or {}})
+                        "limiares_mm": sv_i.get("limiares_mm") or {},
+                        "destino_trace": sv_i.get("destino_trace")})
     if not amostras:
         raise RuntimeError("nenhuma amostra com posicao nos arquivos lidos")
 
@@ -7821,6 +7911,8 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
         # na aba de origens em vez de sumir numa media.
         "limiares_mm": next((o.get("limiares_mm") for o in ok
                              if o.get("limiares_mm")), {}),
+        "destino_trace": next((o.get("destino_trace") for o in ok
+                               if o.get("destino_trace")), None),
         "cobertura": {
             "com_infra": sum((o.get("cobertura") or {}).get("com_infra", 0) for o in ok),
             "sem_infra": sum((o.get("cobertura") or {}).get("sem_infra", 0) for o in ok),
@@ -7834,6 +7926,7 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
     try:
         radios = sorted({a["radio"] for a in amostras})
         sid = survey_criar(con, sv["nome"], sv["inicio"], None, radios)
+        survey_destino_trace(con, sid, sv.get("destino_trace"))
         amostras_gravar(con, sid, amostras)
         survey_fechar(con, sid, sv["fim"], survey_resumo(amostras),
                       n_moveis=len(radios), n_fixos=0,
@@ -8001,10 +8094,15 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                                 "não medido", "", "", ""],
                       zebra=(lin % 2 == 0))
             continue
-        op = ">" if e.get("melhor") == "alto" else "<"
+        # A coluna Mediana lia `r.get("mediana")`, chave que o resumo não
+        # tinha: saía vazia em toda linha. O operador vem de `limite_de`,
+        # o mesmo que decide o "Dentro".
+        op, lim_e = (limite_de(campo) or (None, None))[:2]
         lin = _td(ws, lin, [e.get("rot", campo), e.get("un", ""),
-                            r.get("n"), r.get("mediana"), r.get("p05"),
-                            f"{op} {e.get('req')}", r.get("pct_ok")],
+                            r.get("n"), fmt_leitura(r.get("mediana"), campo, False),
+                            fmt_leitura(r.get("pior5"), campo, False),
+                            f"{_OP_TXT.get(op, op)} {lim_e:g}" if op else "",
+                            r.get("pct_ok")],
                   zebra=(lin % 2 == 0))
 
     # ── 3. Amostras ──
@@ -8017,16 +8115,20 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     # reporta a SEGUNDA.
     _th(ws, lin, ["#", "Hora (UTC)", "Latitude", "Longitude", "Alt (m)",
                   "Banda", "Canal", "RSSI do enlace (dBm)", "SNR (dB)",
-                  "Ruído (dBm)", "Custo", "Taxa (Mbps)", "Vizinhos",
+                  "Ruído (dBm)", "Custo do enlace", "Custo do caminho",
+                  "Taxa (Mbps)", "Vizinhos",
                   "Servidor", "RSSI da melhor ERB/ERM (dBm)",
                   "Melhor ERB/ERM", "Δ não usado (dB)"],
-        [6, 19, 12, 12, 9, 10, 8, 19, 10, 12, 10, 12, 10, 22, 24, 22, 15])
+        [6, 19, 12, 12, 9, 10, 8, 19, 10, 12, 14, 16, 12, 10, 22, 24, 22, 15])
     lin += 1
     for i, a in enumerate(sorted(amostras, key=lambda x: x.get("ts") or 0), 1):
         lin = _td(ws, lin, [i, dt(a.get("ts")), a.get("lat"), a.get("lon"),
                             a.get("alt"), a.get("banda"), a.get("canal"),
                             a.get("sinal"), a.get("snr"), a.get("ruido"),
-                            a.get("custo"), a.get("taxa"), a.get("peers"),
+                            a.get("custo"),
+                            fmt_leitura(a.get("custo_caminho"),
+                                        "custo_caminho", False),
+                            a.get("taxa"), a.get("peers"),
                             a.get("servidor"),
                             a.get("sinal_cob"), a.get("servidor_cob"),
                             a.get("delta_cob")], estilo=False)
@@ -8612,7 +8714,10 @@ def banco(caminho=None):
     tem = {r["name"] for r in con.execute("PRAGMA table_info(survey)")}
     for col, tipo in (("alcance", "REAL"), ("n_amostras", "INTEGER"),
                       ("n_moveis", "INTEGER"), ("n_fixos", "INTEGER"),
-                      ("intervalo_efetivo_s", "REAL")):
+                      ("intervalo_efetivo_s", "REAL"),
+                      # Destino do trace do MeshMapper: o custo do caminho
+                      # só significa algo dizendo ATÉ ONDE.
+                      ("destino_trace", "TEXT")):
         if col not in tem:
             con.execute(f"ALTER TABLE survey ADD COLUMN {col} {tipo}")
     tem_am = {r["name"] for r in con.execute("PRAGMA table_info(amostra)")}
@@ -8622,7 +8727,8 @@ def banco(caminho=None):
                       # infraestrutura, que e outra grandeza do enlace que
                       # atendeu. Ver cobertura_disponivel().
                       ("sinal_cob", "REAL"), ("snr_cob", "REAL"),
-                      ("servidor_cob", "TEXT"), ("delta_cob", "REAL")):
+                      ("servidor_cob", "TEXT"), ("delta_cob", "REAL"),
+                      ("custo_caminho", "REAL")):
         if col not in tem_am:
             con.execute(f"ALTER TABLE amostra ADD COLUMN {col} {tipo}")
     con.commit()
@@ -8637,6 +8743,13 @@ def survey_criar(con, nome, inicio, intervalo_s, radios, alcance=None):
          time.time()))
     con.commit()
     return cur.lastrowid
+
+
+def survey_destino_trace(con, sid, host):
+    """Registra até onde o MeshMapper tracejou o caminho (traceInfo.host)."""
+    if host:
+        con.execute("UPDATE survey SET destino_trace=? WHERE id=?", (host, sid))
+        con.commit()
 
 
 def survey_fechar(con, sid, fim, resumo=None, calibracao=None,
@@ -8658,7 +8771,8 @@ def amostras_gravar(con, sid, linhas):
     cols = ["radio","ts","lat","lon","vel","snr","sinal","ruido","rtt","perda",
             "custo","taxa","vazao","peers","sats","hdop","banda","fonte",
             "servidor","interf","canal",
-            "sinal_cob","snr_cob","servidor_cob","delta_cob"]
+            "sinal_cob","snr_cob","servidor_cob","delta_cob",
+            "custo_caminho"]
     con.executemany(
         f"INSERT INTO amostra (survey_id,{','.join(cols)}) "
         f"VALUES (?,{','.join('?'*len(cols))})",
@@ -8762,9 +8876,15 @@ def survey_resumo(amostras):
     # mas sem ela no resumo o relatorio so sabe dizer como foi o enlace
     # entregue, e nao se havia sinal servivel no lugar.
     alvos = dict(REQUISITOS)
-    if any(a.get("sinal_cob") is not None for a in amostras):
-        e = ESCALAS["sinal_cob"]
-        alvos["sinal_cob"] = (">", float(e["req"]), e["un"], e["rot"])
+    # Toda grandeza do laudo que tem régua e foi medida, não só as do
+    # contrato: RSSI da melhor ERB/ERM, custo do caminho (referência
+    # Rajant), ruído (derivado) e interferência. Sem isto a aba Por
+    # Grandeza escrevia "não medido, 0 amostras" para o ruído que estava
+    # no mapa ao lado.
+    for extra in CAMPOS_KMZ:
+        if extra not in alvos and limite_de(extra) and any(
+                a.get(extra) is not None for a in amostras):
+            alvos[extra] = limite_de(extra)
     for campo, (op, lim, un, rot) in alvos.items():
         vs = [a[campo] for a in amostras if a.get(campo) is not None]
         if not vs:
@@ -8772,11 +8892,25 @@ def survey_resumo(amostras):
             continue
         dentro = sum(1 for v in vs if atende(v, op, lim))
         vs_ord = sorted(vs)
+        n = len(vs_ord)
+        # O pior 5% depende do sentido: em RSSI e SNR são os MENORES
+        # valores; em ruído, latência, perda e custo, os MAIORES. `p05`
+        # (o 5º percentil de baixo) fica como estava para quem o usa pelo
+        # nome, mas o "Pior 5%" dos relatórios lê `pior5`.
+        alto = op in (">", ">=")
         out[campo] = {
-            "n": len(vs), "pct_ok": round(dentro / len(vs) * 100, 1),
-            "med": round(sum(vs) / len(vs), 2),
+            "n": n, "pct_ok": round(dentro / n * 100, 1),
+            # `med` é a MÉDIA, e é assim que o semanal a rotula. Onde o
+            # relatório escreve "Mediana", lê `mediana`: com um ponto sem
+            # rota (custo 2147483647) a média do custo vira um número de
+            # dez dígitos, e ninguém a chamaria de típica.
+            "med": round(sum(vs) / n, 2),
+            "mediana": round(vs_ord[n // 2] if n % 2
+                             else (vs_ord[n // 2 - 1] + vs_ord[n // 2]) / 2, 2),
             "min": round(vs_ord[0], 2), "max": round(vs_ord[-1], 2),
-            "p05": round(vs_ord[int(len(vs_ord) * .05)], 2),
+            "p05": round(vs_ord[int(n * .05)], 2),
+            "pior5": round(vs_ord[int(n * .05)] if alto
+                           else vs_ord[min(n - 1, int(n * .95))], 2),
             "limite": lim, "unidade": un, "rotulo": rot,
         }
     for campo in ("vazao", "taxa", "custo"):
@@ -8813,8 +8947,11 @@ def limite_de(campo):
     e = ESCALAS.get(campo)
     if not e or e.get("req") is None:
         return None
-    return ((">" if e["melhor"] == "alto" else "<"),
-            float(e["req"]), e["un"], e["rot"])
+    # `op` explícito vale sobre o derivado do sentido: a referência da
+    # Rajant para custo do caminho é "good" ATÉ 20000, inclusive — "<=",
+    # não o "<" estrito que o sentido "baixo" daria.
+    op = e.get("op") or (">" if e["melhor"] == "alto" else "<")
+    return (op, float(e["req"]), e["un"], e["rot"])
 
 
 def margem_requisito(valor, campo):
@@ -9422,7 +9559,8 @@ def _fixos_do_survey(amostras, limiar=0.0003):
 #
 # Fica a do melhor ERB/ERM: e ela que responde "ha cobertura aqui". O
 # enlace que atendeu continua gravado, coluna a coluna, na aba Amostras.
-CAMPOS_KMZ = ["sinal_cob", "snr", "ruido", "interf", "rtt", "perda"]
+CAMPOS_KMZ = ["sinal_cob", "snr", "ruido", "custo_caminho", "interf", "rtt",
+              "perda"]
 
 
 def gerar_todos_kmz(sid, cfg=None, campos=None, bandas=None):
@@ -9529,6 +9667,7 @@ SLIDE_DE_CAMPO = {
     "rtt":   "Latência (RTT)",
     "perda": "Packet Loss",
     "interf": "Interferência de Canal",
+    "custo_caminho": "Custo do Caminho (Trace Path Cost)",
 }
 
 
@@ -9868,6 +10007,12 @@ ESCALAS = {
     # SNR 10 nesse sinal — aprovava ruído que reprova o enlace.
     "ruido": {"rot": "Ruído","un": "dBm", "lo": -110,"hi": -80, "req": -95,
               "melhor": "baixo"},
+    # Custo do caminho até o destino do trace, a métrica pela qual o
+    # MeshMapper pinta o trajeto. Não é requisito Modular: a referência é
+    # o goodPath da Rajant, e "good" inclui o próprio 20000 — daí o `op`.
+    "custo_caminho": {"rot": "Custo do caminho", "un": "", "lo": 0,
+                      "hi": 40000, "req": 20000, "melhor": "baixo",
+                      "op": "<="},
     "rtt":   {"rot": "Latência","un":"ms","lo": 0,   "hi": 200, "req": 100,
               "melhor": "baixo"},
     "perda": {"rot": "Perda","un": "%",   "lo": 0,   "hi": 10,  "req": 2,
@@ -10861,6 +11006,14 @@ _FILTRO_ESTADO = {"param": None}
 
 # Só precisamos destes ramos: posição, RF e identificação. Puxar o state
 # inteiro de 150 rádios a cada 10 s é desperdício de banda na malha.
+#
+# CONFERIDO na rajant-api 0.1.1 (o pacote do PyPI, lido): `get_state()`
+# não recebe filtro nenhum, então a inspeção abaixo não acha parâmetro e
+# a coleta pede o State INTEIRO. O filtro existe no protocolo
+# (BCMessage.stateFilterPath, campo 601, repetido) e a biblioteca o
+# expõe num método à parte, `get_state_filter(caminho)`, que anexa UM
+# caminho só. O formato do caminho ("gps" ou outro) não está documentado
+# no .proto — não conferido contra rádio.
 CAMINHOS_ESTADO = ("gps", "wireless", "system")
 
 
@@ -12015,13 +12168,18 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     # do ponto, que e o mesmo numero do mapa. Reportar aqui o enlace que
     # atendeu e colorir o mapa pelo outro daria duas respostas para a
     # mesma pergunta na mesma pagina.
-    for c in ("sinal_cob", "snr", "rtt", "perda"):
+    for c in ("sinal_cob", "snr", "custo_caminho", "rtt", "perda"):
         r = (resumo or {}).get(c)
         if not r: continue
         rot = (limite_de(c) or (None, None, None, c))[3]
         op, lim, un, _ = limite_de(c)
-        linhas.append([rot, f"{op} {lim:g} {un}", f"{r['pct_ok']:.1f}%",
-                       f"{r['med']:g} {un}", f"{r['p05']:g} {un}"])
+        # Só é requisito o que está no contrato; o custo do caminho entra
+        # com a régua da Rajant, e o rótulo diz de quem ela é.
+        dono = "" if c in REQUISITOS or c == "sinal_cob" else " (Rajant)"
+        linhas.append([rot, f"{_OP_TXT[op]} {lim:g} {un}".rstrip() + dono,
+                       f"{r['pct_ok']:.1f}%",
+                       fmt_leitura(r["mediana"], c),
+                       fmt_leitura(r["pior5"], c)])
     destaques = {}
     for i, l in enumerate(linhas, start=1):
         try:
@@ -12066,6 +12224,7 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     n_eq = len({a["radio"] for a in am})
     req_s = float(ESCALAS["sinal_cob"]["req"])
     req_n = float(ESCALAS["snr"]["req"])
+    tem_caminho = any(a.get("custo_caminho") is not None for a in am)
     ficha = [
         ["Instrumento",
          "BC API — leitura direta do State de cada rádio" if ao_vivo
@@ -12089,6 +12248,12 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
          + (f" · canais {', '.join(str(c) for c in canais)}" if canais else "")],
         ["Requisitos (Modular Mining)",
          f"RSSI > {req_s:g} dBm · SNR > {req_n:g} dB"],
+        ["Custo do caminho",
+         f"trace do MeshMapper até {sv['destino_trace']} — régua Rajant "
+         f"(greatPath 10000, goodPath 20000)"
+         if tem_caminho and sv.get("destino_trace") else
+         "trace do MeshMapper — régua Rajant (greatPath 10000, goodPath 20000)"
+         if tem_caminho else "não medido na coleta direta (sem trace)"],
         ["Grandezas não medidas", "latência e perda de pacotes"],
     ]
     _tabela_anglo(s, 0.55, 1.5, 7.5, ["Parâmetro", "Especificação"],
@@ -12192,6 +12357,8 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
         for campo, rot in (("sinal_cob", "Intensidade de Sinal (RSSI)"),
                            ("snr", "Relação Sinal/Ruído (SNR)"),
                            ("ruido", "Noise Floor"),
+                           ("custo_caminho",
+                            "Custo do Caminho (Trace Path Cost)"),
                            ("interf", "Interferência de Canal"),
                            ("perda", "Packet Loss"),
                            ("rtt", "Latência (RTT)")):
@@ -12205,9 +12372,11 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
             if not any(a.get(campo) is not None for a in am_b):
                 continue
             lim_ = limite_de(campo)
+            nome_lim = ("requisito" if campo in REQUISITOS
+                        or campo == "sinal_cob" else "referência Rajant")
             sub = ("Rota medida, colorida pelo valor de cada amostra"
-                   + (f"  ·  requisito {lim_[0]} {lim_[1]:g} {lim_[2]}"
-                      if lim_ else ""))
+                   + (f"  ·  {nome_lim} {_OP_TXT[lim_[0]]} {lim_[1]:g} "
+                      f"{lim_[2]}".rstrip() if lim_ else ""))
             s = slide_anglo(p, f"{rot}{rot_b}", sub)
 
             # Mapa a esquerda, distribuicao a direita: a moldura mostra
@@ -12224,10 +12393,16 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
                                rotulos, pcts, campo=campo)
             r_res = (survey_resumo(am_b) or {}).get(campo)
             if r_res:
-                _cartao_anglo(s, 8.05, 5.05, 2.28, 0.85, "Dentro do requisito",
+                # "Requisito" só para o que é do contrato. Ruído e custo
+                # do caminho são comparados a uma referência — derivada e
+                # da Rajant — e o cartão diz isso.
+                _cartao_anglo(s, 8.05, 5.05, 2.28, 0.85,
+                              "Dentro do requisito" if campo in REQUISITOS
+                              or campo == "sinal_cob"
+                              else "Dentro da referência",
                               f"{r_res['pct_ok']:.1f}%")
                 _cartao_anglo(s, 10.52, 5.05, 2.28, 0.85, "Pior 5%",
-                              f"{r_res['p05']:g} {un}")
+                              fmt_leitura(r_res["pior5"], campo))
             # Escala embaixo, na faixa que sobrou entre os cartões e o pé
             # do slide: sem ela o mapa é uma fita colorida sem significado
             # para quem não fez a medição.
@@ -12522,9 +12697,11 @@ def _escala_anglo(s, x, y, w, campo):
             mk.fill.solid(); mk.fill.fore_color.rgb = _rgb(ANGLO["texto"])
             mk.line.fill.background(); mk.shadow.inherit = False
         nome = ("requisito" if campo in REQUISITOS or campo == "sinal_cob"
+                else "referência Rajant" if campo == "custo_caminho"
                 else "referência")
         _txt_anglo(s, x, yb + hb + 0.26, w, 0.22,
-                   f"{nome} {op} {lim:g} {un}", 8.5, True, ANGLO["azul"])
+                   f"{nome} {_OP_TXT[op]} {lim:g} {un}".rstrip(), 8.5, True,
+                   ANGLO["azul"])
     return yb + hb + 0.50
 
 
