@@ -10978,7 +10978,12 @@ class SessaoRadio:
             return None
         try:
             bc = self.bc or self._abrir()
-            txt = _get_state_filtrado(bc)
+            txt = estado_da_sessao(bc)
+            if txt is False or txt is None:
+                # get_state() da biblioteca devolve False em vez de levantar.
+                # Contar isso como sucesso zerava as falhas, e o rádio mudo
+                # nunca era descartado nem reconectado.
+                raise RuntimeError("o rádio não devolveu o State")
             self.falhas = 0; self.consultas += 1
             return txt
         except Exception as e:
@@ -10991,6 +10996,21 @@ class SessaoRadio:
                 self.desistiu = True
                 log.warning(f"[survey] {self.ip} descartado apos "
                             f"{self.falhas} falhas seguidas: {e}")
+            raise
+
+    def trace(self, destino, espera_s=2.0):
+        """Custo do caminho até `destino`, na sessão já aberta. Levanta
+        TraceIndisponivel quando o rádio não entrega — quem chama decide."""
+        if self.bc is None or not bc_direto_disponivel(self.bc):
+            raise TraceIndisponivel("sessão sem acesso direto à BCAPI")
+        try:
+            return bc_trace(self.bc, destino, espera_s=espera_s)
+        except TraceIndisponivel:
+            raise
+        except Exception:
+            # Erro de transporte no meio do trace deixa a conexão num
+            # estado desconhecido (meia mensagem pendente): refaz a sessão.
+            self.bc = None
             raise
 
     def fechar(self):
@@ -11059,6 +11079,282 @@ def _get_state_filtrado(bc):
         log.warning("[survey] filtro de caminho recusado; "
                     "voltando ao state inteiro")
         return bc.get_state()
+
+
+# ══════════════════════════════════════════════════════════════
+# BCAPI DIRETO — leitura inteira, filtro de caminho e TRACE
+# ══════════════════════════════════════════════════════════════
+# A rajant-api 0.1.1 (lida do PyPI) tem três limites para a coleta:
+#
+#   · `get_message()` faz UM `recv(65535)` e interpreta o que veio. Pelo
+#     TLS, um recv devolve no máximo um registro (~16 KB); o State de um
+#     rádio com dezenas de vizinhos passa disso, e a leitura falha como
+#     "sem resposta" — sem erro nenhum que diga por quê.
+#   · `get_state()` faz um ping de sistema antes de CADA consulta.
+#   · não há filtro útil (get_state_filter anexa um caminho só) nem TRACE.
+#
+# Aqui se usa a mesma sessão autenticada da biblioteca (connection,
+# build_message, send_message, seq_number) e o MESMO enquadramento do
+# código dela: cabeçalho de 8 bytes `>ibbbb` (tamanho, compressão 2 =
+# deflate cru, wbits -15) e o corpo. A diferença é ler até o tamanho que o
+# cabeçalho declara.
+import struct as _struct, zlib as _zlib
+
+# Destino do trace: o mesmo host para onde o MeshMapper do cliente traçou
+# (traceInfo.host em todos os pontos dos três arquivos recebidos). Com o
+# mesmo destino, o custo do caminho da coleta e o do MeshMapper são a mesma
+# grandeza.
+DESTINO_TRACE_PADRAO = "10.188.96.11"
+
+
+class TraceIndisponivel(RuntimeError):
+    """O rádio recusou ou não entregou o TRACE. A coleta segue sem ele."""
+
+
+# Como a coleta está lendo, aprendido na primeira leitura boa e valendo
+# para o processo inteiro: None = ainda não se sabe.
+#   direto: a leitura enquadrada funciona (senão, volta a get_state()).
+#   filtro: o rádio entende CAMINHOS_ESTADO em stateFilterPath. O formato
+#           do caminho não está no .proto; se o State filtrado vier sem
+#           nenhum dos ramos pedidos, o filtro sai e fica o State inteiro.
+_BC_MODO = {"direto": None, "filtro": None, "falhas_direto": 0}
+
+
+def estado_da_sessao(bc):
+    """O State de uma leitura da coleta, do jeito mais leve que funcionar.
+
+    Na ordem: filtrado e enquadrado; inteiro e enquadrado; e, se o modo
+    direto nunca funcionar, o `get_state()` da biblioteca, como antes. No
+    pior caso fica igual ao que era.
+    """
+    if not bc_direto_disponivel(bc) or _BC_MODO["direto"] is False:
+        return _get_state_filtrado(bc)
+    try:
+        if _BC_MODO["filtro"] is not False:
+            st = bc_state(bc, CAMINHOS_ESTADO)
+            if (st.HasField("system") or st.HasField("gps")
+                    or len(st.wireless)):
+                _BC_MODO["direto"] = True
+                if _BC_MODO["filtro"] is None:
+                    _BC_MODO["filtro"] = True
+                    log.info("[survey] leitura enxuta: só "
+                             f"{', '.join(CAMINHOS_ESTADO)}")
+                return st
+            if _BC_MODO["filtro"] is None:
+                _BC_MODO["filtro"] = False
+                log.warning("[survey] o rádio não entendeu o filtro de "
+                            "caminho; lendo o State inteiro")
+        st = bc_state(bc, None)
+        _BC_MODO["direto"] = True
+        return st
+    except (ConnectionError, OSError, TimeoutError):
+        raise                          # transporte: não é culpa do modo
+    except Exception:
+        if _BC_MODO["direto"] is None:
+            _BC_MODO["falhas_direto"] += 1
+            if _BC_MODO["falhas_direto"] >= 3:
+                _BC_MODO["direto"] = False
+                log.warning("[survey] leitura direta não funcionou em 3 "
+                            "tentativas; voltando ao get_state() da "
+                            "biblioteca")
+        raise
+
+
+def bc_direto_disponivel(bc):
+    """A sessão é da rajant-api de verdade (e não um objeto de teste)?"""
+    return (getattr(bc, "connection", None) is not None
+            and callable(getattr(bc, "build_message", None))
+            and callable(getattr(bc, "send_message", None)))
+
+
+def _bc_ler_exato(conn, n):
+    partes, falta = [], n
+    while falta > 0:
+        b = conn.recv(min(falta, 65536))
+        if not b:
+            raise ConnectionError("o rádio fechou a conexão no meio da mensagem")
+        partes.append(b); falta -= len(b)
+    return b"".join(partes)
+
+
+def bc_receber(bc):
+    """Uma mensagem INTEIRA do rádio, do tamanho que o cabeçalho declara."""
+    cab = _bc_ler_exato(bc.connection, 8)
+    n, flag = _struct.unpack(">ibbbb", cab)[:2]
+    if n < 0 or n > 64 * 1024 * 1024:
+        raise ValueError(f"cabeçalho de mensagem inválido ({n} bytes)")
+    corpo = _bc_ler_exato(bc.connection, n)
+    bruto = len(corpo)
+    if flag == 2:
+        corpo = _zlib.decompress(corpo, -15)
+    m = type(bc.build_message())()
+    m.ParseFromString(corpo)
+    bc.seq_number += 1            # como o get_message da biblioteca
+    bc._ultimo_tamanho = (bruto, len(corpo))
+    return m
+
+
+def bc_pedir(bc, montar, aceita, max_msgs=6):
+    """Envia um pedido e devolve a primeira resposta que `aceita`."""
+    m = bc.build_message()
+    montar(m)
+    bc.send_message(m)
+    for _ in range(max_msgs):
+        r = bc_receber(bc)
+        if aceita(r):
+            return r
+    raise RuntimeError("o rádio não devolveu a resposta esperada")
+
+
+def bc_state(bc, caminhos=None):
+    """State do rádio, opcionalmente só dos `caminhos` pedidos."""
+    def montar(m):
+        m.state.Clear()           # exatamente o pedido da biblioteca
+        if caminhos:
+            m.stateFilterPath.extend(list(caminhos))
+    return bc_pedir(bc, montar, lambda r: r.HasField("state")).state
+
+
+def _descomprimir_saida(dados, compressao=None):
+    """Saída de tarefa. TaskOutput.CompressionType: GZIP=0, LZMA=1, LZ=3,
+    NONE=4 — e GZIP é também o valor quando o campo não vem, então a
+    assinatura dos bytes decide antes do enum."""
+    import gzip, lzma
+    if dados[:2] == b"\x1f\x8b":
+        return gzip.decompress(dados)
+    if dados[:6] == b"\xfd7zXZ\x00" or compressao == 1:
+        try: return lzma.decompress(dados)
+        except Exception: pass
+    if compressao == 0:
+        for wbits in (-15, 15):
+            try: return _zlib.decompress(dados, wbits)
+            except Exception: pass
+    return dados
+
+
+def trace_de_bytes(dados, compressao=None):
+    """Interpreta a saída do TRACE como a mensagem `Trace` do Common.proto
+    — binária ou em texto. None quando não é um Trace com caminho."""
+    from rajant_api import Common_pb2
+    dados = _descomprimir_saida(dados, compressao)
+    t = Common_pb2.Trace()
+    try:
+        t.ParseFromString(dados)
+        if t.HasField("path"):
+            return t
+    except Exception:
+        pass
+    try:
+        from google.protobuf import text_format
+        t = Common_pb2.Trace()
+        text_format.Parse(dados.decode("utf-8", "replace"), t,
+                          allow_unknown_field=True)
+        if t.HasField("path"):
+            return t
+    except Exception:
+        pass
+    return None
+
+
+def _trace_para_dict(t):
+    """Os campos que o laudo usa, com os mesmos cuidados do arquivo do
+    MeshMapper: 0 não é custo de rota, 2147483647 é sem rota."""
+    p = t.path
+    tipo = type(p).PathType.Name(p.type) if p.HasField("type") else None
+    custo = p.cost if p.HasField("cost") else None
+    salto = (p.hopCost if "hopCost" in type(p).DESCRIPTOR.fields_by_name
+             and p.HasField("hopCost") else None)
+    return {
+        "destino": t.host or None,
+        "tipo": tipo,
+        "saida": (p.name or "").strip() or None,
+        "mac": p.mac.hex(":") if p.mac else None,
+        "custo_caminho": custo or None,
+        "custo_saida": (None if salto is None or salto >= CUSTO_SEM_ROTA
+                        else salto or None),
+        "sinal": (p.signal or None) if p.HasField("signal") else None,
+        "snr": (p.rssi or None) if p.HasField("rssi") else None,
+        "taxa": (p.rate or None) if p.HasField("rate") else None,
+        "canal": p.channel if p.HasField("channel") else None,
+        "freq": p.freq if p.HasField("freq") else None,
+    }
+
+
+def bc_trace(bc, destino, espera_s=2.0, registro=None):
+    """Por onde o rádio sai até `destino`, pelo TRACE do próprio rádio.
+
+    Pelo Common.proto e pelo Message.proto: pede-se a tarefa em
+    `runTask` (TaskCommand.TRACE, `arguments` = destino); o rádio responde
+    em `runTaskResult` (com o id); a saída é baixada por
+    `taskOutputRequest`, em fragmentos até SUCCESS. O formato da saída não
+    é declarado — ver `trace_de_bytes`.
+
+    SÓ TRACE. A mesma mensagem pede REBOOT, ZEROIZE, CLEAR e KICK; a ação
+    é uma constante aqui, nunca um parâmetro.
+
+    `registro` (lista) recebe cada mensagem trocada, em texto — é o que o
+    diagnóstico de campo grava. Devolve o dict de `_trace_para_dict`.
+    """
+    def _reg(rotulo, msg):
+        if registro is not None:
+            registro.append((rotulo, str(msg)))
+
+    def montar(m):
+        m.runTask.action = type(m.runTask).TRACE
+        m.runTask.arguments = destino
+    _reg("pedido runTask", "action: TRACE\narguments: " + destino)
+    r = bc_pedir(bc, montar, lambda r: r.HasField("runTaskResult"))
+    res = r.runTaskResult
+    _reg("runTaskResult", res)
+    if res.status == type(res).FAILURE:
+        raise TraceIndisponivel(res.description or "o rádio recusou a tarefa")
+    tid = res.id if res.HasField("id") else None
+
+    prazo = time.monotonic() + espera_s
+    dados, pos, ultimo = b"", 0, None
+    while True:
+        def montar_saida(m, pos=pos):
+            m.taskOutputRequest.position = pos
+            if tid is not None:
+                m.taskOutputRequest.id = tid
+        r = bc_pedir(bc, montar_saida,
+                     lambda r: r.HasField("taskOutputResponse"))
+        o = r.taskOutputResponse
+        _reg(f"taskOutputResponse (posição {pos})",
+             f"status: {type(o).Status.Name(o.status) if o.HasField('status') else '?'}"
+             f"\nposition: {o.position}\nbytes: {len(o.data)}"
+             + (f"\noutput {{\n{o.output}}}" if o.HasField("output") else ""))
+        ultimo = o
+        if o.status == type(o).FRAGMENT:
+            dados += o.data
+            pos = o.position or (pos + len(o.data))
+            continue
+        if o.status == type(o).SUCCESS:
+            dados += o.data
+            break
+        # FAILED ou UNAVAILABLE: a tarefa pode ainda não ter terminado.
+        if time.monotonic() >= prazo:
+            try:
+                _reg("State.task", bc_state(bc, None).task)
+            except Exception as e:
+                _reg("State.task (falhou)", e)
+            raise TraceIndisponivel(
+                "saída do trace indisponível: "
+                + type(o).Status.Name(o.status))
+        time.sleep(0.05)
+
+    compressao = (ultimo.output.compression
+                  if ultimo is not None and ultimo.HasField("output")
+                  and ultimo.output.HasField("compression") else None)
+    if registro is not None:
+        import base64
+        registro.append(("saída (base64)", base64.b64encode(dados).decode()))
+    t = trace_de_bytes(dados, compressao)
+    if t is None:
+        raise TraceIndisponivel("a saída do trace não é uma mensagem Trace")
+    _reg("Trace interpretado", t)
+    return _trace_para_dict(t)
+
 
 class CapturaGPS:
     def __init__(self, ident, ips, minutos, intervalo_s, coletor_ref, rotulo="",

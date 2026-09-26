@@ -41,6 +41,61 @@ A linha de status mostra **ms/leitura** ao lado do **passo real**. Se o
 passo real ficar acima do pedido com leitura lenta, o gargalo é a rede
 até os rádios, não a ferramenta.
 
+## Coleta ao vivo: o enlace de saída
+
+A lista de vizinhos do rádio mostra o custo de **um salto** até cada um;
+a rede escolhe a saída pelo custo do **caminho inteiro** até o destino.
+Nos dados do CA-1006, o vizinho de sinal mais forte era a saída real em só
+5 de 53 pontos, e o de menor custo em 18. Quem diz por onde o rádio sai é
+o **trace** — o que o MeshMapper grava em `traceInfo`.
+
+A coleta faz o trace em cada leitura, na mesma sessão e no mesmo instante
+do State (nada de defasagem), até o destino da tela — padrão
+`10.188.96.11`, o mesmo dos seus arquivos do MeshMapper. Com ele, cada
+amostra traz, como no arquivo:
+
+| campo | de onde |
+|---|---|
+| RSSI do enlace, SNR, banda, canal | o enlace de **saída** |
+| Custo do enlace | o custo do salto de saída |
+| Custo do caminho | o custo total até o destino |
+| Servidor | o vizinho por onde saiu |
+
+Sem trace (rádio que recusa, ou caixa desmarcada), a amostra sai como
+antes — vizinho de sinal mais forte — e o custo do caminho fica vazio. Se
+o **primeiro** trace for recusado, ele é desligado para a coleta inteira
+e a tela diz o motivo uma vez.
+
+**A leitura também ficou mais leve.** A `rajant-api` lia a resposta do
+rádio com um único `recv`: resposta maior que um registro TLS (~16 KB),
+comum em rádio com muitos vizinhos, falhava como "sem resposta". E
+pedia o State inteiro, configuração incluída, com um ping antes de cada
+leitura. Agora a mensagem é lida até o fim, sem ping, e só com GPS, rádio
+e sistema. Se o rádio não entender o filtro, volta sozinha ao State
+inteiro; se a leitura direta não funcionar, volta ao modo da biblioteca.
+
+### Teste de campo (uma vez, antes de confiar no trace)
+
+Dois detalhes não estão no `.proto` e não se inventam: o formato do filtro
+e o formato da resposta do trace. Os testes daqui usam um rádio simulado
+com o protocolo real; a confirmação é num rádio de verdade:
+
+1. Na aba **Coleta**, **Procurar equipamentos** e **clicar no nome** de
+   um rádio da lista (não na caixinha de marcar).
+2. **Testar no selecionado** (ao lado do destino do trace).
+3. Sai um `teste_trace_<ip>_<data>.txt` na pasta de saída. Mande o
+   arquivo.
+
+Ou pela linha de comando:
+
+```
+site_survey.exe --testar-trace 10.188.99.6 --senha <senha> --role co
+```
+
+Só leitura: o teste pede o State e uma consulta de rota (TRACE). As outras
+tarefas que a mesma mensagem da API aceita — REBOOT, ZEROIZE, CLEAR — não
+existem no código.
+
 ## Entradas aceitas
 
 | arquivo | observação |
@@ -184,9 +239,9 @@ enlace do caminho — é a medida mais próxima de "o Dispatch funciona aqui".
   custo a dez dígitos.
 - O **custo do enlace** (primeiro salto, `hopcost`) continua na coluna
   *Custo do enlace* do Excel; *Custo do caminho* fica ao lado.
-- A **coleta ao vivo não mede** o custo do caminho: ele vem de uma tarefa
-  TRACE do rádio, e a `rajant-api` 0.1.1 não tem método para ela. A aba e
-  o slide simplesmente não aparecem.
+- Na **coleta ao vivo**, o custo do caminho vem do TRACE feito pela
+  própria ferramenta — ver "Coleta ao vivo: o enlace de saída", acima.
+  Rádio que recusar o trace sai sem a aba e sem o slide, nunca com zero.
 
 ### A fronteira exata
 

@@ -43,7 +43,13 @@ a = Analysis(
     # em corpo de função é justamente o que a análise estática às vezes
     # não alcança. Sem ele o exe abre, falha no import e fecha o console
     # antes de alguém ler o motivo — que foi o "não abre" relatado.
-    hiddenimports=["rajant_api", "coleta_rajant", "survey_meshmapper",
+    # Common_pb2 (a mensagem Trace) e text_format são importados dentro
+    # de função, no TRACE da coleta: declarados aqui para não dependerem
+    # de o PyInstaller achá-los sozinho.
+    hiddenimports=["rajant_api", "rajant_api.Common_pb2",
+                   "rajant_api.Message_pb2", "rajant_api.State_pb2",
+                   "google.protobuf.text_format",
+                   "coleta_rajant", "survey_meshmapper",
                    "rajant_monitor",
                    "tkinter", "tkinter.ttk", "tkinter.filedialog",
                    "tkinter.messagebox", "tkinter.constants"],

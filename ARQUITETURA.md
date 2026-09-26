@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 565, em 79 classes |
+| testes | 578, em 81 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 565 testes e as âncoras de seção (§26).
+segura isso são os 578 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -688,8 +688,34 @@ grandeza e o gráfico de distribuição. Rótulos, cores e classes saem de
 do MeshMapper, o `hopcost` do primeiro salto; na coleta ao vivo, o do
 melhor vizinho). `custo_caminho` é o `traceInfo.path.cost`, o total até
 `traceInfo.host`. Antes o `custo` do arquivo era o do caminho e o da coleta
-o do enlace — a mesma coluna do Excel dizia coisas diferentes. A coleta ao
-vivo deixa `custo_caminho` em `None`: a rajant-api 0.1.1 não tem TRACE.
+o do enlace — a mesma coluna do Excel dizia coisas diferentes. Na coleta
+ao vivo, os dois vêm do TRACE (ver "BCAPI direto"); sem ele,
+`custo_caminho` fica `None`.
+
+### BCAPI direto
+
+A rajant-api 0.1.1 (lida do PyPI) lê a resposta com UM `recv(65535)` —
+pelo TLS, no máximo um registro de ~16 KB —, pinga o rádio antes de cada
+`get_state()` e não tem TRACE. `bc_receber`/`bc_pedir`/`bc_state`/
+`bc_trace` usam a sessão autenticada dela (`connection`, `build_message`,
+`send_message`) com o mesmo enquadramento do código dela (`>ibbbb`,
+deflate cru), lendo até o tamanho do cabeçalho.
+
+`estado_da_sessao` tenta filtrado (`stateFilterPath` = `CAMINHOS_ESTADO`),
+depois inteiro, e depois o `get_state()` da biblioteca; o que funcionar
+fica valendo para o processo (`_BC_MODO`). No pior caso é o de antes.
+
+`bc_trace`: `runTask` (TRACE, destino) → `runTaskResult` → saída por
+`taskOutputRequest` em fragmentos → `Trace` (binário ou texto, gzip ou
+não). A ação é constante; nenhuma outra tarefa existe no código. A
+`Trace` compilada na biblioteca tem `hopCost` e `pathActiveSeconds`, que
+o `.proto` do repositório não tem — os mesmos campos do `traceInfo` do
+MeshMapper.
+
+Formato do filtro e da resposta do trace **não estão no .proto**: os
+testes usam um rádio simulado com as mensagens reais da biblioteca, e o
+`--testar-trace` grava a resposta de um rádio de verdade para fechar os
+dois.
 
 **`survey_resumo`**: `mediana` é a mediana (o `med` é a média, e o
 semanal a rotula assim); `pior5` segue o sentido da grandeza — os 5%

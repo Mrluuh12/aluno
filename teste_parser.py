@@ -5308,11 +5308,15 @@ class TestCustoDoCaminho(unittest.TestCase):
         self.assertEqual(r["rtt"]["pior5"], 157.0)      # os maiores
 
     def test_coleta_ao_vivo_nao_inventa_caminho(self):
-        # A rajant-api 0.1.1 não tem TRACE: o campo existe e é None, e a
-        # grandeza não entra no laudo — nunca como zero.
+        # Sem trace (sessão sem acesso direto, rádio que recusa, ou
+        # desligado na tela), o campo existe e é None, e a grandeza não
+        # entra no laudo — nunca como zero.
         import coleta_rajant as col
-        fonte = inspect.getsource(col.Coleta._amostra)
-        self.assertIn('"custo_caminho": None', fonte)
+        c = col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
+        s = {"sistema": {"gps_lat": -18.9, "gps_lon": -43.4, "gps_time": 1.0},
+             "radios": [], "_trace": None}
+        am, _ = c._amostra("10.0.0.1", s, 0.0)
+        self.assertIsNone(am["custo_caminho"])
         self.assertNotIn("custo_caminho", rm.campos_com_medicao(
             [{"custo_caminho": None, "sinal": -70}]))
 
@@ -5990,6 +5994,352 @@ def _rajant_falsa(frota, t0, latencia=0.0, gps_hz=10.0):
     return FakeBC
 
 
+def _carregar_bcapi_real():
+    """A rajant-api DE VERDADE, se instalada, carregada ao lado do stub.
+
+    O resto da suíte roda com o stub do topo deste arquivo (sem rede, sem
+    biblioteca). Os testes do protocolo precisam das mensagens reais —
+    Message_pb2, Common_pb2, State_pb2 — e as trocam de lugar só enquanto
+    rodam. Sem a biblioteca na máquina, são pulados.
+    """
+    import importlib
+    stub = sys.modules.pop('rajant_api', None)
+    try:
+        real = importlib.import_module('rajant_api')
+        for sub in ('Message_pb2', 'Common_pb2', 'State_pb2'):
+            importlib.import_module('rajant_api.' + sub)
+        return real
+    except Exception:
+        for k in [k for k in sys.modules if k.startswith('rajant_api')]:
+            sys.modules.pop(k, None)
+        return None
+    finally:
+        if stub is not None:
+            sys.modules['rajant_api'] = stub
+
+
+_BCAPI_REAL = _carregar_bcapi_real()
+
+
+def _tem_bcapi():
+    return _BCAPI_REAL is not None
+
+
+class _ComBCAPIReal:
+    """Põe a rajant-api real no lugar do stub durante o teste."""
+
+    def setUp(self):
+        self._stub = sys.modules.get('rajant_api')
+        sys.modules['rajant_api'] = _BCAPI_REAL
+        self._modo = dict(rm._BC_MODO)
+        rm._BC_MODO.update({"direto": None, "filtro": None,
+                            "falhas_direto": 0})
+
+    def tearDown(self):
+        sys.modules['rajant_api'] = self._stub
+        rm._BC_MODO.clear(); rm._BC_MODO.update(self._modo)
+
+
+class _RadioBCAPI:
+    """Rádio falso que fala o protocolo REAL da BCAPI.
+
+    Mensagens da própria rajant-api (Message_pb2), cabeçalho de 8 bytes
+    `>ibbbb` e corpo em deflate cru — o enquadramento do código da
+    biblioteca. A resposta sai em PEDAÇOS pequenos, como pelo TLS: é o que
+    quebra o `recv(65535)` único da biblioteca e o que a leitura inteira
+    tem de aguentar.
+
+    `filtro_ok`: entende stateFilterPath no formato "gps". `recusa`: texto
+    do FAILURE ao TRACE. `fragmentos`: em quantas partes vem a saída.
+    """
+
+    def __init__(self, nome="CA-1006", peers=3, filtro_ok=True, recusa=None,
+                 fragmentos=2, pedaco=700, custo=17952, salto=17951,
+                 saida="ERM-08 PTP CAM", atraso=0.0):
+        self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
+        self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
+        self.custo, self.salto, self.saida = custo, salto, saida
+        # Intervalo entre pedaços: pelo TLS os registros chegam espaçados.
+        # Sem ele, o buffer do socket já tinha a mensagem inteira e um recv
+        # único a pegava — o teste passava até com a leitura da biblioteca.
+        self.atraso = atraso
+        self.pedidos = []
+        self._pos = 0
+
+    def conectar(self):
+        import socket, threading
+        a, b = socket.socketpair()
+        a.settimeout(5)
+        threading.Thread(target=self._servir, args=(b,), daemon=True).start()
+        return a
+
+    def estado(self):
+        from rajant_api import State_pb2
+        st = State_pb2.State()
+        st.system.uptime = 1000.0
+        st.configuration.saved.general.name = self.nome
+        g = st.gps
+        g.gpsSwitch.enabled = True
+        g.gpsPos.gpsTime = 143025.0 + self._pos
+        g.gpsPos.gpsLat = "1853.6443S"
+        g.gpsPos.gpsLong = "04325.8538W"
+        g.gpsVel.gpsSpeedKph = 40.0
+        w = st.wireless.add()
+        w.name, w.channel, w.noise = "wlan0", 157, -95
+        for k in range(self.n_peers):
+            p = w.peer.add()
+            p.mac = bytes([0x84, 0x8d, 0x84, 0x41, k // 256, k % 256])
+            p.ipv4Address = f"10.0.{k // 250}.{k % 250}"
+            p.signal, p.rssi, p.cost = -60 - (k % 30), 30 - (k % 20), 5000 + k
+            p.encapId = 90000 + k
+        return st
+
+    def _trace(self):
+        from rajant_api import Common_pb2
+        t = Common_pb2.Trace()
+        t.host = "10.188.96.11"
+        pa = t.path
+        pa.type = pa.WIRELESS_PEER
+        pa.name, pa.mac = self.saida, bytes.fromhex("848d8441a60d")
+        pa.cost, pa.hopCost = self.custo, self.salto
+        pa.signal, pa.rssi, pa.rate = -89, 20, 65
+        pa.channel, pa.freq = 157, 5785
+        return t
+
+    def _enviar(self, sock, msg):
+        import struct, zlib
+        dados = msg.SerializeToString()
+        c = zlib.compressobj(wbits=-15)
+        dados = c.compress(dados) + c.flush()
+        pacote = struct.pack(">ibbbb", len(dados), 2, 0, 0, 0) + dados
+        import time as _t
+        for i in range(0, len(pacote), self.pedaco):
+            sock.sendall(pacote[i:i + self.pedaco])
+            if self.atraso:
+                _t.sleep(self.atraso)
+
+    def _servir(self, sock):
+        import struct, zlib, gzip
+        from rajant_api import Message_pb2
+        saida = gzip.compress(self._trace().SerializeToString())
+        partes = [saida[i::1] for i in range(1)]
+        tam = max(1, -(-len(saida) // self.fragmentos))
+        partes = [saida[i:i + tam] for i in range(0, len(saida), tam)]
+        while True:
+            try:
+                cab = rm._bc_ler_exato(sock, 8)
+                n, flag = struct.unpack(">ibbbb", cab)[:2]
+                corpo = rm._bc_ler_exato(sock, n)
+            except Exception:
+                return
+            if flag == 2:
+                corpo = zlib.decompress(corpo, -15)
+            m = Message_pb2.BCMessage(); m.ParseFromString(corpo)
+            self.pedidos.append(m)
+            r = Message_pb2.BCMessage(); r.sequenceNumber = m.sequenceNumber
+            if m.HasField("state"):
+                st = self.estado(); self._pos += 1
+                if m.stateFilterPath:
+                    pedidos = set(m.stateFilterPath)
+                    for f, _v in list(st.ListFields()):
+                        if not self.filtro_ok or f.name not in pedidos:
+                            st.ClearField(f.name)
+                r.state.CopyFrom(st)
+            elif m.HasField("runTask"):
+                if self.recusa:
+                    r.runTaskResult.status = r.runTaskResult.FAILURE
+                    r.runTaskResult.description = self.recusa
+                else:
+                    r.runTaskResult.status = r.runTaskResult.SUCCESS
+                    r.runTaskResult.id = 7
+            elif m.HasField("taskOutputRequest"):
+                o = r.taskOutputResponse
+                i = m.taskOutputRequest.position // tam
+                o.data = partes[i]
+                o.output.compression = o.output.GZIP
+                o.output.content = o.output.PROTO
+                if i + 1 < len(partes):
+                    o.status = o.FRAGMENT
+                    o.position = (i + 1) * tam
+                else:
+                    o.status = o.SUCCESS
+            self._enviar(sock, r)
+
+
+def _bc_de_teste(radio):
+    """Um Breadcrumb DA BIBLIOTECA, ligado ao rádio falso."""
+    from rajant_api import Breadcrumb
+    bc = Breadcrumb(host="10.0.0.1", port=2300, role="co", password="x")
+    bc.connection = radio.conectar()
+    bc.authenticated = True
+    return bc
+
+
+@unittest.skipUnless(_tem_bcapi(), "rajant-api/protobuf ausentes")
+class TestBCAPIDireto(_ComBCAPIReal, unittest.TestCase):
+    """Leitura inteira, filtro de caminho e TRACE, contra o protocolo real."""
+
+    def test_le_a_mensagem_inteira_mesmo_chegando_em_pedacos(self):
+        # 400 vizinhos passam de 16 KB: pelo TLS chegam em vários registros,
+        # e o recv(65535) único da biblioteca pegaria só o primeiro.
+        radio = _RadioBCAPI(peers=400, pedaco=500, atraso=0.003)
+        bc = _bc_de_teste(radio)
+        st = rm.bc_state(bc)
+        self.assertEqual(len(st.wireless[0].peer), 400)
+        self.assertGreater(bc._ultimo_tamanho[1], 16384)
+
+    def test_filtro_pede_so_os_ramos_do_survey(self):
+        radio = _RadioBCAPI()
+        st = rm.estado_da_sessao(_bc_de_teste(radio))
+        self.assertEqual(list(radio.pedidos[-1].stateFilterPath),
+                         list(rm.CAMINHOS_ESTADO))
+        self.assertFalse(st.HasField("configuration"))
+        self.assertTrue(st.HasField("gps"))
+        self.assertIs(rm._BC_MODO["filtro"], True)
+
+    def test_filtro_nao_entendido_volta_ao_state_inteiro(self):
+        # Formato de caminho que o rádio não reconhece: nada volta. A
+        # leitura não pode sair vazia — pede o State inteiro, e para de
+        # tentar o filtro.
+        radio = _RadioBCAPI(filtro_ok=False)
+        bc = _bc_de_teste(radio)
+        st = rm.estado_da_sessao(bc)
+        self.assertTrue(st.HasField("gps"))
+        self.assertIs(rm._BC_MODO["filtro"], False)
+        rm.estado_da_sessao(bc)
+        self.assertFalse(radio.pedidos[-1].stateFilterPath)
+
+    def test_trace_em_fragmentos_comprimidos(self):
+        radio = _RadioBCAPI(fragmentos=3)
+        t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertEqual(t["custo_caminho"], 17952)
+        self.assertEqual(t["custo_saida"], 17951)
+        self.assertEqual(t["saida"], "ERM-08 PTP CAM")
+        self.assertEqual((t["sinal"], t["snr"], t["freq"]), (-89, 20, 5785))
+        self.assertEqual(t["tipo"], "WIRELESS_PEER")
+        pedidos = [m.taskOutputRequest.position for m in radio.pedidos
+                   if m.HasField("taskOutputRequest")]
+        self.assertEqual(len(pedidos), 3)
+
+    def test_trace_recusado_diz_por_que(self):
+        radio = _RadioBCAPI(recusa="permission denied for role co")
+        with self.assertRaises(rm.TraceIndisponivel) as c:
+            rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertIn("permission denied", str(c.exception))
+
+    def test_so_a_tarefa_trace_e_enviada(self):
+        # A mesma mensagem pede REBOOT, ZEROIZE, CLEAR, KICK. A ação é
+        # constante no código, nunca parâmetro.
+        radio = _RadioBCAPI()
+        rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        acoes = [m.runTask.action for m in radio.pedidos if m.HasField("runTask")]
+        from rajant_api import Common_pb2
+        self.assertEqual(acoes, [Common_pb2.TaskCommand.TRACE])
+        fonte = inspect.getsource(rm.bc_trace).split('"""', 2)[2]
+        for perigosa in ("REBOOT", "ZEROIZE", "CLEAR", "KICK", "INSTALL",
+                         "SNAPSHOT"):
+            self.assertNotIn(perigosa, fonte)
+
+    def test_sessao_nao_conta_resposta_vazia_como_sucesso(self):
+        # get_state() da biblioteca devolve False em vez de levantar; contar
+        # isso como sucesso zerava as falhas e o rádio mudo nunca saía.
+        class Mudo:
+            def __init__(s, host=None, port=None, role=None, password=None): pass
+            def reachable(s): return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return False
+        orig = rm.Breadcrumb
+        rm.Breadcrumb = Mudo
+        try:
+            ses = rm.SessaoRadio("10.0.0.9", porta=2300, role="co", senha="")
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    ses.estado_bruto()
+            self.assertTrue(ses.desistiu)
+        finally:
+            rm.Breadcrumb = orig
+
+
+@unittest.skipUnless(_tem_bcapi(), "rajant-api/protobuf ausentes")
+class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
+    """A coleta ao vivo com o enlace de SAÍDA real, como o MeshMapper."""
+
+    def setUp(self):
+        super().setUp()
+        import coleta_rajant as col
+        from rajant_api import Breadcrumb
+        self.col = col
+        self._orig = rm.Breadcrumb
+        radios = self.radios = {}
+
+        class BCFalso(Breadcrumb):
+            def reachable(s): return True
+            def authenticate(s):
+                s.connection = radios[s.host].conectar()
+                s.authenticated, s.serial = True, "96716"
+                return True
+        rm.Breadcrumb = BCFalso
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+        super().tearDown()
+
+    def _rodar(self, radio, segundos=2.0, **kw):
+        import time as _t, threading as _th
+        self.radios["10.0.0.6"] = radio
+        avisos = []
+        c = self.col.Coleta({"10.0.0.6": "CA-1006"}, passo_m=1.0,
+                            aviso=avisos.append, **kw)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(segundos); c.parar(); th.join(10)
+        return c, avisos
+
+    def test_amostra_leva_o_enlace_de_saida_e_o_custo_do_caminho(self):
+        c, _ = self._rodar(_RadioBCAPI())
+        self.assertTrue(c.amostras)
+        a = c.amostras[0]
+        self.assertEqual(a["custo_caminho"], 17952)
+        self.assertEqual(a["custo"], 17951)           # o do enlace de saída
+        self.assertEqual(a["servidor"], "ERM-08 PTP CAM")
+        self.assertEqual((a["sinal"], a["snr"]), (-89, 20))
+        self.assertEqual(a["banda"], "5.8 GHz")
+        # A leitura enxuta não traz `configuration`: o nome é o da
+        # descoberta, não o IP que o parser devolveria.
+        self.assertEqual(a["radio"], "CA-1006")
+        self.assertGreater(c.trace_ok, 0)
+
+    def test_sem_rota_chega_como_sem_rota(self):
+        c, _ = self._rodar(_RadioBCAPI(custo=2147483647))
+        self.assertTrue(rm.sem_rota(c.amostras[0]["custo_caminho"],
+                                    "custo_caminho"))
+
+    def test_recusa_desliga_o_trace_uma_vez_e_a_coleta_segue(self):
+        c, avisos = self._rodar(_RadioBCAPI(recusa="permission denied"))
+        self.assertTrue(c.amostras, "a recusa do trace parou a coleta")
+        self.assertIsNone(c.amostras[-1]["custo_caminho"])
+        self.assertIn("permission denied", c.trace_parado)
+        self.assertEqual(len([l for l in avisos if "trace desligado" in l]), 1)
+
+    def test_desligado_na_tela_nao_pede_trace(self):
+        radio = _RadioBCAPI()
+        c, _ = self._rodar(radio, trace_destino=None)
+        self.assertTrue(c.amostras)
+        self.assertFalse([m for m in radio.pedidos if m.HasField("runTask")])
+
+    def test_diagnostico_de_campo_grava_o_que_o_radio_respondeu(self):
+        import tempfile
+        self.radios["10.0.0.6"] = _RadioBCAPI()
+        pasta = tempfile.mkdtemp()
+        alvo = self.col.testar_trace("10.0.0.6", "10.188.96.11",
+                                     pasta=pasta, aviso=lambda t: None)
+        txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("autenticação\nok", txt)
+        self.assertIn("filtro 'gps'", txt)
+        self.assertIn("RESULTADO DO TRACE\nOK", txt)
+        self.assertIn("custo_caminho: 17952", txt)
+        self.assertIn("saída (base64)", txt)
+
+
 class TestDescobrirMalha(unittest.TestCase):
     """Descoberta sem o peso do coletor: sem métrica, sem cache, sem
     filtro de tag. O app de coleta precisa ver TUDO que responde para o
@@ -6490,6 +6840,22 @@ class TestColetaAoVivo(unittest.TestCase):
                          "o 0 dBm ganhou a eleição do melhor sinal")
         self.assertFalse([v for v in c.peers if v["sinal"] == 0],
                          "vizinho sem signal virou 0 dBm")
+
+    def test_diagnostico_grava_o_arquivo_mesmo_sem_conseguir_autenticar(self):
+        # A rajant-api chama o `ping` do sistema e não trata a falta dele:
+        # o diagnóstico de campo existe para registrar o que deu errado, e
+        # não pode sair sem arquivo justamente quando algo dá errado.
+        import tempfile
+        class SemPing:
+            def __init__(s, host=None, port=None, role=None, password=None): pass
+            def authenticate(s):
+                raise FileNotFoundError("No such file or directory: 'ping'")
+        rm.Breadcrumb = SemPing
+        alvo = self.col.testar_trace("10.0.0.1", pasta=tempfile.mkdtemp(),
+                                     aviso=lambda t: None)
+        txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("autenticação — ERRO", txt)
+        self.assertIn("ping", txt)
 
     def test_coleta_traz_snr_e_ruido(self):
         # Estavam fixos em None: as duas grandezas sumiam do KMZ e do PPT

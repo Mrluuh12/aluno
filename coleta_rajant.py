@@ -154,7 +154,8 @@ class Coleta:
                  passo_m=PASSO_M_PADRAO, max_threads=LEITURAS_SIMULTANEAS,
                  timeout_s=6,
                  cfg=None, nome=None, reencontro_s=60.0,
-                 parado_s=INTERVALO_PARADO_S, aviso=print):
+                 parado_s=INTERVALO_PARADO_S, aviso=print,
+                 trace_destino=rm.DESTINO_TRACE_PADRAO):
         self.alvos    = {ip: (nomes or ip) for ip, nomes in dict(alvos).items()}
         self.role     = role
         self.senha    = senha
@@ -188,6 +189,12 @@ class Coleta:
         self.fim         = None
         self.em_voo      = {}   # ip -> quando a leitura em curso começou
         self.duracoes    = []   # segundos das últimas leituras, para a tela
+        # TRACE: por onde cada rádio sai até o destino, e com que custo —
+        # o que o MeshMapper grava em traceInfo. None = não medir.
+        self.trace_destino = (trace_destino or "").strip() or None
+        self.trace_ok      = 0
+        self.trace_falhas  = 0
+        self.trace_parado  = None   # motivo, quando o trace foi desligado
 
     def parar(self):
         self._parar.set()
@@ -236,11 +243,52 @@ class Coleta:
         # média da vida inteira do rádio. `calcular_taxas` guarda a
         # leitura anterior por IP e devolve a taxa do intervalo. Sem esta
         # chamada, `interf_pct` fica None para sempre.
-        return rm.calcular_taxas(ip, d, time.monotonic())
+        d = rm.calcular_taxas(ip, d, time.monotonic())
+        # O trace vai na MESMA sessão, logo depois do State: mesma posição,
+        # mesmo instante. Guardar o de outra leitura seria a defasagem que
+        # o survey inteiro existe para evitar.
+        d["_trace"] = self._trace(ses, ip)
+        return d
+
+    def _trace(self, ses, ip):
+        """Por onde o rádio sai até o destino, ou None. Nunca derruba a
+        leitura: sem trace, a amostra sai como antes."""
+        if not self.trace_destino or self.trace_parado:
+            return None
+        try:
+            t = ses.trace(self.trace_destino)
+        except rm.TraceIndisponivel as e:
+            return self._trace_falhou(ip, str(e), recusa=True)
+        except Exception as e:
+            return self._trace_falhou(ip, f"{type(e).__name__}: {e}")
+        with self.lock:
+            self.trace_ok += 1
+        return t
+
+    def _trace_falhou(self, ip, motivo, recusa=False):
+        """Uma falha de trace. Se NENHUM trace funcionou ainda e o rádio
+        recusa a tarefa (ou falha sempre), desliga o trace para a coleta
+        inteira — insistir custaria leitura de todos os rádios por nada.
+        Depois de um sucesso, falha avulsa só deixa aquela amostra sem."""
+        with self.lock:
+            self.trace_falhas += 1
+            desliga = (self.trace_ok == 0 and not self.trace_parado
+                       and (recusa or self.trace_falhas >= 5))
+            if desliga:
+                self.trace_parado = motivo
+        if desliga:
+            self.aviso(f"trace desligado ({self.alvos.get(ip, ip)}): {motivo}"
+                       f" — a coleta segue sem o custo do caminho")
+        return None
 
     def _amostra(self, ip, d, agora):
         s = d["sistema"]
-        nome = s.get("nome") or self.alvos.get(ip) or ip
+        # O nome vem de `configuration`, que a leitura enxuta não traz — e o
+        # parser então devolve o IP como nome. O da descoberta, que leu o
+        # State inteiro uma vez, vale mais.
+        nome_desc = self.alvos.get(ip)
+        nome = ((nome_desc if nome_desc and nome_desc != ip else None)
+                or s.get("nome") or ip)
         lat, lon = s.get("gps_lat"), s.get("gps_lon")
         fix = s.get("gps_time")
 
@@ -300,31 +348,61 @@ class Coleta:
         snr_f = bom.get("snr")
         if snr_f is None and bom.get("sinal") is not None and bom.get("ruido"):
             snr_f = round(bom["sinal"] - bom["ruido"], 1)
+        enl = {"sinal": bom.get("sinal"), "snr": snr_f,
+               "ruido": bom.get("ruido"), "custo": bom.get("custo"),
+               "taxa": bom.get("taxa"), "banda": bom.get("banda"),
+               "canal": bom.get("canal"), "servidor": bom.get("servidor"),
+               "interf": bom.get("interf")}
+
+        # Com o trace, o enlace da amostra é o de SAÍDA de verdade — o mesmo
+        # que o arquivo do MeshMapper grava em traceInfo.path. Sem ele, fica
+        # o vizinho de sinal mais forte: nos dados do CA-1006, a saída real
+        # em só 5 de 53 pontos, porque a rede escolhe pelo custo do CAMINHO
+        # e a lista de vizinhos só mostra o custo de um salto.
+        tr = d.get("_trace") or None
+        custo_caminho = None
+        if tr:
+            sig_t, snr_t, _c, ruido_t = rm.limpar_enlace(
+                tr.get("sinal"), tr.get("snr"), None)
+            radio_t = next((r for r in (d.get("radios") or [])
+                            if tr.get("canal") is not None
+                            and r.get("canal") == tr.get("canal")), None)
+            enl = {"sinal": sig_t, "snr": snr_t,
+                   # O piso de ruído medido na interface de saída; sem ela,
+                   # recuperado de sinal − SNR, como no arquivo.
+                   "ruido": (radio_t or {}).get("ruido") or ruido_t,
+                   "custo": tr.get("custo_saida"), "taxa": tr.get("taxa"),
+                   "banda": (rm._norm_banda(tr["freq"]) if tr.get("freq")
+                             else enl["banda"]),
+                   "canal": tr.get("canal"),
+                   "servidor": tr.get("saida") or tr.get("mac"),
+                   "interf": (radio_t or {}).get("interf_pct")}
+            custo_caminho = tr.get("custo_caminho")
 
         return {
             "radio": nome, "ts": time.time(),
             "lat": lat, "lon": lon, "alt": s.get("gps_alt"),
             "vel": s.get("gps_vel"), "sats": s.get("gps_sats"),
             "hdop": s.get("gps_hdop"),
-            "sinal": bom.get("sinal"), "snr": snr_f, "ruido": bom.get("ruido"),
+            "sinal": enl["sinal"], "snr": enl["snr"], "ruido": enl["ruido"],
             # Latência e perda o rádio não mede — ficam None, e sem
             # medição a grandeza não vira aba nem slide.
             "rtt": None, "perda": None,
-            # Custo do CAMINHO até o gateway sai de uma tarefa TRACE
-            # (TaskCommand.TRACE no Common.proto), e a rajant-api 0.1.1 não
-            # tem método para ela — só get_state. Sem trace, fica None: a
-            # aba e o slide não aparecem, em vez de sair uma régua vazia.
-            # O `custo` abaixo é o do ENLACE com o melhor vizinho.
-            "custo_caminho": None,
+            # Custo do CAMINHO até o destino do trace. Sem trace (rádio
+            # recusou, ou desligado na tela), fica None: a aba e o slide
+            # não aparecem, em vez de sair uma régua vazia.
+            "custo_caminho": custo_caminho,
             # Interferência a coleta ao vivo TEM, e o MeshMapper nunca deu:
             # é a fração do meio ocupada por transmissor alheio. Só aparece
             # a partir da segunda leitura do mesmo rádio (os contadores são
             # cumulativos desde o boot; ver calcular_taxas).
-            "interf": bom.get("interf"), "vazao": None,
-            "custo": bom.get("custo"), "taxa": bom.get("taxa"),
+            "interf": enl["interf"], "vazao": None,
+            # Custo do ENLACE: o de saída com trace; sem ele, o do vizinho
+            # de sinal mais forte.
+            "custo": enl["custo"], "taxa": enl["taxa"],
             "peers": len(vizinhos),
-            "banda": bom.get("banda"), "canal": bom.get("canal"),
-            "servidor": bom.get("servidor"),
+            "banda": enl["banda"], "canal": enl["canal"],
+            "servidor": enl["servidor"],
             "fonte": "direto",
         }, vizinhos
 
@@ -480,6 +558,8 @@ class Coleta:
                 # pedido, é este número que diz por quê: leitura lenta
                 # pede mais leituras simultâneas.
                 "leitura_ms": (round(ds[len(ds) // 2] * 1000) if ds else None),
+                "trace_ok": self.trace_ok, "trace_falhas": self.trace_falhas,
+                "trace_parado": self.trace_parado,
                 "passo_m": self._passo_real(),
             }
 
@@ -560,6 +640,100 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
     return feitos
 
 
+# ══════════════════════════════════════════════════════════════
+# DIAGNÓSTICO DE CAMPO — o que o rádio responde de verdade
+# ══════════════════════════════════════════════════════════════
+def testar_trace(ip, destino=None, role="co", senha="", porta=2300,
+                 pasta=".", aviso=print):
+    """Pergunta a UM rádio como ele responde à leitura e ao TRACE, e grava
+    tudo num arquivo de texto.
+
+    Existe porque duas coisas não estão no .proto e não se inventam: o
+    formato do caminho em `stateFilterPath` e o formato em que a saída do
+    TRACE volta. O arquivo que sai daqui é o que fecha as duas.
+
+    Só lê. O TRACE é consulta de rota; nenhuma outra tarefa é enviada.
+    Devolve o caminho do arquivo gravado.
+    """
+    import datetime as _dt
+    destino = destino or rm.DESTINO_TRACE_PADRAO
+    linhas = []
+    def reg(titulo, texto=""):
+        bloco = f"── {titulo}\n{texto}".rstrip()
+        linhas.append(bloco)
+        aviso(bloco if len(bloco) < 400 else bloco[:400] + " […]")
+
+    reg("teste", f"rádio {ip}:{porta}  papel {role}  destino {destino}\n"
+                 f"{_dt.datetime.now():%d/%m/%Y %H:%M:%S}")
+    try:
+        import rajant_api
+        reg("rajant-api", getattr(rajant_api, "__version__", "") or
+            getattr(rajant_api, "__file__", ""))
+    except ImportError as e:
+        reg("rajant-api ausente", str(e))
+        return _gravar_teste(pasta, ip, linhas)
+
+    bc = rm.exigir_rajant_api()(host=ip, port=porta, role=role,
+                                password=senha)
+    t0 = time.monotonic()
+    try:
+        ok = bc.authenticate()
+    except Exception as e:
+        # A biblioteca chama o `ping` do sistema e não trata a falta dele
+        # nem nenhum outro erro de rede: o diagnóstico registra e grava o
+        # arquivo mesmo assim, que é para isso que ele existe.
+        reg("autenticação — ERRO", f"{type(e).__name__}: {e}")
+        return _gravar_teste(pasta, ip, linhas)
+    reg("autenticação", f"{'ok' if ok else 'FALHOU'} em "
+                        f"{(time.monotonic() - t0) * 1000:.0f} ms"
+                        f"  serial {bc.serial}")
+    if not ok:
+        return _gravar_teste(pasta, ip, linhas)
+
+    def medir(rotulo, caminhos):
+        t0 = time.monotonic()
+        try:
+            st = rm.bc_state(bc, caminhos)
+            bruto, cheio = getattr(bc, "_ultimo_tamanho", (None, None))
+            ramos = [f.name for f, _v in st.ListFields()]
+            reg(rotulo, f"{(time.monotonic() - t0) * 1000:.0f} ms  "
+                        f"{bruto} bytes na rede, {cheio} descomprimidos\n"
+                        f"ramos: {', '.join(ramos) or '(nenhum)'}")
+            return st
+        except Exception as e:
+            reg(rotulo + " — ERRO", f"{type(e).__name__}: {e}")
+
+    st = medir("State inteiro", None)
+    if st is not None:
+        reg("State.task (antes do trace)", str(st.task) or "(vazio)")
+    # O formato do caminho não está documentado; os candidatos plausíveis,
+    # um por vez. Vale o que devolver só os ramos pedidos.
+    for fmt in ("{}", "State.{}", "/{}", "state.{}"):
+        medir(f"filtro '{fmt.format('gps')}'",
+              [fmt.format(c) for c in rm.CAMINHOS_ESTADO])
+
+    registro = []
+    t0 = time.monotonic()
+    try:
+        r = rm.bc_trace(bc, destino, espera_s=3.0, registro=registro)
+        res = f"OK em {(time.monotonic() - t0) * 1000:.0f} ms\n" + \
+              "\n".join(f"{k}: {v}" for k, v in r.items())
+    except Exception as e:
+        res = f"FALHOU em {(time.monotonic() - t0) * 1000:.0f} ms — " \
+              f"{type(e).__name__}: {e}"
+    for rot, txt in registro:
+        reg(f"trace · {rot}", txt)
+    reg("RESULTADO DO TRACE", res)
+    return _gravar_teste(pasta, ip, linhas)
+
+
+def _gravar_teste(pasta, ip, linhas):
+    alvo = Path(pasta or ".").resolve() / (
+        f"teste_trace_{ip.replace('.', '-')}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+    alvo.write_text("\n\n".join(linhas) + "\n", encoding="utf-8")
+    return alvo
+
+
 def abrir_pasta(caminho):
     import subprocess
     try:
@@ -599,7 +773,19 @@ def main(argv=None):
     ap.add_argument("--so-com-gps", action="store_true",
                     help="coleta só os rádios que reportam posição")
     ap.add_argument("-o", "--saida", default=".")
+    ap.add_argument("--sem-trace", action="store_true",
+                    help="não medir o custo do caminho (TRACE)")
+    ap.add_argument("--destino-trace", default=rm.DESTINO_TRACE_PADRAO,
+                    help="host até onde medir o custo do caminho")
+    ap.add_argument("--testar-trace", metavar="IP",
+                    help="diagnóstico de campo: pergunta a UM rádio como "
+                         "ele responde à leitura e ao TRACE e grava um .txt")
     a = ap.parse_args(argv)
+    if a.testar_trace:
+        alvo = testar_trace(a.testar_trace, a.destino_trace, role=a.role,
+                            senha=a.senha, porta=a.porta, pasta=a.saida)
+        print(f"\nArquivo gravado: {alvo}")
+        return 0
 
     seeds = [s.strip() for s in a.seeds.replace(";", ",").split(",") if s.strip()]
     if a.lista:
@@ -612,7 +798,8 @@ def main(argv=None):
         print("nenhum equipamento respondeu"); return 1
     print(f"{len(alvos)} equipamento(s); coletando por {a.minutos:g} min")
     c = Coleta(alvos, role=a.role, senha=a.senha, porta=a.porta,
-               passo_m=a.passo_m, aviso=print)
+               passo_m=a.passo_m, aviso=print,
+               trace_destino=None if a.sem_trace else a.destino_trace)
     c.rodar(a.minutos)
     feitos = gravar_e_gerar(c, a.saida, aviso=print)
     print(f"\n{len(feitos)} arquivo(s) gerado(s).")

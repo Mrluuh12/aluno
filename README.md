@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 565 testes
+python3 teste_parser.py                        # 578 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -23,7 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
-| `teste_parser.py` | 565 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 578 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -432,6 +432,21 @@ pip install "protobuf==4.23.4"
 Se `import rajant_api` falhar com `No module named 'google'`, é o protobuf que
 falta — o `--no-deps` não o trouxe.
 
+### O que a coleta de survey faz por cima dela
+
+Lido no código da 0.1.1: `get_message()` lê a resposta com **um** `recv` —
+pelo TLS, no máximo um registro de ~16 KB —, então rádio com muitos vizinhos
+volta "sem resposta"; `get_state()` pinga o rádio antes de cada consulta; e
+não há TRACE. A coleta de survey usa a sessão autenticada da biblioteca e o
+mesmo enquadramento dela, mas lê a mensagem inteira, sem ping, pede só GPS,
+rádio e sistema e faz o TRACE (custo do caminho e enlace de saída). Recua
+sozinha para o `get_state()` da biblioteca se o modo direto não funcionar.
+Detalhes em `ARQUITETURA.md`, "BCAPI direto"; teste de campo em
+`LEIAME_SURVEY.md`.
+
+Com a biblioteca instalada, a suíte roda também os testes do protocolo real
+contra um rádio simulado; sem ela, esses são pulados.
+
 ### Python 3.12 ou mais novo
 
 A `rajant-api` 0.1.1 faz `from ssl import wrap_socket`, e essa função foi
@@ -457,7 +472,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 565 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 578 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

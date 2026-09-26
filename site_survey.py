@@ -151,6 +151,11 @@ def verificar():
 def main():
     if "--verificar" in sys.argv[1:]:
         return verificar()
+    if "--testar-trace" in sys.argv[1:]:
+        # Diagnóstico de campo pela linha de comando, no mesmo executável:
+        #   site_survey.exe --testar-trace 10.188.99.6 --senha ...
+        import coleta_rajant as _col
+        return _col.main(sys.argv[1:])
     try:
         import tkinter as tk
         from tkinter import ttk, filedialog, messagebox
@@ -371,6 +376,15 @@ def main():
         ttk.Label(lc, text="minutos  (0 = até mandar parar)",
                   style="Fraco.TLabel").pack(side="left")
 
+        lt = ttk.Frame(baixo); lt.pack(fill="x", pady=(0, 6))
+        v_trace = tk.BooleanVar(value=True)
+        ttk.Checkbutton(lt, text="Custo do caminho (trace) até",
+                        variable=v_trace).pack(side="left")
+        v_dest = tk.StringVar(value=rm.DESTINO_TRACE_PADRAO)
+        ttk.Entry(lt, textvariable=v_dest, width=16).pack(side="left", padx=6)
+        b_tt = ttk.Button(lt, text="Testar no selecionado")
+        b_tt.pack(side="left", padx=(12, 0))
+
         pn = tk.Frame(baixo, bg=CARTAO, highlightbackground=LINHA,
                       highlightthickness=1)
         pn.pack(fill="x", pady=(4, 6))
@@ -510,7 +524,9 @@ def main():
                 minutos = 0.0
             c = col.Coleta(alvos, role=v_role.get(), senha=v_senha.get(),
                            porta=int(v_porta.get() or 2300), passo_m=passo,
-                           aviso=lambda t: fila.put(("log", t)))
+                           aviso=lambda t: fila.put(("log", t)),
+                           trace_destino=(v_dest.get().strip()
+                                          if v_trace.get() else None))
             est["coleta"] = c
             b_ini.configure(state="disabled")
             b_par.configure(state="normal")
@@ -538,9 +554,34 @@ def main():
                 b_par.configure(state="disabled", text="Gerando...")
                 c.parar()
 
+        def testar_trace():
+            sel = [i for i in arv.selection() if i in est["achados"]]
+            if not sel:
+                messagebox.showwarning(
+                    TITULO, "Selecione um rádio na lista (clique no nome).")
+                return
+            ip = sel[0]
+            b_tt.configure(state="disabled", text="Testando...")
+            role, senha = v_role.get(), v_senha.get()
+            porta = int(v_porta.get() or 2300)
+            dest, pasta = v_dest.get().strip(), v_saida.get()
+
+            def trab():
+                try:
+                    alvo = col.testar_trace(
+                        ip, dest, role=role, senha=senha, porta=porta,
+                        pasta=pasta, aviso=lambda t: fila.put(("log", t)))
+                    fila.put(("log", f"\nArquivo do teste: {alvo}"))
+                except Exception as e:
+                    fila.put(("log", f"ERRO no teste: {e}"))
+                    fila.put(("log", traceback.format_exc()))
+                fila.put(("teste_fim", None))
+            threading.Thread(target=trab, daemon=True).start()
+
         b_desc.configure(command=descobrir)
         b_ini.configure(command=iniciar)
         b_par.configure(command=parar)
+        b_tt.configure(command=testar_trace)
 
     def bombear():
         try:
@@ -548,6 +589,8 @@ def main():
                 tipo, val = fila.get_nowait()
                 if tipo == "log":
                     escreve(val)
+                elif tipo == "teste_fim":
+                    b_tt.configure(state="normal", text="Testar no selecionado")
                 elif tipo == "achados":
                     est["achados"] = val
                     for i in arv.get_children(): arv.delete(i)
@@ -595,12 +638,16 @@ def main():
             passo = f"{s['passo_m']:g} m" if s["passo_m"] else "—"
             lei = (f"{s['leitura_ms']} ms/leitura"
                    if s.get("leitura_ms") is not None else "")
+            tr = ("   trace desligado" if s.get("trace_parado")
+                  else f"   trace {s['trace_ok']} ok" if s.get("trace_ok")
+                  else "")
             v_stat.set(
                 f"{int(s['duracao_s'])//60:02d}:{int(s['duracao_s'])%60:02d}"
                 f"   {s['amostras']} amostras   {s['equipamentos']} equipamentos"
                 f"   {s['leituras_s']:.1f} leituras/s   {lei}"
                 f"   passo real {passo}"
-                f"   {s['repetidos']} posições repetidas   {s['falhas']} falhas")
+                f"   {s['repetidos']} posições repetidas   {s['falhas']} falhas"
+                f"{tr}")
         jan.after(300, bombear)
 
     _lista()
