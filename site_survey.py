@@ -186,10 +186,19 @@ def main():
     # botões de Iniciar e Parar — para fora do monitor, e o programa fica
     # sem como ser usado. A janela nasce cabendo na tela, com margem para
     # a barra de tarefas.
-    larg = max(900, min(1200, jan.winfo_screenwidth() - 80))
+    # Largura até 1600: com a escala do Windows em 125–150%, as letras
+    # crescem e 1200 px cortava os botões da direita.
+    larg = max(900, min(1600, jan.winfo_screenwidth() - 80))
     alt = max(600, min(860, jan.winfo_screenheight() - 90))
     jan.geometry(f"{larg}x{alt}")
     jan.minsize(900, 560)
+    # No Windows, maximizada: numa tela de 768 px são ~50 px a mais, e é a
+    # lista de equipamentos que fica com eles.
+    if sys.platform.startswith("win"):
+        try:
+            jan.state("zoomed")
+        except Exception:
+            pass
     jan.configure(bg=FUNDO)
     fila = queue.Queue()
     est = {"coleta": None, "achados": {}, "arquivos": [], "lista": {}}
@@ -199,7 +208,7 @@ def main():
     except Exception: pass
     st.configure("TFrame", background=FUNDO)
     st.configure("TNotebook", background=FUNDO, borderwidth=0)
-    st.configure("TNotebook.Tab", padding=(20, 9), font=("Segoe UI", 10))
+    st.configure("TNotebook.Tab", padding=(18, 6), font=("Segoe UI", 10))
     st.map("TNotebook.Tab", background=[("selected", FUNDO)],
            foreground=[("selected", AZUL)])
     st.configure("TLabel", background=FUNDO, foreground=TEXTO,
@@ -212,14 +221,15 @@ def main():
     st.map("Azul.TButton", background=[("active", AZUL2),
                                        ("disabled", "#9AA6C4")])
     st.configure("TButton", padding=(12, 7))
-    st.configure("Tr.Treeview", rowheight=23, fieldbackground=CARTAO,
+    st.configure("Peq.TButton", padding=(8, 2))
+    st.configure("Tr.Treeview", rowheight=21, fieldbackground=CARTAO,
                  background=CARTAO, foreground=TEXTO)
     st.configure("Tr.Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
-    topo = tk.Frame(jan, bg=AZUL, height=58)
+    topo = tk.Frame(jan, bg=AZUL, height=44)
     topo.pack(fill="x"); topo.pack_propagate(False)
     tk.Label(topo, text="Site Survey", bg=AZUL, fg="white",
-             font=("Segoe UI", 17, "bold")).pack(side="left", padx=20)
+             font=("Segoe UI", 15, "bold")).pack(side="left", padx=20)
     tk.Label(topo, text="Rajant", bg=AZUL, fg="#C7D2F0",
              font=("Segoe UI", 10)).pack(side="left", pady=(6, 0))
 
@@ -233,7 +243,7 @@ def main():
     ab_arq = ttk.Frame(nb, padding=12); nb.add(ab_arq, text="Arquivos do MeshMapper")
 
     # ═══════════ comum às duas abas: destino e o que gerar ═══════════
-    rod = ttk.Frame(jan, padding=(14, 0, 14, 12))
+    rod = ttk.Frame(jan, padding=(14, 0, 14, 8))
     rod.pack(side="bottom", fill="x")
     ttk.Label(rod, text="Salvar em").pack(side="left")
     v_saida = tk.StringVar(value=str(Path.home() / "Documents"))
@@ -265,7 +275,12 @@ def main():
             "    pip install \"protobuf==4.23.4\"")).pack(anchor="w", pady=10)
     else:
         ttk.Label(ab_col, text="1. Rede", style="Sec.TLabel").pack(anchor="w")
+        # Em cada linha, os botões são empacotados ANTES dos campos e das
+        # dicas: se faltar largura (escala do Windows alta), quem encolhe é
+        # a dica, não o botão.
         lr = ttk.Frame(ab_col); lr.pack(fill="x", pady=(4, 8))
+        b_desc = ttk.Button(lr, text="Procurar equipamentos", style="Azul.TButton")
+        b_desc.pack(side="right")
         ttk.Label(lr, text="Seeds").pack(side="left")
         v_seeds = tk.StringVar(value=cfg.get("rede", "seeds",
                                              fallback="10.188.96.140"))
@@ -280,19 +295,19 @@ def main():
         ttk.Label(lr, text="Porta").pack(side="left")
         v_porta = tk.StringVar(value=cfg.get("rede", "port", fallback="2300"))
         ttk.Entry(lr, textvariable=v_porta, width=7).pack(side="left", padx=(6, 12))
-        b_desc = ttk.Button(lr, text="Procurar equipamentos", style="Azul.TButton")
-        b_desc.pack(side="left")
 
-        ttk.Label(ab_col, style="Fraco.TLabel", text=(
-            f"a busca parte destes seeds e dos {len(rm.REDE_CONHECIDA)} "
-            f"rádios já conhecidos, e segue os vizinhos de cada um"
-        )).pack(anchor="w", pady=(0, 4))
-
-        ttk.Label(ab_col, text="2. Equipamentos",
-                  style="Sec.TLabel").pack(anchor="w", pady=(8, 0))
-        lbl_sel = ttk.Label(ab_col, style="Fraco.TLabel",
-                            text="nenhum equipamento encontrado ainda")
-        lbl_sel.pack(anchor="w")
+        # Título, contador e botões de marcar numa linha só. Numa tela de
+        # 768 px cada linha fixa a mais é uma linha a menos da lista de
+        # equipamentos — na v16 ela sumiu por inteiro, e o rádio que não se
+        # vê não se marca.
+        l2 = ttk.Frame(ab_col); l2.pack(fill="x", pady=(2, 0))
+        lb = ttk.Frame(l2); lb.pack(side="right")
+        ttk.Label(l2, text="2. Equipamentos",
+                  style="Sec.TLabel").pack(side="left")
+        lbl_sel = ttk.Label(l2, style="Fraco.TLabel", text=(
+            f"parte dos seeds e dos {len(rm.REDE_CONHECIDA)} rádios "
+            f"conhecidos, e segue os vizinhos"))
+        lbl_sel.pack(side="left", padx=(10, 0))
 
         # Mesma regra de dentro da aba: tudo que fica ABAIXO da lista é
         # reservado antes dela. A lista cresce com a janela; os botões
@@ -300,7 +315,7 @@ def main():
         baixo = ttk.Frame(ab_col)
         baixo.pack(side="bottom", fill="x")
 
-        qd = ttk.Frame(ab_col); qd.pack(fill="both", expand=True, pady=(4, 6))
+        qd = ttk.Frame(ab_col); qd.pack(fill="both", expand=True, pady=(4, 4))
         # height=8, não 12: com a janela cabendo em 768 px, uma lista alta
         # demais empurra o resto. Ela cresce sozinha quando há espaço.
         cols = ("sel", "nome", "ip", "gps", "vizinhos", "obs")
@@ -357,15 +372,30 @@ def main():
             for ip in est["achados"]: _pinta(ip)
             _conta()
 
-        lb = ttk.Frame(baixo); lb.pack(fill="x")
         for txt, q in (("Marcar todos", "todos"), ("Só com GPS", "gps"),
                        ("Só veículos", "moveis"), ("Desmarcar", "nenhum")):
-            ttk.Button(lb, text=txt,
-                       command=lambda q=q: marcar(q)).pack(side="left", padx=(0, 6))
+            ttk.Button(lb, text=txt, style="Peq.TButton",
+                       command=lambda q=q: marcar(q)).pack(side="left", padx=(6, 0))
 
-        ttk.Label(baixo, text="3. Coleta",
-                  style="Sec.TLabel").pack(anchor="w", pady=(8, 0))
-        lc = ttk.Frame(baixo); lc.pack(fill="x", pady=(4, 6))
+        # 3. Coleta: o título divide a linha com os botões de Iniciar e
+        # Parar; passo e trace ficam na linha de baixo.
+        l3 = ttk.Frame(baixo); l3.pack(fill="x", pady=(2, 0))
+        b_par = ttk.Button(l3, text="Parar e gerar relatórios", state="disabled")
+        b_par.pack(side="right")
+        b_ini = ttk.Button(l3, text="Iniciar coleta", style="Azul.TButton")
+        b_ini.pack(side="right", padx=8)
+        ttk.Label(l3, text="3. Coleta", style="Sec.TLabel").pack(side="left")
+        lc = ttk.Frame(baixo); lc.pack(fill="x", pady=(2, 4))
+        # Na MESMA linha do passo, à direita: uma linha própria custava à
+        # lista de equipamentos as linhas que ela não tinha para dar.
+        lt = ttk.Frame(lc); lt.pack(side="right")
+        v_trace = tk.BooleanVar(value=True)
+        ttk.Checkbutton(lt, text="Trace até",
+                        variable=v_trace).pack(side="left")
+        v_dest = tk.StringVar(value=rm.DESTINO_TRACE_PADRAO)
+        ttk.Entry(lt, textvariable=v_dest, width=14).pack(side="left", padx=6)
+        b_tt = ttk.Button(lt, text="Testar no selecionado", style="Peq.TButton")
+        b_tt.pack(side="left", padx=(6, 0))
         ttk.Label(lc, text="Uma amostra a cada").pack(side="left")
         v_passo = tk.StringVar(value=str(int(col.PASSO_M_PADRAO)))
         ttk.Entry(lc, textvariable=v_passo, width=6).pack(side="left", padx=6)
@@ -373,30 +403,15 @@ def main():
         ttk.Label(lc, text="Parar após").pack(side="left")
         v_min = tk.StringVar(value="0")
         ttk.Entry(lc, textvariable=v_min, width=6).pack(side="left", padx=6)
-        ttk.Label(lc, text="minutos  (0 = até mandar parar)",
-                  style="Fraco.TLabel").pack(side="left")
-
-        lt = ttk.Frame(baixo); lt.pack(fill="x", pady=(0, 6))
-        v_trace = tk.BooleanVar(value=True)
-        ttk.Checkbutton(lt, text="Custo do caminho (trace) até",
-                        variable=v_trace).pack(side="left")
-        v_dest = tk.StringVar(value=rm.DESTINO_TRACE_PADRAO)
-        ttk.Entry(lt, textvariable=v_dest, width=16).pack(side="left", padx=6)
-        b_tt = ttk.Button(lt, text="Testar no selecionado")
-        b_tt.pack(side="left", padx=(12, 0))
+        ttk.Label(lc, text="min (0 = até parar)",
+                  style="Fraco.TLabel").pack(side="left", padx=(0, 18))
 
         pn = tk.Frame(baixo, bg=CARTAO, highlightbackground=LINHA,
                       highlightthickness=1)
-        pn.pack(fill="x", pady=(4, 6))
+        pn.pack(fill="x", pady=(0, 0))
         v_stat = tk.StringVar(value="parado")
         tk.Label(pn, textvariable=v_stat, bg=CARTAO, fg=TEXTO, anchor="w",
-                 font=("Consolas", 10)).pack(fill="x", padx=10, pady=7)
-
-        lf = ttk.Frame(baixo); lf.pack(fill="x", pady=(2, 2))
-        b_ini = ttk.Button(lf, text="Iniciar coleta", style="Azul.TButton")
-        b_ini.pack(side="left")
-        b_par = ttk.Button(lf, text="Parar e gerar relatórios", state="disabled")
-        b_par.pack(side="left", padx=8)
+                 font=("Consolas", 10)).pack(fill="x", padx=10, pady=4)
 
     # ══════════════════════ ABA ARQUIVOS ═════════════════════════
     ttk.Label(ab_arq, text="1. Arquivos da captura",
@@ -450,13 +465,11 @@ def main():
     # ═══════════════════════ andamento ═══════════════════════════
     # Altura menor e sem expand: numa tela de 768 px o registro roubava o
     # espaço da lista de equipamentos, que é onde se trabalha.
-    txt = tk.Text(jan, height=5, bg=CARTAO, fg=TEXTO, relief="flat",
+    txt = tk.Text(jan, height=4, bg=CARTAO, fg=TEXTO, relief="flat",
                   font=("Consolas", 9), wrap="word")
     txt.pack(side="bottom", fill="x", expand=False, padx=14, pady=(2, 6))
-    ttk.Label(jan, text="Andamento",
-              style="Sec.TLabel").pack(side="bottom", anchor="w", padx=14)
     # Só agora, com o fundo já reservado: o Notebook fica com a sobra.
-    nb.pack(fill="both", expand=True, padx=12, pady=(10, 4))
+    nb.pack(fill="both", expand=True, padx=12, pady=(6, 2))
 
     def escreve(t):
         txt.insert("end", str(t) + "\n"); txt.see("end")
@@ -639,9 +652,14 @@ def main():
             passo = f"{s['passo_m']:g} m" if s["passo_m"] else "—"
             lei = (f"{s['leitura_ms']} ms/leitura"
                    if s.get("leitura_ms") is not None else "")
-            tr = ("   trace desligado" if s.get("trace_parado")
-                  else f"   trace {s['trace_ok']} ok" if s.get("trace_ok")
-                  else "")
+            if s.get("trace_parado"):
+                tr = "   trace desligado"
+            elif s.get("trace_ok") or s.get("trace_sem"):
+                tr = (f"   trace {s['trace_ok']} ok"
+                      + (f" · {s['trace_sem']} rádio(s) sem"
+                         if s.get("trace_sem") else ""))
+            else:
+                tr = ""
             v_stat.set(
                 f"{int(s['duracao_s'])//60:02d}:{int(s['duracao_s'])%60:02d}"
                 f"   {s['amostras']} amostras   {s['equipamentos']} equipamentos"

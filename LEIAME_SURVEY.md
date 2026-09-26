@@ -28,12 +28,18 @@ equipamento — padrão **10 m**, a densidade do MeshMapper (1 leitura por
 segundo a ~40 km/h). Parado, o rádio é lido a cada 10 s, só para
 perceber quando sair.
 
+**Não desça abaixo de ~5 m.** O GPS do rádio erra alguns metros; com passo
+de 1 m a coleta relê o rádio antes de ele sair do lugar dentro do erro do
+GPS. Numa coleta de campo com passo 1 m, o passo real ficou em 0,7 m e 793
+leituras caíram na mesma posição da anterior — pontos a mais no mapa sem
+informação nova, e leitura tirada de rádio que estava andando.
+
 Até a versão anterior o espaçamento real ficava em 60–80 m com o alvo
 pedindo 15 m. Três causas, todas corrigidas:
 
 | causa | efeito | agora |
 |---|---|---|
-| leitura em **lotes**: esperava o rádio mais lento do lote | um rádio fora de alcance travava todos por até 6 s — 67 m de caminhão | 24 leituras independentes; cada uma já pega o próximo rádio |
+| leitura em **lotes**: esperava o rádio mais lento do lote | um rádio fora de alcance travava todos por até 6 s — 67 m de caminhão | 48 leituras independentes; cada uma já pega o próximo rádio |
 | `gpsVel` é opcional no `Gps.proto` | sem velocidade, o caminhão caía no ritmo de parado (30 s) | velocidade estimada pelo próprio deslocamento |
 | parado lido a cada 30 s | até 300 m sem leitura na arrancada | 10 s |
 
@@ -62,9 +68,24 @@ amostra traz, como no arquivo:
 | Servidor | o vizinho por onde saiu |
 
 Sem trace (rádio que recusa, ou caixa desmarcada), a amostra sai como
-antes — vizinho de sinal mais forte — e o custo do caminho fica vazio. Se
-o **primeiro** trace for recusado, ele é desligado para a coleta inteira
-e a tela diz o motivo uma vez.
+antes — vizinho de sinal mais forte — e o custo do caminho fica vazio.
+
+**A falha é decidida rádio a rádio.** Na v16, a primeira falha de trace de
+qualquer rádio, antes de algum sucesso, desligava o trace da coleta
+inteira: com 48 rádios lidos ao mesmo tempo, um rádio sem rota ou lento
+derrubava o de todos — foi o "trace desligado" da primeira coleta. Agora:
+
+| situação | o que acontece |
+|---|---|
+| o rádio **recusa** a tarefa | só ele sai do trace; os demais seguem |
+| 3 falhas seguidas sem nunca ter dado certo | só ele sai do trace |
+| falha avulsa num rádio que já deu certo | só aquela amostra fica sem |
+| 5 rádios fora e **nenhum** sucesso na coleta | trace desligado para todos (papel sem permissão ou destino errado) |
+
+Cada motivo novo aparece uma vez no andamento, com o nome do rádio — e,
+quando o rádio responde algo sem custo, o começo do texto que ele mandou.
+A linha de status mostra `trace N ok · M rádio(s) sem`; no fim da coleta
+sai o total e os motivos mais frequentes.
 
 **A leitura também ficou mais leve.** A `rajant-api` lia a resposta do
 rádio com um único `recv`: resposta maior que um registro TLS (~16 KB),

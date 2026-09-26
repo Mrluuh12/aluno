@@ -11124,7 +11124,12 @@ DESTINO_TRACE_PADRAO = "10.188.96.11"
 
 
 class TraceIndisponivel(RuntimeError):
-    """O rádio recusou ou não entregou o TRACE. A coleta segue sem ele."""
+    """O rádio não entregou o TRACE. A coleta segue sem ele."""
+
+
+class TraceRecusado(TraceIndisponivel):
+    """O rádio RECUSOU a tarefa (runTaskResult FAILURE) — papel sem
+    permissão, firmware sem TRACE. Não adianta insistir naquele rádio."""
 
 
 # Como a coleta está lendo, aprendido na primeira leitura boa e valendo
@@ -11399,7 +11404,7 @@ def bc_trace(bc, destino, espera_s=3.0, registro=None):
     res = r.runTaskResult
     _reg("runTaskResult", res)
     if res.status == type(res).FAILURE:
-        raise TraceIndisponivel(res.description or "o rádio recusou a tarefa")
+        raise TraceRecusado(res.description or "o rádio recusou a tarefa")
     tid = res.id if res.HasField("id") else None
 
     # Em campo a saída ficou pronta em ~0,8 s, depois de 3 FAILED e 5
@@ -11450,7 +11455,11 @@ def bc_trace(bc, destino, espera_s=3.0, registro=None):
             dados, compressao).decode("utf-8", "replace").replace("\x00", "")))
     t = trace_de_bytes(dados, compressao)
     if t is None:
-        raise TraceIndisponivel("a saída do trace não trouxe caminho com custo")
+        # O trecho do que o rádio disse vai junto: é assim que se aprende o
+        # formato de "sem rota" em texto, que ainda não foi visto em campo.
+        dito = " ".join(_descomprimir_saida(dados, compressao).decode(
+            "utf-8", "replace").replace("\x00", "").split())
+        raise TraceIndisponivel(f"saída sem caminho com custo: {dito[:160]!r}")
     _reg("trace interpretado", "\n".join(f"{k}: {v}" for k, v in t.items()))
     return t
 

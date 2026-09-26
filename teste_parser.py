@@ -6092,7 +6092,7 @@ class _RadioBCAPI:
     def __init__(self, nome="CA-1006", peers=3, filtro_ok=True, recusa=None,
                  fragmentos=2, pedaco=700, custo=17952, salto=17951,
                  saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
-                 prontos_apos=3, encap=128433):
+                 prontos_apos=3, encap=128433, sem_custo=False):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -6101,6 +6101,9 @@ class _RadioBCAPI:
         # único a pegava — o teste passava até com a leitura da biblioteca.
         self.atraso = atraso
         self.formato, self.prontos_apos, self.encap = formato, prontos_apos, encap
+        # Rádio cuja saída não traz caminho com custo (o formato real de
+        # "sem rota" em texto ainda não foi visto em campo).
+        self.sem_custo = sem_custo
         self.pedidos = []
         self._pos = 0
 
@@ -6147,6 +6150,10 @@ class _RadioBCAPI:
 
     def _texto_imtrace(self):
         # A linha exata do campo, com os números deste rádio falso.
+        if self.sem_custo:
+            return ("Target IP(s):  10.188.96.11(396)\n"
+                    "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)): "
+                    "no route\x00").encode()
         return ("Target IP(s):  10.188.96.11(396)\n"
                 "Target MAC(s): 00:00:0C:9F:F1:8C \n"
                 "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)):"
@@ -6196,6 +6203,7 @@ class _RadioBCAPI:
                             st.ClearField(f.name)
                 r.state.CopyFrom(st)
             elif m.HasField("runTask"):
+                pedidos_saida[0] = 0          # cada trace monta a saída de novo
                 if self.recusa:
                     r.runTaskResult.status = r.runTaskResult.FAILURE
                     r.runTaskResult.description = self.recusa
@@ -6396,13 +6404,20 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         super().tearDown()
 
     def _rodar(self, radio, segundos=2.0, **kw):
+        return self._rodar_varios({"10.0.0.6": ("CA-1006", radio)},
+                                  segundos, **kw)
+
+    def _rodar_varios(self, frota, segundos=2.0, **kw):
+        """frota: {ip: (nome, _RadioBCAPI)} — lidos ao mesmo tempo, como
+        os 48 trabalhadores fazem na mina."""
         import time as _t, threading as _th
-        self.radios["10.0.0.6"] = radio
+        for ip, (_n, r) in frota.items():
+            self.radios[ip] = r
         avisos = []
-        c = self.col.Coleta({"10.0.0.6": "CA-1006"}, passo_m=1.0,
-                            aviso=avisos.append, **kw)
+        c = self.col.Coleta({ip: n for ip, (n, _r) in frota.items()},
+                            passo_m=1.0, aviso=avisos.append, **kw)
         th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
-        th.start(); _t.sleep(segundos); c.parar(); th.join(10)
+        th.start(); _t.sleep(segundos); c.parar(); th.join(15)
         return c, avisos
 
     def test_amostra_leva_o_enlace_de_saida_e_o_custo_do_caminho(self):
@@ -6432,12 +6447,47 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         self.assertTrue(rm.sem_rota(c.amostras[0]["custo_caminho"],
                                     "custo_caminho"))
 
-    def test_recusa_desliga_o_trace_uma_vez_e_a_coleta_segue(self):
+    def test_recusa_tira_so_aquele_radio_do_trace(self):
         c, avisos = self._rodar(_RadioBCAPI(recusa="permission denied"))
         self.assertTrue(c.amostras, "a recusa do trace parou a coleta")
         self.assertIsNone(c.amostras[-1]["custo_caminho"])
-        self.assertIn("permission denied", c.trace_parado)
+        self.assertIn("permission denied", c.trace_sem["10.0.0.6"])
+        self.assertIsNone(c.trace_parado)       # um rádio só não desliga tudo
+        # Uma vez durante a coleta (o resumo do fim repete, de propósito).
+        self.assertEqual(len([l for l in avisos
+                              if l.startswith("trace em")
+                              and "permission denied" in l]), 1)
+        self.assertEqual(len([l for l in avisos if "sem trace nesta" in l]), 1)
+        self.assertTrue([l for l in avisos if l.strip() == "1x  permission denied"])
+        # Recusou uma vez: não se pede mais trace àquele rádio.
+        pedidos = [m for m in self.radios["10.0.0.6"].pedidos
+                   if m.HasField("runTask")]
+        self.assertEqual(len(pedidos), 1)
+
+    def test_um_radio_sem_caminho_nao_desliga_o_trace_dos_outros(self):
+        # O "trace desligado" da primeira coleta com trace: a primeira falha
+        # de qualquer rádio, antes de algum sucesso, desligava de todos.
+        # O rádio bom demora mais a responder: a falha chega ANTES de
+        # qualquer sucesso, como no campo.
+        c, avisos = self._rodar_varios({
+            "10.0.0.6": ("CA-1006", _RadioBCAPI(prontos_apos=12)),
+            "10.0.0.7": ("CA-1007", _RadioBCAPI(sem_custo=True))},
+            segundos=6.0)
+        self.assertIsNone(c.trace_parado)
+        bons = [a for a in c.amostras if a["radio"] == "CA-1006"]
+        self.assertTrue(bons and all(a["custo_caminho"] == 17952 for a in bons))
+        self.assertIn("10.0.0.7", c.trace_sem)
+        self.assertIn("no route", c.trace_sem["10.0.0.7"])
+        # O que o rádio disse aparece na tela, para aprender o formato.
+        self.assertTrue([l for l in avisos if "no route" in l])
+
+    def test_coleta_toda_so_desliga_quando_nenhum_consegue(self):
+        frota = {f"10.0.0.{10 + k}": (f"CA-{k}", _RadioBCAPI(recusa="negado"))
+                 for k in range(5)}
+        c, avisos = self._rodar_varios(frota, segundos=3.0)
+        self.assertIsNotNone(c.trace_parado)
         self.assertEqual(len([l for l in avisos if "trace desligado" in l]), 1)
+        self.assertTrue(c.amostras)
 
     def test_desligado_na_tela_nao_pede_trace(self):
         radio = _RadioBCAPI()
@@ -7080,6 +7130,81 @@ class TestColetaAoVivo(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestJanelaCabeNaTela(unittest.TestCase):
+    """A janela de verdade, medida numa tela de 1366×768 — a do notebook
+    de campo. Na v16 a lista de equipamentos ficou com 1 px: nenhum rádio
+    à vista para marcar. Pulado sem tkinter ou sem tela; em Linux, rode
+    com xvfb-run."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import tkinter  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("sem tkinter")
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            raise unittest.SkipTest("sem tela")
+        if rm.Breadcrumb is None:
+            raise unittest.SkipTest("sem rajant-api, a aba de coleta não monta")
+
+    def _medir(self, escala):
+        import tkinter as tk
+        from tkinter import ttk
+        import site_survey
+        med = {}
+
+        def medir(jan):
+            jan.update()
+            achados = []
+            def anda(w):
+                for c in w.winfo_children():
+                    achados.append(c); anda(c)
+            anda(jan)
+            arv = [w for w in achados if isinstance(w, ttk.Treeview)
+                   and "vizinhos" in w["columns"]][0]
+            for k in range(53):
+                arv.insert("", "end", iid=f"i{k}",
+                           values=("", f"CA-10{k:02d}", f"10.0.0.{k}", "sim", 4, ""))
+            jan.update()
+            alt = arv.winfo_height()
+            med["linhas"] = sum(1 for k in range(53)
+                                if arv.bbox(f"i{k}")
+                                and arv.bbox(f"i{k}")[1] + arv.bbox(f"i{k}")[3] <= alt)
+            med["cortados"] = [
+                b.cget("text") for b in achados if isinstance(b, ttk.Button)
+                and b.winfo_ismapped() and b.winfo_width() < b.winfo_reqwidth()]
+            jan.destroy()
+
+        antes = (tk.Misc.winfo_screenwidth, tk.Misc.winfo_screenheight,
+                 tk.Tk.state, tk.Tk.mainloop, tk.Tk.__init__)
+        init = tk.Tk.__init__
+        def novo(self, *a, **k):
+            init(self, *a, **k)
+            self.tk.call("tk", "scaling", escala * 96 / 72)
+        try:
+            tk.Misc.winfo_screenwidth = lambda self: 1366
+            tk.Misc.winfo_screenheight = lambda self: 768
+            tk.Tk.state = lambda self, *a: "normal"   # sem maximizar
+            tk.Tk.mainloop = medir
+            tk.Tk.__init__ = novo
+            site_survey.main()
+        finally:
+            (tk.Misc.winfo_screenwidth, tk.Misc.winfo_screenheight,
+             tk.Tk.state, tk.Tk.mainloop, tk.Tk.__init__) = antes
+        return med
+
+    def test_lista_de_equipamentos_aparece_em_768(self):
+        for escala in (1.0, 1.25):
+            with self.subTest(escala=escala):
+                m = self._medir(escala)
+                self.assertGreaterEqual(m["linhas"], 6, m)
+
+    def test_nenhum_botao_cortado_em_768(self):
+        for escala in (1.0, 1.25):
+            with self.subTest(escala=escala):
+                self.assertEqual(self._medir(escala)["cortados"], [])
+
+
 class TestJanelaUnica(unittest.TestCase):
     """A janela junta coleta e arquivos; a lógica fica fora dela."""
 
@@ -7279,7 +7404,7 @@ class TestJanelaUnica(unittest.TestCase):
         # empurrá-los para fora.
         fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
             encoding="utf-8")
-        self.assertIn("lf = ttk.Frame(baixo)", fonte,
+        self.assertIn("l3 = ttk.Frame(baixo)", fonte,
                       "os botões de Iniciar/Parar sairam do bloco reservado")
         self.assertIn("lc = ttk.Frame(baixo)", fonte)
 

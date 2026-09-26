@@ -199,7 +199,10 @@ class Coleta:
         self.trace_destino = (trace_destino or "").strip() or None
         self.trace_ok      = 0
         self.trace_falhas  = 0
-        self.trace_parado  = None   # motivo, quando o trace foi desligado
+        self.trace_parado  = None   # motivo, quando o trace saiu da coleta toda
+        self.trace_radio   = {}     # ip -> {"ok", "falhas"}
+        self.trace_sem     = {}     # ip -> motivo: rádios que saíram do trace
+        self.trace_motivos = {}     # motivo -> quantas vezes
         # NOME DOS VIZINHOS. O State.Peer não traz nome — só IP (opcional) e
         # encapId, que é o sufixo numérico do serial. Sem isto o vizinho
         # entrava com o IP no lugar do nome, e a eleição da melhor ERB/ERM,
@@ -287,32 +290,63 @@ class Coleta:
     def _trace(self, ses, ip):
         """Por onde o rádio sai até o destino, ou None. Nunca derruba a
         leitura: sem trace, a amostra sai como antes."""
-        if not self.trace_destino or self.trace_parado:
+        if (not self.trace_destino or self.trace_parado
+                or ip in self.trace_sem):
             return None
         try:
             t = ses.trace(self.trace_destino)
-        except rm.TraceIndisponivel as e:
+        except rm.TraceRecusado as e:
             return self._trace_falhou(ip, str(e), recusa=True)
         except Exception as e:
             return self._trace_falhou(ip, f"{type(e).__name__}: {e}")
         with self.lock:
             self.trace_ok += 1
+            self.trace_radio.setdefault(ip, {"ok": 0, "falhas": 0})["ok"] += 1
         return t
 
+    # Quantos rádios têm de sair do trace, SEM nenhum sucesso na coleta,
+    # para ele sair da coleta inteira. Aí o problema não é de um rádio — é
+    # o papel sem permissão ou o destino errado — e insistir custaria
+    # ~0,8 s de cada leitura de todos os rádios por nada.
+    RADIOS_PARA_DESLIGAR = 5
+
     def _trace_falhou(self, ip, motivo, recusa=False):
-        """Uma falha de trace. Se NENHUM trace funcionou ainda e o rádio
-        recusa a tarefa (ou falha sempre), desliga o trace para a coleta
-        inteira — insistir custaria leitura de todos os rádios por nada.
-        Depois de um sucesso, falha avulsa só deixa aquela amostra sem."""
+        """Uma falha de trace, decidida POR RÁDIO.
+
+        Na v16 a primeira falha de qualquer tipo, antes de algum sucesso,
+        desligava o trace da coleta toda: com 48 rádios lidos ao mesmo
+        tempo, um rádio sem rota, lento ou ocupado derrubava o trace de
+        todos — foi o "trace desligado" da primeira coleta com trace.
+
+        Agora: o rádio que RECUSA a tarefa sai do trace; o que falha 3
+        vezes sem nunca ter dado certo também. Depois de um sucesso, falha
+        avulsa só deixa aquela amostra sem. Cada motivo novo vai para a
+        tela uma vez.
+        """
+        nome = self.alvos.get(ip, ip)
         with self.lock:
             self.trace_falhas += 1
-            desliga = (self.trace_ok == 0 and not self.trace_parado
-                       and (recusa or self.trace_falhas >= 5))
-            if desliga:
-                self.trace_parado = motivo
-        if desliga:
-            self.aviso(f"trace desligado ({self.alvos.get(ip, ip)}): {motivo}"
-                       f" — a coleta segue sem o custo do caminho")
+            st = self.trace_radio.setdefault(ip, {"ok": 0, "falhas": 0})
+            st["falhas"] += 1
+            novo = motivo not in self.trace_motivos
+            self.trace_motivos[motivo] = self.trace_motivos.get(motivo, 0) + 1
+            sai = ip not in self.trace_sem and (
+                recusa or (st["ok"] == 0 and st["falhas"] >= 3))
+            if sai:
+                self.trace_sem[ip] = motivo
+            geral = (sai and self.trace_ok == 0 and not self.trace_parado
+                     and len(self.trace_sem) >= self.RADIOS_PARA_DESLIGAR)
+            if geral:
+                self.trace_parado = max(self.trace_motivos,
+                                        key=self.trace_motivos.get)
+        if novo:
+            self.aviso(f"trace em {nome} ({ip}): {motivo}")
+        if sai and not geral:
+            self.aviso(f"{nome} sem trace nesta coleta — os demais seguem")
+        if geral:
+            self.aviso(f"trace desligado: {len(self.trace_sem)} rádios "
+                       f"falharam e nenhum deu certo ({self.trace_parado}) — "
+                       f"a coleta segue sem o custo do caminho")
         return None
 
     def _amostra(self, ip, d, agora):
@@ -580,6 +614,12 @@ class Coleta:
             # de radios, e o primeiro que explica a coleta inteira.
             for m, n in sorted(self.motivos.items(), key=lambda kv: -kv[1])[:5]:
                 self.aviso(f"  {n}x  {m}")
+        if self.trace_destino:
+            self.aviso(f"trace: {self.trace_ok} ok, {self.trace_falhas} "
+                       f"falha(s), {len(self.trace_sem)} rádio(s) sem trace")
+            for m, n in sorted(self.trace_motivos.items(),
+                               key=lambda kv: -kv[1])[:5]:
+                self.aviso(f"  {n}x  {m}")
         self.aviso(f"coleta encerrada: {len(self.amostras)} amostras, "
                    f"{len(self.peers)} leituras de vizinho")
         return self.amostras, self.peers
@@ -603,6 +643,7 @@ class Coleta:
                 "leitura_ms": (round(ds[len(ds) // 2] * 1000) if ds else None),
                 "trace_ok": self.trace_ok, "trace_falhas": self.trace_falhas,
                 "trace_parado": self.trace_parado,
+                "trace_sem": len(self.trace_sem),
                 "passo_m": self._passo_real(),
             }
 
