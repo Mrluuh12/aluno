@@ -6561,13 +6561,16 @@ def _legenda_de_faixas_png(caminho, campo):
     ax.text(12, 16, titulo, color="#1A1A1A", fontsize=8.5, fontweight="bold",
             va="center")
     ax.text(12, 31, un, color="#5A6478", fontsize=7.5, va="center")
+    # A classificação começa depois do rótulo mais longo: "10001 a 20000"
+    # encostava em "bom" com a coluna fixa.
+    x_cls = max(130, 54 + int(6.4 * max(len(r) for r, _c, _k in linhas)) + 14)
     for i, (rng, cor, cls) in enumerate(linhas):
         y = 46 + 21 * i
         ax.add_patch(plt.Rectangle((12, y), 34, 15, facecolor="#" + cor,
                                    edgecolor="#141008", linewidth=0.6))
         ax.text(54, y + 7.5, rng, color="#1A1A1A", fontsize=8, va="center")
         if cls:
-            ax.text(130, y + 7.5, cls, color="#5A6478", fontsize=7.5,
+            ax.text(x_cls, y + 7.5, cls, color="#5A6478", fontsize=7.5,
                     va="center")
     y = 46 + 21 * n + 6
     if req:
