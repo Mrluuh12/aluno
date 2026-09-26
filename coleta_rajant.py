@@ -800,17 +800,30 @@ def testar_trace(ip, destino=None, role="CO", senha="", porta=2300,
 
     bc = rm.exigir_rajant_api()(host=ip, port=porta, role=role,
                                 password=senha)
+    # O ping que o authenticate() da biblioteca fazia por dentro: sem ele,
+    # um rádio fora de alcance virava "sem resposta no login" e não dava
+    # para separar rede de login.
     t0 = time.monotonic()
     try:
-        rm.autenticar(bc)
+        vivo = bc.reachable()
+        reg("ping", f"{'responde' if vivo else 'NÃO responde'} "
+                    f"({(time.monotonic() - t0) * 1000:.0f} ms)")
+    except Exception as e:
+        reg("ping — ERRO", f"{type(e).__name__}: {e}")
+    etapas = []
+    t0 = time.monotonic()
+    try:
+        rm.autenticar(bc, etapas=etapas)
     except Exception as e:
         # Usuário que não existe, senha recusada, rede: o diagnóstico
         # registra o motivo e grava o arquivo mesmo assim, que é para isso
         # que ele existe.
-        reg("autenticação — FALHOU", f"{type(e).__name__}: {e}")
+        reg("autenticação — FALHOU", f"{type(e).__name__}: {e}\n" +
+            "\n".join(f"  {n}: {ms} ms" for n, ms in etapas))
         return _gravar_teste(pasta, ip, linhas)
     reg("autenticação", f"ok em {(time.monotonic() - t0) * 1000:.0f} ms"
-                        f"  papel {bc.role}  serial {bc.serial}")
+                        f"  papel {bc.role}  serial {bc.serial}\n" +
+        "\n".join(f"  {n}: {ms} ms" for n, ms in etapas))
 
     def medir(rotulo, caminhos):
         t0 = time.monotonic()

@@ -119,7 +119,15 @@ Agora a falha de login diz o motivo:
 | `usuário 'X' não existe na BCAPI — use VIEW, …` | nome de papel errado; dito antes de ir à rede |
 | `o rádio recusou o login de CO (…) — confira usuário e senha` | senha errada, ou papel sem acesso naquele rádio; entre parênteses, o que o rádio respondeu |
 | `…; a senha digitada tem espaço no começo ou no fim` | espaço colado junto com a senha |
-| `sem resposta do rádio no login` | rede: o rádio não respondeu a tempo |
+| `sem resposta no login: a conexão TLS não completou em 5 s` | rede até o rádio, ou o rádio sem atender a BCAPI |
+| `sem resposta no login: conectou, mas o rádio não mandou o desafio` | o rádio aceitou a conexão e não seguiu — sessões demais abertas nele, ou rádio sobrecarregado |
+| `sem resposta no login: o rádio não respondeu à senha` | parou depois da senha enviada |
+
+O prazo de cada etapa é **5 s** (a biblioteca usa 2 s fixos, com o aperto
+de mão TLS dentro — pouco para rádio a vários saltos). Se o login desta
+ferramenta falhar por rede, ela tenta o `authenticate()` da biblioteca
+antes de desistir: se a biblioteca entrar, a coleta segue e o log registra
+— é a proteção contra um defeito no login daqui.
 
 No fim da busca, o andamento lista os motivos mais frequentes: "156x o
 rádio recusou o login" numa linha, em vez de 156 linhas vermelhas.
@@ -152,6 +160,11 @@ Feito em 26/09/2026 no rádio 10.188.99.4, com o papel VIEW:
 | filtro `State.gps`, `state.gps` | vazio |
 | TRACE | aceito com VIEW e com CO; pronto em ~0,8 s |
 | saída do TRACE | **texto** do `imtrace` em gzip — não a mensagem binária |
+
+O diagnóstico grava o **ping** antes do login (o `authenticate()` da
+biblioteca fazia por dentro, e na v18 sumiu: um rádio fora de alcance
+virava "sem resposta no login"), o tempo de cada etapa do login e, se o
+login daqui falhar, o resultado do da biblioteca.
 
 No 10.188.99.9 (CO), com a coleta rodando nele ao mesmo tempo, o TRACE
 voltou "task TRACE is already running": a tarefa era da coleta. O

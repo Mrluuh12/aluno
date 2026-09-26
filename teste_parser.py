@@ -6094,7 +6094,7 @@ class _RadioBCAPI:
                  saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
                  prontos_apos=3, encap=128433, sem_custo=False,
                  senha="", papel="CO", motivo_recusa="authentication failed",
-                 ocupado=0):
+                 ocupado=0, mudo_no_login=None):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -6113,6 +6113,10 @@ class _RadioBCAPI:
         # Quantos runTask respondem "task TRACE is already running" antes
         # de aceitar (-1: sempre) — o texto exato do campo.
         self.ocupado = ocupado
+        # "desafio": conecta e não manda o desafio. "agente": cala diante de
+        # um login com userAgent (o da biblioteca não manda) — o caso de o
+        # login desta ferramenta ter defeito e o da biblioteca não.
+        self.mudo_no_login = mudo_no_login
         self.conexoes = []              # o lado do rádio, para ver se fechou
         self.pedidos = []
         self._pos = 0
@@ -6128,9 +6132,11 @@ class _RadioBCAPI:
         return a
 
     def _login(self, sock):
-        """Desafio → resposta → authResult. False: recusado."""
+        """Desafio → resposta → authResult. False: recusado; None: calado."""
         import os as _os, hashlib, struct, zlib
         from rajant_api import Message_pb2, Common_pb2
+        if self.mudo_no_login == "desafio":
+            return None
         desafio = _os.urandom(32)
         ini = Message_pb2.BCMessage(); ini.sequenceNumber = 0
         ini.auth.action = ini.auth.LOGIN
@@ -6143,6 +6149,8 @@ class _RadioBCAPI:
         if flag == 2:
             corpo = zlib.decompress(corpo, -15)
         m = Message_pb2.BCMessage(); m.ParseFromString(corpo)
+        if self.mudo_no_login == "agente" and m.auth.userAgent:
+            return None
         certo = hashlib.sha384(
             (self.senha + desafio.decode("latin1")).encode("latin1")).digest()
         ok = (m.auth.role == Common_pb2.Role.Value(self.papel)
@@ -6235,10 +6243,13 @@ class _RadioBCAPI:
         from rajant_api import Message_pb2
         if login:
             try:
-                if not self._login(sock):
-                    sock.close(); return
+                ok = self._login(sock)
             except Exception:
                 return
+            if ok is None:
+                return                  # calado, com a conexão aberta
+            if not ok:
+                sock.close(); return
         saida = gzip.compress(self._texto_imtrace() if self.formato == "texto"
                               else self._trace().SerializeToString())
         pedidos_saida = [0]
@@ -6609,6 +6620,45 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         self.assertIn("confira usuário e senha", msg)
         self.assertIn("espaço no começo ou no fim", msg)
 
+    def test_login_sem_resposta_diz_em_que_etapa_parou(self):
+        # O arquivo de campo de 10.188.99.5 dizia só "sem resposta do rádio
+        # no login": não dava para separar rede de login.
+        self.radios["10.0.0.6"] = _RadioBCAPI(mudo_no_login="desafio")
+        bc = rm.Breadcrumb(host="10.0.0.6", port=2300, role="CO", password="")
+        etapas = []
+        with self.assertRaises(TimeoutError) as cm:
+            rm.autenticar(bc, etapas=etapas, prazo_s=0.3, reserva=False)
+        self.assertIn("conectou, mas o rádio não mandou o desafio", str(cm.exception))
+        self.assertEqual([n for n, _ in etapas], ["conexão TLS", "parou: desafio"])
+
+    def test_se_o_login_daqui_falha_o_da_biblioteca_entra(self):
+        radio = _RadioBCAPI(mudo_no_login="agente")
+        self.radios["10.0.0.6"] = radio
+        bc = rm.Breadcrumb(host="10.0.0.6", port=2300, role="co", password="")
+        etapas = []
+        self.assertTrue(rm.autenticar(bc, etapas=etapas, prazo_s=0.3))
+        self.assertIn("authenticate() da biblioteca: entrou", [n for n, _ in etapas])
+        self.assertEqual(radio.logins, [("CO", True)])
+        # A sessão que entrou pela reserva lê normalmente.
+        self.assertEqual(rm.bc_state(bc, ["gps"]).configuration.saved.general.name, "")
+        self.assertTrue(rm.bc_state(bc, None).configuration.saved.general.name)
+
+    def test_conexao_da_biblioteca_usa_o_prazo_daqui(self):
+        # A biblioteca conecta com 2 s fixos, aperto de mão TLS incluído.
+        import rajant_api
+        visto = {}
+        class Conn:
+            def __init__(s, soc): visto["prazo"] = soc.gettimeout(); s.soc = soc
+            def connect(s, end): visto["end"] = end
+            def settimeout(s, t): visto["depois"] = t
+        with mock.patch.object(rajant_api, "wrap_socket", Conn):
+            bc = rajant_api.Breadcrumb(host="10.9.9.9", port=2300, role="CO",
+                                       password="")
+            rm._conectar(bc, 5.0)
+            bc.connection.soc.close()
+        self.assertEqual(visto, {"prazo": 5.0, "end": ("10.9.9.9", 2300),
+                                 "depois": 5.0})
+
     def test_usuario_que_nao_existe_e_dito_antes_de_ir_a_rede(self):
         self.assertEqual(rm.conferir_papel(" co "), "CO")
         with self.assertRaises(ValueError) as cm:
@@ -6659,7 +6709,10 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         alvo = self.col.testar_trace("10.0.0.6", "10.188.96.11",
                                      pasta=pasta, aviso=lambda t: None)
         txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("── ping\nresponde", txt)
         self.assertIn("autenticação\nok", txt)
+        for etapa in ("conexão TLS", "desafio recebido", "resultado recebido"):
+            self.assertIn(etapa, txt)
         self.assertIn("filtro 'gps'", txt)
         self.assertIn("RESULTADO DO TRACE\nOK", txt)
         self.assertIn("custo_caminho: 17952", txt)

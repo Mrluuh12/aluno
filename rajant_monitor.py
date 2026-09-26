@@ -11317,17 +11317,54 @@ def conferir_papel(role):
 
 AGENTE_BCAPI = "site_survey"
 
+# Prazo de cada etapa do login e, depois dele, de cada leitura da sessão.
+# A biblioteca usa 2 s fixos, com o aperto de mão TLS dentro: pouco para
+# rádio a vários saltos numa malha carregada.
+PRAZO_BCAPI_S = 5.0
 
-def autenticar(bc):
+_ETAPAS_LOGIN = {
+    "conexão": "a conexão TLS não completou",
+    "desafio": "conectou, mas o rádio não mandou o desafio",
+    "resultado": "o rádio não respondeu à senha",
+}
+
+
+def _conectar(bc, prazo_s):
+    """A conexão TLS da biblioteca, com o prazo daqui. Se a classe trocou
+    a conexão (teste, outra versão), usa a dela."""
+    f = getattr(type(bc), "setup_connection_socket", None)
+    mod = sys.modules.get(getattr(f, "__module__", "") or "")
+    wrap = getattr(mod, "wrap_socket", None)
+    if getattr(f, "__module__", "") == "rajant_api" and callable(wrap):
+        import socket as _socket
+        soc = _socket.socket(_socket.AF_INET)
+        soc.settimeout(prazo_s)
+        bc.connection = wrap(soc)
+        bc.connection.connect((bc.host, bc.port))
+    else:
+        bc.setup_connection_socket()
+    try:
+        bc.connection.settimeout(prazo_s)
+    except Exception:
+        pass
+
+
+def autenticar(bc, etapas=None, prazo_s=None, reserva=True):
     """Login no rádio: True, ou uma exceção com o MOTIVO.
 
     O authenticate() da biblioteca devolve False para tudo — usuário que
     não existe, senha errada, TLS, tempo esgotado —, e a tela só podia
     dizer "autenticacao falhou". Aqui são os mesmos passos dela (o rádio
     manda um desafio; volta sha384 da senha + desafio), com cada falha
-    dita pelo nome e a descrição que o próprio rádio mandar. Sem o ping
-    que ela faz antes: quem chama já testou o alcance.
+    dita pelo nome, a etapa em que parou e a descrição que o próprio rádio
+    mandar. Sem o ping que ela faz antes: quem chama já testou o alcance.
+
+    `etapas` (lista) recebe (etapa, ms) — é o que o diagnóstico grava.
+    `reserva`: se este caminho falhar por rede, tenta o authenticate() da
+    biblioteca antes de desistir. Se ela entrar onde este não entrou, o
+    defeito é daqui — fica no log, e a coleta não para por causa dele.
     """
+    prazo_s = PRAZO_BCAPI_S if prazo_s is None else prazo_s
     bc.role = papel_bcapi(getattr(bc, "role", ""))
     papeis = getattr(bc, "roles", None)
     if isinstance(papeis, dict) and papeis and bc.role not in papeis:
@@ -11340,9 +11377,20 @@ def autenticar(bc):
         if not bc.authenticate():
             raise PermissionError("autenticacao falhou")
         return True
+    t0 = time.monotonic()
+
+    def marca(nome):
+        if etapas is not None:
+            etapas.append((nome, round((time.monotonic() - t0) * 1000)))
+
+    etapa = "conexão"
     try:
-        bc.setup_connection_socket()
+        _conectar(bc, prazo_s)
+        marca("conexão TLS")
+        etapa = "desafio"
         ini = bc_receber(bc)
+        marca("desafio recebido")
+        etapa = "resultado"
         bc.serial = str(ini.auth.serial)
         pedido = bc.prepare_login_message(ini)
         # Campo do Auth "reportado pelo cliente no login" (Message.proto):
@@ -11356,10 +11404,36 @@ def autenticar(bc):
             if r.HasField("authResult"):
                 res = r.authResult
                 break
-    except TimeoutError:
-        raise TimeoutError(f"sem resposta do rádio no login (porta {bc.port})")
-    except ssl.SSLError as e:
-        raise ConnectionError(f"TLS no login: {e}")
+        marca("resultado recebido")
+    except OSError as e:          # tempo esgotado, TLS, conexão recusada
+        try: bc.connection.close()
+        except Exception: pass
+        if isinstance(e, TimeoutError):
+            erro = TimeoutError(f"sem resposta no login: {_ETAPAS_LOGIN[etapa]} "
+                                f"em {prazo_s:g} s (porta {bc.port})")
+        else:
+            erro = ConnectionError(f"login: {_ETAPAS_LOGIN[etapa]} — "
+                                   f"{type(e).__name__}: {e}")
+        marca(f"parou: {etapa}")
+        if reserva and callable(getattr(bc, "authenticate", None)):
+            t1 = time.monotonic()
+            try:
+                ok = bool(bc.authenticate())
+            except Exception:
+                ok = False
+            if etapas is not None:
+                etapas.append(("authenticate() da biblioteca: "
+                               + ("entrou" if ok else "também falhou"),
+                               round((time.monotonic() - t1) * 1000)))
+            if ok:
+                _BC_MODO["login_reserva"] = _BC_MODO.get("login_reserva", 0) + 1
+                if _BC_MODO["login_reserva"] == 1:
+                    log.warning(f"[survey] login próprio falhou em {bc.host} "
+                                f"({erro}); o da biblioteca entrou")
+                try: bc.connection.settimeout(prazo_s)
+                except Exception: pass
+                return True
+        raise erro
     if res is None:
         raise PermissionError("o rádio não devolveu o resultado do login")
     st = bc.statuses.get(res.status, str(res.status))
