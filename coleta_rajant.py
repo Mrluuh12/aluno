@@ -515,7 +515,11 @@ class Coleta:
                    "interf": (radio_t or {}).get("interf_pct")}
             custo_caminho = tr.get("custo_caminho")
 
+        # Enlaces do ponto pela régua da Rajant: o número do pino do
+        # MeshMapper (todas as WLANs do rádio, como ele conta).
+        enlaces = rm.contar_enlaces(vizinhos)
         return {
+            **enlaces,
             "radio": nome, "ts": time.time(),
             "lat": lat, "lon": lon, "alt": s.get("gps_alt"),
             "vel": s.get("gps_vel"), "sats": s.get("gps_sats"),

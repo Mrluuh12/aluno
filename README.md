@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 624 testes
+python3 teste_parser.py                        # 629 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -23,7 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
-| `teste_parser.py` | 624 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 629 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -182,6 +182,33 @@ como *"medi e deu tudo fora"*, que é o oposto de *"não medi"*.
   Vira amostra *sem sinal*, não amostra com sinal ruim.
 
 ## O KMZ: mapa de calor por faixa
+
+**A aba que abre: Enlaces bons (Rajant).** É a régua do MeshMapper da
+Rajant, conferida no KMZ oficial de 28/09/2026: em cada ponto, quantos
+enlaces são **bons** — custo ≤ 10000 **e** SNR ≥ 20 — ou **ótimos** —
+custo ≤ 5000 **e** SNR ≥ 30 —, somando todas as WLANs do rádio, como o
+MeshMapper conta. Nos arquivos do MeshMapper vale a régua gravada no
+próprio arquivo (`configuration`). Na aba:
+
+- **calor** pela contagem: 0 vermelho, 1 laranja, 2 amarelo, 3+ verde
+  (as cores medidas nos pinos oficiais);
+- **pinos numerados**, como os do MeshMapper — gota com o número de
+  enlaces bons, estrela com o de ótimos, "!" sem vizinho. Um pino a cada
+  ~30 m de estrada, mostrando uma leitura real do trecho (a do meio, pelo
+  lado pior); o balão lista os enlaces bons pelo nome, com custo e SNR.
+  Um pino por leitura, com 29 veículos, viraria um tapete por cima do
+  calor;
+- **linha do trajeto colorida pelo custo do caminho**, como o Trace Path
+  do MeshMapper (≤ 10000, ≤ 20000, acima).
+
+No KMZ oficial de 28/09 (CA-1024), o gerador daqui conta os mesmos pinos
+que a Rajant desenhou: 25 com 1, 12 com 2 e 4 com 0.
+
+RSSI, SNR, Ruído e Custo do caminho seguem como abas, cada uma com o seu
+calor. **O calor ficou mais limpo:** a contagem de cada faixa é suavizada
+em ~4 m antes de escolher a cor — a fronteira entre faixas sai sem lascas
+— e a borda esfuma em ~6 m. A cor continua sendo a faixa da maioria,
+nunca uma média.
 
 O KMZ abre no **mapa de calor por faixa**, no estilo do KMZ de referência
 de 27/09/2026:
@@ -458,7 +485,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 624 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 629 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

@@ -2305,8 +2305,10 @@ class TestNavegacaoEAnalise(unittest.TestCase):
     slide de fecho ficava em branco."""
 
     def test_indice_lista_todos_os_slides_da_secao(self):
-        self.assertEqual(len(rm._ORDEM_SURVEY), 12)
-        for t in ("Rota Percorrida", "Intensidade de Sinal (RSSI)",
+        # 13 cabem no cartão do índice: o último termina em 6,45" de 6,9".
+        self.assertEqual(len(rm._ORDEM_SURVEY), 13)
+        for t in ("Rota Percorrida", "Enlaces Bons (critério Rajant)",
+                  "Intensidade de Sinal (RSSI)",
                   "Interferência de Canal",
                   "Análise, Recomendações e Conclusão"):
             self.assertIn(t, rm._ORDEM_SURVEY)
@@ -4237,7 +4239,9 @@ class TestCoberturaDisponivel(unittest.TestCase):
     def test_cobertura_e_a_primeira_aba_do_kmz(self):
         # Abrir pelo enlace entregue faz o leitor concluir "falta radio"
         # onde o problema e outro.
-        self.assertEqual(rm.CAMPOS_KMZ[0], "sinal_cob")
+        # Abre nos enlaces bons pela régua da Rajant (pedido de 28/09/2026,
+        # a partir do KMZ oficial do MeshMapper); logo depois, a cobertura.
+        self.assertEqual(rm.CAMPOS_KMZ[:2], ["enl_bons", "sinal_cob"])
 
     def test_a_eleicao_acontece_dentro_da_banda_da_amostra(self):
         # Medido no arquivo de exemplo: o mesmo ponto enxerga ERM-28 a
@@ -5482,6 +5486,109 @@ class TestDescartarParados(unittest.TestCase):
         # gpsSpeedKph: o balão dizia "m/s" num valor em km/h.
         fonte = inspect.getsource(rm._balao_amostra)
         self.assertIn('("vel", "Velocidade", "km/h", 1)', fonte)
+
+
+class TestEnlacesRajant(unittest.TestCase):
+    """O pino do MeshMapper: enlaces bons (custo E SNR na régua da Rajant)
+    por ponto. Conferido contra o KMZ oficial de 28/09/2026: 25 laranja,
+    12 amarelo e 4 vermelho, os mesmos que o gerador daqui conta."""
+
+    def test_regra_de_enlace_nas_fronteiras(self):
+        c = rm.classe_enlace
+        self.assertEqual(c(5000, 30), "otimo")
+        self.assertEqual(c(5001, 30), "bom")
+        self.assertEqual(c(5000, 29), "bom")
+        self.assertEqual(c(10000, 20), "bom")
+        self.assertEqual(c(9198, 36), "bom")        # ERM-24 PTP, 28/09
+        self.assertEqual(c(11355, 34), "ruim")      # a mesma, outro ponto
+        self.assertEqual(c(10000, 19), "ruim")
+        self.assertEqual(c(None, 40), "ruim")
+        self.assertEqual(c(9000, 25, {"goodCost": 8000}), "ruim")
+
+    def _captura(self, tmp):
+        """data.json no formato do MeshMapper: 4 pontos com 0, 1, 2 e 3
+        enlaces bons (o último com 1 ótimo)."""
+        import json as _j
+        def par(custo, snr, n):
+            return {"name": n, "cost": custo, "rssi": snr, "signal": -60,
+                    "frequency": 5785, "channel": 157}
+        pontos = []
+        for k, viz in enumerate((
+                [par(11355, 34, "A")],
+                [par(9198, 36, "A"), par(40000, 15, "B")],
+                [par(9198, 36, "A"), par(9900, 22, "B")],
+                [par(4000, 31, "A"), par(9000, 22, "B"), par(7000, 25, "C")])):
+            pontos.append({"gpsLat": -18.9 + k * 1e-3, "gpsLong": -43.43,
+                           "unixTimeStamp": 1790598443622 + k * 5000,
+                           "wlanPeers": {"wlan0": viz}, "numActivePeers": len(viz),
+                           "traceInfo": {"host": "10.188.96.11",
+                                         "path": {"cost": 12932, "hopcost": 11977}}})
+        d = {"bcc_version": "11.29.1",
+             "configuration": {"goodCost": 10000, "greatCost": 5000,
+                               "goodRSSI": 20, "greatRSSI": 30,
+                               "crumbMeta": {"name": "CA-1024"}},
+             "points": pontos}
+        arq = Path(tmp) / "data.json"
+        arq.write_text(_j.dumps(d), encoding="utf-8")
+        return arq
+
+    def test_pinos_do_meshmapper(self):
+        import tempfile
+        sv, am, pr = rm.ler_meshmapper(str(self._captura(tempfile.mkdtemp())))
+        self.assertEqual([rm.pino_da_leitura(a) for a in am],
+                         ["pin0", "pin1", "pin2", "est1"])
+        self.assertEqual([a["enl_bons"] for a in am], [0, 1, 2, 3])
+        self.assertEqual(am[3]["enl_lista"][0][0], "A")     # o ótimo primeiro
+        self.assertEqual(rm.pino_da_leitura({"enl_total": 0}), "pinx")
+        self.assertIsNone(rm.pino_da_leitura({}))
+
+    def test_um_pino_por_trecho_e_leitura_real(self):
+        K = 1 / 111000.0
+        am = [{"radio": f"CA-{k % 3}", "ts": k, "lat": 0.0, "lon": (k % 6) * K,
+               "enl_bons": k % 4, "enl_otimos": 0, "enl_total": 5}
+              for k in range(30)]
+        am += [{"radio": "CA-9", "ts": 100, "lat": 0.0, "lon": 500 * K,
+                "enl_bons": 2, "enl_otimos": 0, "enl_total": 5}]
+        pinos = rm.pinos_por_trecho(am)
+        self.assertEqual(len(pinos), 2)
+        rep_, n = pinos[0]
+        self.assertEqual(n, 30)
+        self.assertIn(rep_, am)                    # uma leitura que aconteceu
+        self.assertEqual(rep_["enl_bons"], 1)      # 0,1,2,3…: meio, lado pior
+
+    def test_aba_principal_tem_calor_pinos_e_linha_do_custo(self):
+        import zipfile, io as _io
+        K = 1 / 111000.0
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": -18.9, "banda": "5.8 GHz",
+               "lon": -43.43 + 40 * k * K, "enl_bons": k % 4, "enl_otimos": 0,
+               "enl_total": 6, "custo_caminho": 8000 + 3000 * k, "sinal_cob": -70}
+              for k in range(12)]
+        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 0}, am,
+                                       campos=["enl_bons", "sinal_cob"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        a0 = doc.index("<name>Enlaces bons (Rajant)</name>")
+        aba = doc[a0:doc.index("<name>RSSI", a0)]
+        self.assertIn("<GroundOverlay>", aba)
+        self.assertIn("<name>Pinos (", aba)
+        self.assertIn(f"<name>{rm.CAMADA_DO_RASTRO} — custo do caminho", aba)
+        t = aba.index(f"<name>{rm.CAMADA_DO_RASTRO} — custo do caminho")
+        self.assertIn("<visibility>1</visibility>", aba[t:t + 200])
+        self.assertIn("#l3EAD30", aba)                 # a linha é do custo
+        self.assertNotIn("<name>Medições", aba)        # os pinos já são elas
+        for n in ("pin0", "pin1", "pin2", "pin3", "est1", "pinx"):
+            self.assertIn(f"files/{n}.png", z.namelist())
+        self.assertIn('<Style id="pin1">', doc)
+        self.assertIn('<hotSpot x="0.5" y="0" xunits="fraction"', doc)   # a ponta
+
+    def test_enlaces_vao_para_o_banco(self):
+        con = rm.banco(":memory:")
+        sid = rm.survey_criar(con, "t", 0.0, None, ["CA-1"])
+        rm.amostras_gravar(con, sid, [{"radio": "CA-1", "ts": 1.0, "lat": 0.0,
+                                       "lon": 0.0, "enl_bons": 2,
+                                       "enl_otimos": 1, "enl_total": 7}])
+        a = rm.survey_amostras(con, sid)[0]
+        self.assertEqual((a["enl_bons"], a["enl_otimos"], a["enl_total"]), (2, 1, 7))
 
 
 class TestCalorPorFaixas(unittest.TestCase):
@@ -7559,7 +7666,10 @@ class TestColetaAoVivo(unittest.TestCase):
         self.assertEqual(a["custo"], 5000)
         # É o que faz SNR e ruído virarem aba no KMZ e slide no PPT.
         self.assertEqual(set(rm.campos_com_medicao(c.amostras)),
-                         {"snr", "ruido"})
+                         {"snr", "ruido", "enl_bons"})
+        # Custo 5000 e SNR 27: bom (não ótimo: SNR abaixo de 30).
+        self.assertEqual((a["enl_bons"], a["enl_otimos"], a["enl_total"]),
+                         (1, 0, 1))
         # O RSSI do laudo e `sinal_cob`, e na coleta ao vivo ele nasce do
         # mesmo passo do arquivo: `cobertura_disponivel` sobre os
         # vizinhos lidos. Sem esta chamada o mapa sai sem a camada
