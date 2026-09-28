@@ -2452,7 +2452,8 @@ class TestTodosOsKmz(unittest.TestCase):
         k = zipfile.ZipFile(_io.BytesIO(z.read(kmz[0]))).read("doc.kml")
         raiz = ET.fromstring(k)
         abas = [f.find(NS+"name").text
-                for f in raiz.find(NS+"Document").findall(NS+"Folder")]
+                for g in raiz.find(NS+"Document").findall(NS+"Folder")
+                for f in g.findall(NS+"Folder")]
         # A aba de RSSI é a de `sinal_cob` — o rótulo vem da escala, para
         # renomear a grandeza num lugar só.
         for rot in (rm.ESCALAS["sinal_cob"]["rot"], "SNR", "Ruído",
@@ -3017,9 +3018,15 @@ class TestKmlSurvey(unittest.TestCase):
                 self.assertTrue(-51 < lon < -49, f"lon fora: {lon}")
                 self.assertTrue(-28 < lat < -27, f"lat fora: {lat}")
 
-    def _subpastas(self, raiz, aba):
+    def _abas(self, raiz):
+        """As abas de grandeza: dentro da pasta "Grandeza" (botão de rádio)."""
         doc = raiz.find(self.NS + "Document")
-        for f in doc.findall(self.NS + "Folder"):
+        g = [f for f in doc.findall(self.NS + "Folder")
+             if f.find(self.NS + "name").text == "Grandeza"]
+        return g[0].findall(self.NS + "Folder") if g else []
+
+    def _subpastas(self, raiz, aba):
+        for f in self._abas(raiz):
             if (f.find(self.NS + "name").text or "").startswith(aba):
                 return [g.find(self.NS + "name").text
                         for g in f.findall(self.NS + "Folder")]
@@ -3033,8 +3040,10 @@ class TestKmlSurvey(unittest.TestCase):
         # Equipamento NAO entra por padrão: com uma dezena de BCs a camada
         # de alfinetes cobre justamente a medição.
         self.assertFalse(any(n.startswith("BreadCrumbs") for n in nomes), nomes)
-        # A grandeza virou ABA; rotas e medições são subpastas dela.
-        self.assertIn("RSSI", nomes)
+        # A grandeza virou ABA, dentro de "Grandeza"; o resto é subpasta.
+        self.assertIn("Grandeza", nomes)
+        self.assertIn("RSSI", [f.find(self.NS + "name").text
+                               for f in self._abas(raiz)])
         sub = self._subpastas(raiz, "RSSI")
         # Rotas saiu do padrão: o rastro agora e o GroundOverlay do calor.
         self.assertTrue(any(n.startswith("Medições") for n in sub), sub)
@@ -3056,15 +3065,14 @@ class TestKmlSurvey(unittest.TestCase):
     def test_uma_aba_por_grandeza_so_a_primeira_visivel(self):
         # Ligadas juntas, os pontos de seis grandezas se empilham no mesmo
         # lugar e o mapa nao diz nada.
-        raiz, _, _ = self._arvore(campos=["sinal", "snr", "rtt"])
-        doc = raiz.find(self.NS + "Document")
-        vis = []
-        for f in doc.findall(self.NS + "Folder"):
-            v = f.find(self.NS + "visibility")
-            if v is not None:
-                vis.append((f.find(self.NS + "name").text, v.text))
+        raiz, txt, _ = self._arvore(campos=["sinal", "snr", "rtt"])
+        vis = [(f.find(self.NS + "name").text, f.find(self.NS + "visibility").text)
+               for f in self._abas(raiz)]
         self.assertEqual([n for n, _ in vis], ["RSSI", "SNR", "Latência"])
         self.assertEqual([x for _, x in vis], ["1", "0", "0"])
+        # Botão de rádio: ligar uma grandeza desliga a outra.
+        self.assertIn("<listItemType>radioFolder</listItemType>", txt)
+        self.assertIn("<name>Grandeza</name><open>1</open><styleUrl>#radio", txt)
 
     def test_campo_com_operador_menor_nao_quebra_o_xml(self):
         # "Fora do requisito — < 20 %" sem escape torna o arquivo INTEIRO
@@ -3078,8 +3086,7 @@ class TestKmlSurvey(unittest.TestCase):
         raiz, _, _ = self._arvore(campo="sinal")
         esperado = sum(1 for a in self.am
                        if a.get("sinal") is not None and a["sinal"] <= -75)
-        doc = raiz.find(self.NS + "Document")
-        for aba in doc.findall(self.NS + "Folder"):
+        for aba in self._abas(raiz):
             for f in aba.findall(self.NS + "Folder"):
                 nome = f.find(self.NS + "name").text or ""
                 if nome.startswith("Fora do requisito"):
@@ -3127,10 +3134,12 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertIn("(fora)", rm._balao_amostra({"radio": "x", "sinal": -80}))
         self.assertNotIn("(fora)", rm._balao_amostra({"radio": "x", "sinal": -60}))
 
-    def test_linha_do_tempo_em_cada_medicao(self):
-        raiz, _, _ = self._arvore()
-        n = sum(1 for _ in raiz.iter(self.NS + "TimeStamp"))
-        self.assertEqual(n, len(self.am))
+    def test_sem_barra_de_tempo_e_com_a_hora_no_balao(self):
+        # Com TimeStamp o Google Earth abre a barra de tempo e esconde o
+        # que fica fora do intervalo (o print de campo tinha 9:43 a 10:08).
+        raiz, txt, _ = self._arvore()
+        self.assertEqual(sum(1 for _ in raiz.iter(self.NS + "TimeStamp")), 0)
+        self.assertIn("<small>", txt)       # a hora vai no balão
 
     def test_campo_invalido_falha_dizendo_o_que_vale(self):
         with self.assertRaises(ValueError) as c:
@@ -3164,29 +3173,34 @@ class TestKmlSurvey(unittest.TestCase):
         cfg.set("relatorio", "kmz_com_calor", "true")
         return cfg
 
-    def test_rastro_sai_como_fita_do_trajeto(self):
-        # O calor de raio fixo saía em bolhas soltas com amostras a 60-80 m
-        # (o print do cliente). O rastro padrão é a fita, como o MeshMapper
-        # desenha — e o calor não entra no arquivo sem ser pedido.
+    def test_trilha_continua_no_arquivo(self):
+        import zipfile, io as _io
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                       campo="sinal")
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn("<name>Trajeto", doc)
+        self.assertIn("<LineString>", doc)
+
+    def test_abre_no_calor_com_a_trilha_desligada(self):
+        # Campo, 28/09/2026: o calor no estilo do KMZ de referência é o
+        # que se lê de relance; a trilha e as leituras ficam para consulta.
         import zipfile, io as _io
         dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
                                        campo="sinal")
         z = zipfile.ZipFile(_io.BytesIO(dados))
         doc = z.read("doc.kml").decode()
-        self.assertIn("<name>Trajeto", doc)
-        self.assertIn("<LineString>", doc)
-        self.assertNotIn("<GroundOverlay>", doc)
-        self.assertFalse([n for n in z.namelist() if "calor_" in n])
-
-    def test_calor_volta_quando_pedido_e_desligado(self):
-        import zipfile, io as _io
-        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self._com_calor(),
-                                       campo="sinal")
-        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
         i = doc.index("<GroundOverlay>")
-        self.assertIn("<LatLonBox>", doc)   # sem georreferencia ele escorrega
-        self.assertIn("<visibility>0</visibility>", doc[i:i + 200],
-                      "o calor pedido nasce ligado por cima da fita")
+        self.assertIn("<LatLonBox>", doc[i:])   # sem georreferência escorrega
+        self.assertNotIn("<visibility>0</visibility>", doc[i:i + 300])
+        t = doc.index(f"<name>{rm.CAMADA_DO_RASTRO}")
+        self.assertIn("<visibility>0</visibility>", doc[t:t + 200])
+        self.assertLess(i, t, "o calor vem antes da trilha na aba")
+        self.assertIn("files/calor_sinal.png", z.namelist())
+        # Ícones dentro do KMZ: sem internet na mina, os do Google não abrem.
+        self.assertIn("files/pt_dot.png", z.namelist())
+        self.assertNotIn("maps.google.com/mapfiles/kml/shapes/placemark_circle",
+                         doc)
+        self.assertIn("<LookAt>", doc)          # abre enquadrado
 
     def test_calor_so_onde_passou(self):
         # O que separa "medi aqui" de "acho que la deve dar": fora do raio
@@ -3238,11 +3252,11 @@ class TestKmlSurvey(unittest.TestCase):
         import re as _re
         cx = {t: float(_re.search(rf"<{t}>([-\d.]+)</{t}>", doc).group(1))
               for t in ("north", "south", "east", "west")}
-        n = img.shape[0]
-        # O PNG vai com norte no topo (flipud na gravacao).
+        n, m = img.shape[0], img.shape[1]
+        # O PNG vai com norte no topo; não é quadrado.
         li = int((cx["north"] + 27.7255) / (cx["north"] - cx["south"]) * (n - 1))
-        co = int((-50.0669 - cx["west"]) / (cx["east"] - cx["west"]) * (n - 1))
-        if 0 <= li < n and 0 <= co < n:
+        co = int((-50.0669 - cx["west"]) / (cx["east"] - cx["west"]) * (m - 1))
+        if 0 <= li < n and 0 <= co < m:
             janela = alfa[max(0, li-6):li+7, max(0, co-6):co+7]
             self.assertLess(janela.max(), 0.25,
                             "o radio parado pintou uma bola no mapa "
@@ -4410,7 +4424,9 @@ class TestGeradorMeshMapper(unittest.TestCase):
             sid, sv, am, pr, org = rm.importar_meshmapper_varios(
                 [str(self.EXEMPLO), str(self.EXEMPLO)], con)
             self.assertEqual(len(org), 2)
-            self.assertEqual(len(am), 16)      # 8 + 8
+            # 5 + 5: o exemplo tem 8 leituras, 3 delas com a posição
+            # exatamente repetida (equipamento parado) — ficam fora.
+            self.assertEqual(len(am), 10)
             self.assertTrue(all(o["ok"] for o in org))
         finally:
             con.close()
@@ -4422,7 +4438,7 @@ class TestGeradorMeshMapper(unittest.TestCase):
         try:
             sid, sv, am, pr, org = rm.importar_meshmapper_varios(
                 [str(self.EXEMPLO), str(Path(self.tmp) / "nao_existe.kmz")], con)
-            self.assertEqual(len(am), 8)
+            self.assertEqual(len(am), 5)
             ruins = [o for o in org if not o["ok"]]
             self.assertEqual(len(ruins), 1)
             self.assertIn("nao encontrado", ruins[0]["erro"])
@@ -5207,9 +5223,12 @@ class TestSlideDeMetodologia(unittest.TestCase):
         for k in self.tmp.glob("*.kmz"):
             banda = "5.8 GHz" if "58GHz" in k.name else "2.4 GHz"
             raiz = ET.fromstring(zipfile.ZipFile(k).read("doc.kml"))
-            for f in raiz.find(NS + "Document").findall(NS + "Folder"):
-                sub = [g.find(NS + "name").text for g in f.findall(NS + "Folder")]
-                pastas[(banda, f.find(NS + "name").text)] = sub
+            for gr in raiz.find(NS + "Document").findall(NS + "Folder"):
+                for f in gr.findall(NS + "Folder"):
+                    sub = ([g.find(NS + "name").text for g in f.findall(NS + "Folder")]
+                           + [g.find(NS + "name").text
+                              for g in f.findall(NS + "GroundOverlay")])
+                    pastas[(banda, f.find(NS + "name").text)] = sub
         molduras = 0
         for s in self.p.slides:
             for sh in s.shapes:
@@ -5406,6 +5425,139 @@ class TestCustoDoCaminho(unittest.TestCase):
         self.assertLess(b.index("melhor ERB/ERM: ERM-09"),
                         b.index("RSSI do enlace"))
         self.assertIn("sem rota", b)
+
+
+class TestDescartarParados(unittest.TestCase):
+    """Uma leitura por parada (campo, 28/09/2026: "as leituras de
+    equipamentos parados contaminam as análises")."""
+
+    K = 1 / 111000.0
+
+    def _l(self, radio, t, x_m, y_m=0.0, vel=None, **kw):
+        return dict({"radio": radio, "ts": 1000.0 + t, "lat": y_m * self.K,
+                     "lon": x_m * self.K, "vel": vel, "sinal": -60}, **kw)
+
+    def test_carregadeira_parada_com_gps_oscilando_fica_com_uma(self):
+        am = [self._l("PC-01", 10 * k, (k % 3) * 2.5, (k % 2) * 3, vel=0.4)
+              for k in range(20)]
+        fica, _, n = rm.descartar_parados(am)
+        self.assertEqual((len(fica), n), (1, 19))
+        self.assertIs(fica[0], am[0])        # a primeira, leitura real
+
+    def test_caminhao_devagar_nao_perde_leitura(self):
+        # 18 km/h, uma leitura por segundo: 5 m entre elas, e andando.
+        am = [self._l("CA-1", k, 5.0 * k, vel=18.0) for k in range(20)]
+        self.assertEqual(len(rm.descartar_parados(am)[0]), 20)
+
+    def test_sem_velocidade_ela_sai_do_deslocamento(self):
+        # MeshMapper não traz velocidade: 5 m/s pelo próprio deslocamento.
+        andando = [self._l("CA-1", k, 5.0 * k) for k in range(20)]
+        self.assertEqual(len(rm.descartar_parados(andando)[0]), 20)
+        parado = [self._l("CA-1", k, 0.3 * (k % 2)) for k in range(20)]
+        self.assertEqual(len(rm.descartar_parados(parado)[0]), 1)
+
+    def test_voltar_ao_mesmo_lugar_depois_conta_de_novo(self):
+        am = ([self._l("CA-1", 0, 0, vel=0)]
+              + [self._l("CA-1", k, 15.0 * k, vel=40) for k in range(1, 8)]
+              + [self._l("CA-1", 100, 0.5, vel=0)])
+        fica, _, _ = rm.descartar_parados(am)
+        self.assertEqual(len(fica), 9)
+
+    def test_radios_diferentes_no_mesmo_lugar_nao_se_descartam(self):
+        am = [self._l("CA-1", 0, 0, vel=0), self._l("CA-2", 1, 0, vel=0)]
+        self.assertEqual(len(rm.descartar_parados(am)[0]), 2)
+
+    def test_vizinhos_da_descartada_saem_e_os_outros_mudam_de_ponto(self):
+        am = [self._l("CA-1", 0, 0, vel=0), self._l("CA-1", 10, 1, vel=0),
+              self._l("CA-1", 20, 50, vel=30)]
+        pr = [{"ponto": 1, "nome": "ERB-01"}, {"ponto": 2, "nome": "ERB-01"},
+              {"ponto": 3, "nome": "ERM-02"}]
+        fica, viz, n = rm.descartar_parados(am, pr)
+        self.assertEqual(n, 1)
+        self.assertEqual([(v["ponto"], v["nome"]) for v in viz],
+                         [(1, "ERB-01"), (2, "ERM-02")])
+        self.assertEqual(pr[2]["ponto"], 3)  # a lista de entrada não muda
+
+    def test_balao_diz_a_unidade_certa_da_velocidade(self):
+        # gpsSpeedKph: o balão dizia "m/s" num valor em km/h.
+        fonte = inspect.getsource(rm._balao_amostra)
+        self.assertIn('("vel", "Velocidade", "km/h", 1)', fonte)
+
+
+class TestCalorPorFaixas(unittest.TestCase):
+    """O mapa de calor no estilo do KMZ de referência (28/09/2026)."""
+
+    K = 1 / 111000.0
+
+    def _png(self, am, campo="sinal"):
+        import io as _io, numpy as np
+        from PIL import Image
+        png, caixa, n = rm.calor_por_faixas(am, campo)
+        return np.array(Image.open(_io.BytesIO(png)).convert("RGBA")), caixa
+
+    def _px(self, img, caixa, lat, lon):
+        n, s_, l, o = caixa
+        return img[int((n - lat) / (n - s_) * (img.shape[0] - 1)),
+                   int((lon - o) / (l - o) * (img.shape[1] - 1))]
+
+    def test_trecho_entre_leituras_do_mesmo_veiculo_e_continuo(self):
+        # Leituras a 100 m, mais que o dobro do raio: sem o trecho, o meio
+        # ficava transparente e o mapa saía em contas soltas.
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": 0.0,
+               "lon": 100 * k * self.K, "sinal": -60} for k in range(6)]
+        img, cx = self._png(am)
+        meio = self._px(img, cx, 0.0, 150 * self.K)
+        self.assertGreater(meio[3], 150)
+        self.assertEqual(tuple(meio[:3]), (0x3E, 0xAD, 0x30))   # a cor exata
+
+    def test_buraco_de_medicao_fica_transparente(self):
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": 0.0,
+               "lon": 20 * k * self.K, "sinal": -60} for k in range(5)]
+        am += [{"radio": "CA-1", "ts": 5000.0 + 10 * k, "lat": 0.0,
+                "lon": (600 + 20 * k) * self.K, "sinal": -60} for k in range(5)]
+        img, cx = self._png(am)
+        self.assertLess(self._px(img, cx, 0.0, 340 * self.K)[3], 30)
+
+    def test_empate_vai_para_a_faixa_pior(self):
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0, "sinal": -60},
+              {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "sinal": -85}]
+        img, cx = self._png(am)
+        self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xB7, 0x04, 0x04))
+        # No custo, menor é melhor: a pior é a do índice MAIOR.
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0, "custo_caminho": 9000},
+              {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "custo_caminho": 25000}]
+        img, cx = self._png(am, "custo_caminho")
+        self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xFF, 0x00, 0x00))
+
+    def test_so_leitura_sem_valor_fica_cinza(self):
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0,
+               "custo_caminho": None}]
+        img, cx = self._png(am, "custo_caminho")
+        px = self._px(img, cx, 0.0, 0.0)
+        self.assertEqual(tuple(px[:3]), (0x80, 0x80, 0x80))
+        self.assertLess(px[3], 200)            # mais transparente que o medido
+
+    def test_erb_fica_fora_do_calor_e_vira_quadrado(self):
+        import zipfile, io as _io
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": -27.73, "banda": "5.8 GHz",
+               "lon": -50.07 + 20 * k * self.K, "sinal": -60} for k in range(10)]
+        am += [{"radio": "ERM-05", "ts": 0.0, "lat": -27.74, "lon": -50.05,
+                "sinal": -85, "banda": "5.8 GHz", "servidor": "eth0udp1"}]
+        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 0}, am,
+                                       campos=["sinal"])
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn("<name>ERB/ERM (1)</name>", doc)
+        self.assertIn("<name>ERM-05</name>", doc)
+        self.assertIn("#fxB70404", doc)                 # cor da mediana
+        self.assertIn("Sai por", doc)
+        self.assertIn("10 leituras de 1 equipamentos", doc)
+
+    def test_linha_do_requisito_na_fronteira_certa_da_legenda(self):
+        # Legenda do RSSI, melhor em cima: ≥-67, -70..-68, -74..-71 atendem;
+        # a linha vem antes de -80..-75.
+        self.assertEqual(rm._requisito_entre("sinal_cob"), 3)
+        self.assertEqual(rm._requisito_entre("custo_caminho"), 2)
+        self.assertEqual(rm._requisito_entre("snr"), 2)
 
 
 class TestTrilhaConsolidada(unittest.TestCase):
@@ -5718,9 +5870,7 @@ class TestCorBateComALegenda(unittest.TestCase):
                "sinal": -60.0 - i * 1.5, "banda": "5.8 GHz"}
               for i in range(24)]
         sv = {"nome": "t", "inicio": 100.0, "fim": 124.0}
-        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
-        cfg.set("relatorio", "kmz_com_calor", "true")
-        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"], cfg=cfg)
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"])
         z = zipfile.ZipFile(_io.BytesIO(dados))
         png = [n for n in z.namelist() if "calor_" in n][0]
         img = mpimg.imread(_io.BytesIO(z.read(png)))
@@ -6195,7 +6345,7 @@ class _RadioBCAPI:
                  saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
                  prontos_apos=3, encap=128433, sem_custo=False,
                  senha="", papel="CO", motivo_recusa="authentication failed",
-                 ocupado=0, mudo_no_login=None):
+                 ocupado=0, mudo_no_login=None, parado=False):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -6218,6 +6368,7 @@ class _RadioBCAPI:
         # um login com userAgent (o da biblioteca não manda) — o caso de o
         # login desta ferramenta ter defeito e o da biblioteca não.
         self.mudo_no_login = mudo_no_login
+        self.parado = parado            # velocidade 0, posição fixa
         self.conexoes = []              # o lado do rádio, para ver se fechou
         self.pedidos = []
         self._pos = 0
@@ -6289,7 +6440,7 @@ class _RadioBCAPI:
         g.gpsPos.gpsTime = 143025.0 + self._pos
         g.gpsPos.gpsLat = "1853.6443S"
         g.gpsPos.gpsLong = "04325.8538W"
-        g.gpsVel.gpsSpeedKph = 40.0
+        g.gpsVel.gpsSpeedKph = 0.0 if self.parado else 40.0
         w = st.wireless.add()
         w.name, w.channel, w.noise = "wlan0", 157, -95
         for k in range(self.n_peers):
@@ -6677,6 +6828,16 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         c, _ = self._rodar(radio, trace_destino=None)
         self.assertTrue(c.amostras)
         self.assertFalse([m for m in radio.pedidos if m.HasField("runTask")])
+
+    def test_radio_parado_fica_com_uma_leitura_e_sem_trace_repetido(self):
+        radio = _RadioBCAPI(parado=True)
+        # Parado é relido a cada `parado_s`; 1 s para caber no teste.
+        c, _ = self._rodar(radio, segundos=4.0, parado_s=1.0)
+        self.assertEqual(len(c.amostras), 1)
+        self.assertGreater(c.n_parados, 0)
+        self.assertEqual(c.status()["parados"], c.n_parados)
+        traces = [m for m in radio.pedidos if m.HasField("runTask")]
+        self.assertEqual(len(traces), 1)     # o parado não ocupa a tarefa
 
     def test_trace_ocupado_nao_tira_o_radio_e_volta_na_leitura_seguinte(self):
         # Campo, 26/09/2026: "task TRACE is already running" em EH-6001,
@@ -7717,7 +7878,8 @@ class TestJanelaUnica(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("l3 = ttk.Frame(baixo)", fonte,
                       "os botões de Iniciar/Parar sairam do bloco reservado")
-        self.assertIn("lc = ttk.Frame(baixo)", fonte)
+        self.assertIn('b_ini = ttk.Button(l3, text="Iniciar coleta"', fonte)
+        self.assertIn("lc = ttk.Frame(l3)", fonte)
 
     def test_ha_um_unico_gerador_de_executavel(self):
         # Dois .bat e dois .spec na mesma pasta geravam dois exes, e a

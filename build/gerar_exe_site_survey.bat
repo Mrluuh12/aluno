@@ -50,7 +50,7 @@ set "PASSO=instalar as dependencias"
 echo.
 echo [2/6] Instalando dependencias... ^(alguns minutos^)
 python -m pip install --upgrade pip >> "%LOG%" 2>&1
-python -m pip install pyinstaller matplotlib numpy scipy python-pptx openpyxl lxml >> "%LOG%" 2>&1
+python -m pip install pyinstaller matplotlib numpy scipy pillow python-pptx openpyxl lxml sv-ttk >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo   ERRO ao instalar as dependencias.
     goto :erro

@@ -29,6 +29,13 @@ datas = []
 for pasta in ("marca", "exemplos"):
     if os.path.isdir(os.path.join("..", pasta)):
         datas.append((os.path.join("..", pasta), pasta))
+# Tema da janela (Sun Valley): o .tcl e as imagens vão como dados. Sem o
+# pacote na máquina do build, a janela usa o tema de reserva.
+try:
+    from PyInstaller.utils.hooks import collect_data_files
+    datas += collect_data_files("sv_ttk")
+except Exception:
+    pass
 
 a = Analysis(
     ["../site_survey.py"],
@@ -52,7 +59,8 @@ a = Analysis(
                    "coleta_rajant", "survey_meshmapper",
                    "rajant_monitor",
                    "tkinter", "tkinter.ttk", "tkinter.filedialog",
-                   "tkinter.messagebox", "tkinter.constants"],
+                   "tkinter.messagebox", "tkinter.constants",
+                   "sv_ttk"],
     hookspath=[],
     runtime_hooks=[],
     # ATENÇÃO ao mexer aqui: excluir um módulo que o rajant_monitor importa

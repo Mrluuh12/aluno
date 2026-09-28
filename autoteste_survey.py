@@ -8,7 +8,7 @@ de campo:
 
     python autoteste_survey.py
 
-A suíte completa (610 testes) fica no projeto principal; aqui o objetivo
+A suíte completa (624 testes) fica no projeto principal; aqui o objetivo
 é outro — provar que ESTA cópia, nesta máquina, gera o que promete.
 """
 import sys, io, zipfile, tempfile, shutil
@@ -126,6 +126,9 @@ def main():
             checa("<name>Trajeto" in doc and "<LineString>" in doc,
                   "KMZ tem o trajeto colorido")
             checa("<ScreenOverlay>" in doc, "legenda na tela do mapa")
+            checa("<GroundOverlay>" in doc
+                  and any("calor_" in n for n in z.namelist()),
+                  "KMZ abre no mapa de calor")
             # Toda cor de fita tem de ser uma faixa da legenda — e mais
             # nenhuma. É a garantia de que a cor confere com a régua.
             usadas = set(_re.findall(r"<styleUrl>#l([0-9A-F]{6})</styleUrl>",

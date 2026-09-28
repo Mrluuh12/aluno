@@ -185,6 +185,12 @@ class Coleta:
         # nova traz a posição velha, e gravá-la empilharia amostras no
         # mesmo lugar — que foi o que encheu a captura da ERM-12.
         self.ultimo_fix = {}
+        # Posição da última amostra GUARDADA de cada rádio. Equipamento
+        # parado dava uma leitura a cada 10 s no mesmo lugar, e o peso dele
+        # nas médias, nos percentuais e no mapa era o de uma estrada
+        # inteira. Fica uma leitura por parada (`rm.descartar_parados`).
+        self.ultimo_ponto = {}
+        self.n_parados = 0
         self.motivos    = {}   # motivo da falha -> quantas vezes
         self.desistencias = {}  # ip -> quando a sessao desistiu dele
         self.n_repetidos = 0
@@ -284,9 +290,18 @@ class Coleta:
         d = rm.calcular_taxas(ip, d, time.monotonic())
         # O trace vai na MESMA sessão, logo depois do State: mesma posição,
         # mesmo instante. Guardar o de outra leitura seria a defasagem que
-        # o survey inteiro existe para evitar.
-        d["_trace"] = self._trace(ses, ip)
+        # o survey inteiro existe para evitar. Rádio que não saiu do lugar
+        # não tem trace: a leitura vai ser descartada (`_amostra`), e o
+        # TRACE só ocuparia a tarefa do rádio.
+        s = d.get("sistema") or {}
+        if not self._no_mesmo_ponto(ip, s.get("gps_lat"), s.get("gps_lon"),
+                                    s.get("gps_vel")):
+            d["_trace"] = self._trace(ses, ip)
         return d
+
+    def _no_mesmo_ponto(self, ip, lat, lon, vel):
+        """Parado no ponto da última leitura guardada dele?"""
+        return rm.parado_no_mesmo_ponto(self.ultimo_ponto.get(ip), lat, lon, vel)
 
     def _trace(self, ses, ip):
         """Por onde o rádio sai até o destino, ou None. Nunca derruba a
@@ -418,6 +433,11 @@ class Coleta:
         if fix is not None:
             self.ultimo_fix[ip] = fix
         self.agenda.registrar(ip, agora, lat, lon, s.get("gps_vel"))
+        if self._no_mesmo_ponto(ip, lat, lon, s.get("gps_vel")):
+            with self.lock:
+                self.n_parados += 1
+            return None
+        self.ultimo_ponto[ip] = (lat, lon)
 
         # O melhor enlace do ponto, e TUDO que ele mede junto. Guardar só
         # o RSSI deixava o laudo sem SNR e sem ruído — as duas grandezas
@@ -661,7 +681,8 @@ class Coleta:
                                key=lambda kv: -kv[1])[:5]:
                 self.aviso(f"  {n}x  {m}")
         self.aviso(f"coleta encerrada: {len(self.amostras)} amostras, "
-                   f"{len(self.peers)} leituras de vizinho")
+                   f"{len(self.peers)} leituras de vizinho, "
+                   f"{self.n_parados} de equipamento parado descartadas")
         return self.amostras, self.peers
 
     # ── estado, para a janela mostrar ────────────────────────
@@ -675,6 +696,7 @@ class Coleta:
                 "amostras": n_am, "vizinhos": len(self.peers),
                 "equipamentos": moveis, "lidos": self.n_lidos,
                 "falhas": self.n_falhas, "repetidos": self.n_repetidos,
+                "parados": self.n_parados,
                 "duracao_s": dur,
                 "leituras_s": (self.n_lidos / dur) if dur > 0 else 0.0,
                 # Quanto demora UMA leitura. Com o passo real acima do
@@ -711,6 +733,9 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
     am, pr = coleta.amostras, coleta.peers
     if not am:
         raise RuntimeError("nenhuma amostra com posição foi coletada")
+    # A coleta já descarta na hora (`_no_mesmo_ponto`); aqui é a mesma
+    # regra aplicada ao conjunto, para o banco nunca receber o parado.
+    am, pr, desc = rm.descartar_parados(am, pr)
     destino = Path(saida or ".").resolve()
     destino.mkdir(parents=True, exist_ok=True)
 

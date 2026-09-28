@@ -1977,10 +1977,6 @@ DEFAULTS_RELATORIO = {
     # dezena de BCs a camada de alfinetes cobre a medicao, que e o assunto
     # do arquivo. true devolve a pasta "BreadCrumbs".
     "kmz_com_equipamentos": "false",
-    # O rastro do KMZ e a FITA do trajeto, colorida pela faixa da legenda
-    # e partida onde houve buraco de medicao. true acrescenta tambem o
-    # MAPA DE CALOR (nucleo de raio fixo por amostra), desligado no painel.
-    "kmz_com_calor": "false",
     # false = o PPT sai com MOLDURAS VAZIAS, cada uma dizendo qual KMZ
     # abrir e qual camada ligar para tirar o print no Google Earth. É o
     # caminho de quem quer o satélite real no slide, que o PNG não tem
@@ -5919,6 +5915,7 @@ def nome_da_aba(campo):
 
 # A pasta de dentro da aba que traz o rastro colorido — o que o print mostra.
 CAMADA_DO_RASTRO = "Trajeto"
+CAMADA_DO_CALOR = "Mapa de calor"
 
 
 def sem_rota(v, campo):
@@ -6091,7 +6088,7 @@ def _balao_amostra(a):
               ("taxa", "Taxa do enlace", "Mbps", 0),
               ("custo", "Custo do enlace", "", 0),
               ("peers", "Enlaces ativos", "", 0),
-              ("vel", "Velocidade", "m/s", 1),
+              ("vel", "Velocidade", "km/h", 1),
               ("sats", "Satélites", "", 0), ("hdop", "HDOP", "", 1))
     for c, rot, un, casas in campos:
         v = a.get(c)
@@ -6722,66 +6719,270 @@ def _faixas_rotuladas(campo):
     return out
 
 
-def _legenda_de_faixas_png(caminho, campo):
-    """A legenda da grandeza como imagem, para o ScreenOverlay do KMZ.
+# Raio do calor: cada ponto do mapa toma a faixa que reúne MAIS trecho
+# medido a até esta distância. Largo o bastante para a mina inteira caber
+# na tela e a faixa ainda se ler (o KMZ de referência dá ~100 m de
+# largura); curto para não pintar o banco de cima com a pista de baixo.
+RAIO_CALOR_M = 40.0
+# Passo em que o trajeto é amostrado entre duas leituras do mesmo veículo.
+_PASSO_CALOR_M = 5.0
+_ALFA_CALOR, _ALFA_CALOR_SEM = 0.82, 0.5
 
-    Melhor faixa em cima, pior embaixo, em qualquer grandeza — em RSSI o
-    alto é bom, em ruído o baixo, e a ordem de FAIXAS_KML segue o valor,
-    não a qualidade. Por último o cinza da leitura sem valor: toda cor que
-    o mapa pode pintar está aqui. O requisito vai no rodapé.
+
+def _pior_primeiro(campo, n):
+    """Peso de desempate por faixa: empate na contagem vai para a PIOR."""
+    alto = (ESCALAS.get(campo) or {}).get("melhor", "alto") == "alto"
+    return [((n - k) if alto else (k + 1)) * 1e-3 for k in range(n)]
+
+
+def calor_por_faixas(amostras, campo, raio_m=RAIO_CALOR_M, res_m=2.5):
+    """Mapa de calor por FAIXA, para GroundOverlay.
+
+    Cada pixel toma a faixa da legenda que reúne MAIS trecho medido a até
+    `raio_m` dele. O trecho é o caminho do veículo entre duas leituras, e
+    cada leitura é dona da metade dele até a vizinha — a regra da trilha:
+    nenhum valor é inventado entre duas leituras, e onde houve buraco de
+    medição (`_trechos_continuos`) não há trecho. Contar só as leituras
+    deixava o mapa em contas soltas: depois do descarte dos parados, um
+    caminhão a 40 km/h fica com leituras a 20–100 m uma da outra.
+
+    Contagem, não média: a cor é sempre uma faixa da régua. Empate vai
+    para a pior. Onde só há leitura SEM valor (sem trace, por exemplo),
+    cinza mais claro; onde não há leitura, transparente.
+
+    Devolve (png_bytes, (norte, sul, leste, oeste), n_leituras) ou None.
+    """
+    import numpy as np, io as _io
+    from PIL import Image
+    from scipy.ndimage import gaussian_filter
+    faixas = FAIXAS_KML[campo]
+    baixo = limites_na_faixa_de_baixo(campo)
+    lidas = [a for a in amostras
+             if a.get("lat") is not None and a.get("lon") is not None]
+    if not lidas:
+        return None
+    lat0 = sum(a["lat"] for a in lidas) / len(lidas)
+    kx = 111320.0 * math.cos(math.radians(lat0)); ky = 110540.0
+    # O trajeto amostrado a cada _PASSO_CALOR_M, cada ponto com o valor da
+    # leitura mais próxima NO TRAJETO (metade do caminho para cada lado).
+    pts = []
+    por_radio = {}
+    for a in lidas:
+        por_radio.setdefault(a.get("radio"), []).append(a)
+    for r in sorted(por_radio, key=str):
+        ls = sorted(por_radio[r], key=lambda x: x.get("ts") or 0)
+        for corrida in _trechos_continuos(ls, manter_isolados=True):
+            if len(corrida) == 1:
+                a = corrida[0]; pts.append((a["lat"], a["lon"], a.get(campo)))
+                continue
+            for p, q in zip(corrida, corrida[1:]):
+                d = _dist_m(p["lat"], p["lon"], q["lat"], q["lon"])
+                n_ = max(1, int(d / _PASSO_CALOR_M))
+                for t in range(n_):
+                    f = t / n_
+                    pts.append((p["lat"] + (q["lat"] - p["lat"]) * f,
+                                p["lon"] + (q["lon"] - p["lon"]) * f,
+                                (p if f < 0.5 else q).get(campo)))
+            a = corrida[-1]; pts.append((a["lat"], a["lon"], a.get(campo)))
+    xs = [p[1] * kx for p in pts]; ys = [p[0] * ky for p in pts]
+    margem = raio_m + 8.0
+    x0, x1 = min(xs) - margem, max(xs) + margem
+    y0, y1 = min(ys) - margem, max(ys) + margem
+    res = max(res_m, (x1 - x0) / 4000.0, (y1 - y0) / 4000.0)
+    W = int(math.ceil((x1 - x0) / res)) + 1
+    H = int(math.ceil((y1 - y0) / res)) + 1
+    n = len(faixas)
+    cont = np.zeros((n + 1, H, W), dtype=np.float32)     # n = sem valor
+    r = int(math.ceil(raio_m / res))
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    disco = ((xx * xx + yy * yy) <= (raio_m / res) ** 2).astype(np.float32)
+    for (la, lo, v), x, y in zip(pts, xs, ys):
+        k = (_faixa_idx(v, faixas, baixo) if isinstance(v, (int, float))
+             and not sem_rota(v, campo) else (n - 1 if isinstance(v, (int, float))
+                                              else n))
+        c, l = int((x - x0) / res), int((y1 - y) / res)
+        cont[k, l - r:l + r + 1, c - r:c + r + 1] += disco
+    com_valor = cont[:n].sum(axis=0) > 0
+    so_sem = (~com_valor) & (cont[n] > 0)
+    peso = np.array(_pior_primeiro(campo, n), dtype=np.float32)[:, None, None]
+    cls = np.argmax(cont[:n] + peso * (cont[:n] > 0), axis=0)
+    paleta = np.array([[int(c[i:i + 2], 16) for i in (0, 2, 4)]
+                       for _, c in faixas], dtype=np.float32)
+    rgb = paleta[cls]
+    rgb[so_sem] = [int(COR_SEM_VALOR[i:i + 2], 16) for i in (0, 2, 4)]
+    alfa = np.where(com_valor, _ALFA_CALOR, np.where(so_sem, _ALFA_CALOR_SEM, 0.0))
+    # Borda macia (1 px de desfoque) e sombra escura FORA da mancha: ela se
+    # separa do chão da cava sem linha de contorno. Dentro, o RGB é o da
+    # faixa, exato — só a transparência varia; a sombra composta por baixo
+    # escurecia a cor e ela deixava de ser a da legenda.
+    cobre = com_valor | so_sem
+    alfa = (alfa * np.clip(gaussian_filter(cobre.astype(np.float32), 1.0) * 1.8,
+                           0, 1)).astype(np.float32)
+    sombra = (gaussian_filter(cobre.astype(np.float32), 3.0) * 0.28).astype(np.float32)
+    rgb[~cobre] = 0
+    a_fim = np.where(cobre, alfa, sombra)
+    img = np.dstack([rgb, np.clip(a_fim * 255, 0, 255)]).astype(np.uint8)
+    buf = _io.BytesIO()
+    Image.fromarray(img, "RGBA").save(buf, "PNG", optimize=True)
+    caixa = (y1 / ky, y0 / ky, x1 / kx, x0 / kx)
+    return buf.getvalue(), caixa, len(lidas)
+
+
+def icones_kmz():
+    """Ícones brancos com borda escura, tingidos pela cor do IconStyle. Vão
+    DENTRO do KMZ: os do servidor do Google não abrem na mina sem internet."""
+    import io as _io
+    from PIL import Image, ImageDraw
+    out = {}
+    for nome, forma in (("pt_dot", "c"), ("fx_square", "q")):
+        g = 256
+        im = Image.new("RGBA", (g, g), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        if forma == "c":
+            d.ellipse((24, 24, g - 24, g - 24), fill=(20, 22, 28, 255))
+            d.ellipse((52, 52, g - 52, g - 52), fill=(255, 255, 255, 255))
+        else:
+            d.rounded_rectangle((28, 28, g - 28, g - 28), 44, fill=(20, 22, 28, 255))
+            d.rounded_rectangle((56, 56, g - 56, g - 56), 26, fill=(255, 255, 255, 255))
+        im = im.resize((64, 64), Image.LANCZOS)
+        buf = _io.BytesIO(); im.save(buf, "PNG")
+        out[f"files/{nome}.png"] = buf.getvalue()
+    return out
+
+
+def _texto_sobre(cor_hex):
+    """Cor de texto legível sobre o fundo `cor_hex` (selo do balão)."""
+    r, g, b = (int(cor_hex[i:i + 2], 16) for i in (0, 2, 4))
+    return "0F141E" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "FFFFFF"
+
+
+def _balao_com_selo(cor):
+    """BalloonStyle com o valor num selo da cor da faixa."""
+    return ("<BalloonStyle><text><![CDATA[<div style=\"font-family:'Segoe UI',"
+            "Arial,sans-serif;min-width:230px\"><div style=\"display:inline-block;"
+            f"padding:3px 12px;border-radius:12px;background:#{cor};"
+            f"color:#{_texto_sobre(cor)};font-size:16px;font-weight:bold\">"
+            "$[name]</div>$[description]</div>]]></text></BalloonStyle>")
+
+
+def _requisito_entre(campo):
+    """Posição (na ordem da legenda: melhor em cima) da fronteira entre as
+    faixas que atendem o requisito e as que não atendem; None se nenhuma."""
+    req = limite_de(campo)
+    if not req:
+        return None
+    op, lim = req[0], req[1]
+    faixas = FAIXAS_KML[campo]
+    reps = []
+    for k, (l, _c) in enumerate(faixas):
+        ant = faixas[k - 1][0] if k else None
+        if ant is None:
+            v = l - 1
+        elif k == len(faixas) - 1:
+            v = ant + 1
+        else:
+            v = (ant + l) / 2.0
+        reps.append(atende(v, op, lim))
+    if (ESCALAS.get(campo) or {}).get("melhor", "alto") == "alto":
+        reps = list(reversed(reps))
+    for i in range(1, len(reps)):
+        if reps[i - 1] and not reps[i]:
+            return i
+    return None
+
+
+def _legenda_de_faixas_png(caminho, campo, banda=None):
+    """A legenda da grandeza, em cartão escuro, para o ScreenOverlay.
+
+    Melhor faixa em cima, pior embaixo, em qualquer grandeza. O requisito
+    é uma linha tracejada ENTRE as faixas que atendem e as que não; por
+    último o cinza da leitura sem valor. Toda cor que o mapa pinta está
+    aqui, e só elas.
     """
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    from matplotlib.textpath import TextPath
+    from matplotlib.font_manager import FontProperties
+    import textwrap as _tw
+
+    def larg(txt, tam, negrito=False):
+        """Largura do texto, em pixels a 100 dpi — medida, não estimada."""
+        fp = FontProperties(weight="bold" if negrito else "normal")
+        return TextPath((0, 0), txt, size=tam, prop=fp).get_extents().width * 100 / 72
+
     esc = ESCALAS.get(campo) or {}
-    un = esc.get("un", "")
     linhas = _faixas_rotuladas(campo)
     if esc.get("melhor", "alto") == "alto":
         linhas = list(reversed(linhas))
+    corte = _requisito_entre(campo)
     linhas = list(linhas) + [(sem_valor_txt(campo), COR_SEM_VALOR, "")]
     req = limite_de(campo)
     fonte = FONTE_FAIXAS.get(campo, "")
-    titulo = esc.get("rot", campo)
-    n = len(linhas)
-    import textwrap as _tw
-    linhas_fonte = _tw.wrap(fonte, 62) if fonte else []
-    lg, alt = (350, 46 + 21 * n + (22 if req else 0)
-               + (12 * len(linhas_fonte) + 12 if linhas_fonte else 0))
+    notas = ([f"Cor: faixa com mais trecho medido num raio de "
+              f"{RAIO_CALOR_M:g} m (empate: a pior). Sem leitura por perto: "
+              f"transparente. Quadrado: ERB/ERM, mediana das leituras dela."]
+             + ([fonte] if fonte else []))
+    notas = [l for t in notas for l in _tw.wrap(t, 64)]
+    titulo = esc.get("rot", nome_da_aba(campo))
+    lg = max(372, int(16 + larg(titulo, 11, True) + 10
+                      + (larg(banda, 8, True) + 14 if banda else 0) + 18))
+    alt = (58 + 26 * len(linhas) + (22 if corte is not None else 0)
+           + 14 + 12 * len(notas) + 12)
     fig = plt.figure(figsize=(lg / 100, alt / 100), dpi=100)
-    fig.patch.set_facecolor("#FFFFFF"); fig.patch.set_alpha(0.93)
+    fig.patch.set_alpha(0)
     ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
     ax.set_xlim(0, lg); ax.set_ylim(alt, 0)
-    ax.text(12, 16, titulo, color="#1A1A1A", fontsize=8.5, fontweight="bold",
+    ax.add_patch(FancyBboxPatch((3, 3), lg - 6, alt - 6,
+                                boxstyle="round,pad=0,rounding_size=12",
+                                facecolor="#1B2230", edgecolor="#3A4458",
+                                linewidth=1.0, alpha=0.93))
+    ax.text(16, 22, titulo, color="#FFFFFF", fontsize=11, fontweight="bold",
             va="center")
-    ax.text(12, 31, un, color="#5A6478", fontsize=7.5, va="center")
-    # A classificação começa depois do rótulo mais longo: "10001 a 20000"
-    # encostava em "bom" com a coluna fixa.
-    x_cls = max(130, 54 + int(6.4 * max((len(r) for r, _c, k in linhas if k),
-                                         default=0)) + 14)
+    if banda:
+        x_b = 16 + larg(titulo, 11, True) + 10
+        ax.add_patch(FancyBboxPatch((x_b, 13), larg(banda, 8, True) + 14, 18,
+                                    boxstyle="round,pad=0,rounding_size=9",
+                                    facecolor="#303A4E", edgecolor="none"))
+        ax.text(x_b + 7, 22, banda, color="#E6E9EF", fontsize=8,
+                fontweight="bold", va="center")
+    un = esc.get("un", "")
+    if un:
+        ax.text(16, 42, un, color="#9AA3B2", fontsize=7.5, va="center")
+    x_cls = 58 + max((larg(r, 9, True) for r, _c, k in linhas if k),
+                     default=0) + 18
+    y = 58
     for i, (rng, cor, cls) in enumerate(linhas):
-        y = 46 + 21 * i
-        ax.add_patch(plt.Rectangle((12, y), 34, 15, facecolor="#" + cor,
-                                   edgecolor="#141008", linewidth=0.6))
-        ax.text(54, y + 7.5, rng, color="#1A1A1A", fontsize=8, va="center")
+        if corte is not None and i == corte:
+            ax.plot([16, lg - 16], [y + 4, y + 4], color="#FFFFFF",
+                    linewidth=0.9, linestyle=(0, (4, 3)), alpha=0.85)
+            op, lim, un_r, _rot = req
+            nome_req = ("Referência Rajant" if campo == "custo_caminho"
+                        else "Requisito Modular" if campo in REQUISITOS
+                        or campo == "sinal_cob" else "Referência")
+            txt = f"{nome_req}: {_OP_TXT[op]} {lim:g} {un_r}".rstrip()
+            w = larg(txt, 7, True) + 18
+            ax.add_patch(FancyBboxPatch((lg - 16 - w, y - 5), w, 18,
+                                        boxstyle="round,pad=0,rounding_size=9",
+                                        facecolor="#1B2230", edgecolor="#FFFFFF",
+                                        linewidth=0.9, zorder=3))
+            ax.text(lg - 16 - w / 2, y + 4, txt, color="#FFFFFF", fontsize=7,
+                    fontweight="bold", va="center", ha="center", zorder=4)
+            y += 22
+        ax.add_patch(FancyBboxPatch((16, y + 3), 32, 14,
+                                    boxstyle="round,pad=0,rounding_size=7",
+                                    facecolor="#" + cor, edgecolor="none"))
+        sem = cor == COR_SEM_VALOR and not cls
+        ax.text(58, y + 10, rng, color="#9AA3B2" if sem else "#FFFFFF",
+                fontsize=8 if sem else 9, fontweight="normal" if sem else "bold",
+                va="center")
         if cls:
-            ax.text(x_cls, y + 7.5, cls, color="#5A6478", fontsize=7.5,
-                    va="center")
-    y = 46 + 21 * n + 6
-    if req:
-        op, lim, un_r, _rot = req
-        # Só é "Modular" o que está em REQUISITOS. O corte do ruído é
-        # derivado dos requisitos, e chamá-lo de requisito seria afirmar
-        # uma cláusula que o contrato não tem.
-        nome_req = ("Requisito Modular" if campo in REQUISITOS
-                    or campo == "sinal_cob" else
-                    "Referência Rajant" if campo == "custo_caminho"
-                    else "Referência")
-        ax.text(12, y + 8, f"{nome_req}: {_OP_TXT[op]} {lim:g} {un_r}".rstrip(),
-                color="#031795", fontsize=7.5, fontweight="bold", va="center")
-        y += 22
-    if linhas_fonte:
-        ax.text(12, y + 2, "\n".join(linhas_fonte), color="#5A6478",
-                fontsize=6.5, va="top", linespacing=1.3)
-    fig.savefig(caminho, facecolor=fig.get_facecolor(), transparent=False)
+            ax.text(x_cls, y + 10, cls, color="#C3CAD6", fontsize=7.5, va="center")
+        y += 26
+    ax.plot([16, lg - 16], [y + 4, y + 4], color="#3A4458", linewidth=0.8)
+    ax.text(16, y + 12, "\n".join(notas), color="#9AA3B2", fontsize=6.5,
+            va="top", linespacing=1.35)
+    fig.savefig(caminho, transparent=True)
     plt.close(fig)
     return caminho
 
@@ -6845,13 +7046,14 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     cores_ponto = set()
     cores_todas = {c for cp in campos for _, c in FAIXAS_KML[cp]}
     cores_todas.add(COR_SEM_VALOR)     # trecho sem medição
-    estilos = []
+    # Ícones dentro do KMZ; no KML solto não há onde guardá-los.
+    ico_pt = ("files/pt_dot.png" if comprimir else
+              "http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png")
+    ico_fx = ("files/fx_square.png" if comprimir else
+              "http://maps.google.com/mapfiles/kml/shapes/square.png")
+    estilos = ['<Style id="radio"><ListStyle><listItemType>radioFolder'
+               '</listItemType></ListStyle></Style>']
     for cor in sorted(cores_todas):
-        estilos.append(
-            f'<Style id="p{cor}"><IconStyle><color>{_kml_cor(cor)}</color>'
-            f'<scale>0.4</scale><Icon><href>http://maps.google.com/mapfiles/'
-            f'kml/shapes/placemark_circle.png</href></Icon></IconStyle>'
-            f'<LabelStyle><scale>0</scale></LabelStyle></Style>')
         # A fita colorida E o dado. Largura de survey de verdade: com
         # 2,6 px a rota sumia sobre o satelite da cava, que e claro e
         # cheio de textura — parecia risco de GPS, nao medicao.
@@ -6868,9 +7070,10 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         '<Style id="lcontorno"><LineStyle><color>b4141008</color>'
         '<width>9</width></LineStyle></Style>')
     estilos.append(
-        '<Style id="pFora"><IconStyle><color>ff0000ff</color><scale>0.55</scale>'
-        '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png'
-        '</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>')
+        f'<Style id="pFora"><IconStyle><color>{_kml_cor("FF0000")}</color>'
+        f'<scale>0.7</scale><Icon><href>{ico_pt}</href></Icon><hotSpot x="0.5" '
+        f'y="0.5" xunits="fraction" yunits="fraction"/></IconStyle><LabelStyle>'
+        f'<scale>0</scale></LabelStyle>{_balao_com_selo("FF0000")}</Style>')
     for tipo, (href, cor) in _ICONES_KML.items():
         estilos.append(
             f'<Style id="bc{_esc(tipo)}"><IconStyle><color>{_kml_cor(cor)}</color>'
@@ -6925,13 +7128,71 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     # Todas no mesmo arquivo, só a primeira visível: ligadas juntas, os
     # pontos de seis grandezas se empilham no mesmo lugar e o mapa não diz
     # nada. O operador liga a que quer no painel de camadas.
-    # O rastro é a FITA do trajeto (ver `_aba`). O calor fica opcional.
-    com_calor = _cfg_bool(cfg, "relatorio", "kmz_com_calor", False)
+    # Abre no mapa de calor por faixa (`calor_por_faixas`); a trilha e as
+    # leituras ficam na aba, desligadas.
 
     # PNGs do calor, embutidos no KMZ. Em KML solto nao ha onde guardar a
     # imagem, e overlay apontando para arquivo ausente nao desenha nada —
     # entao o calor so sai no KMZ.
     extras = []
+    cores_fixos = set()
+    rx_infra = re.compile(PADRAO_INFRA, re.I)
+
+    def _calor_overlay(campo_a):
+        """O mapa de calor da aba: a camada que se lê de relance."""
+        if not comprimir:
+            return ""
+        do_calor = [a for a in am if not rx_infra.search(a.get("radio") or "")]
+        try:
+            r = calor_por_faixas(do_calor, campo_a)
+        except Exception as e:
+            log.warning(f"[kml] calor de {campo_a} falhou: {e}")
+            return ""
+        if not r:
+            return ""
+        png, (n_, s_, l_, o_), n_lei = r
+        nome_png = f"files/calor_{campo_a}.png"
+        extras.append((nome_png, png))
+        n_eq = len({a.get("radio") for a in do_calor})
+        return (f"<GroundOverlay><name>{CAMADA_DO_CALOR}</name>"
+                f"<description><![CDATA[{n_lei} leituras de {n_eq} "
+                f"equipamentos; ERB/ERM ficam fora. Cor: faixa com mais "
+                f"trecho medido num raio de {RAIO_CALOR_M:g} m.]]></description>"
+                f"<drawOrder>1</drawOrder><Icon><href>{nome_png}</href></Icon>"
+                f"<LatLonBox><north>{n_:.7f}</north><south>{s_:.7f}</south>"
+                f"<east>{l_:.7f}</east><west>{o_:.7f}</west></LatLonBox>"
+                f"</GroundOverlay>")
+
+    def _fixos_na_aba(campo_a, un_a):
+        """Um quadrado por ERB/ERM, na cor da mediana das leituras dela."""
+        por = {}
+        for a in am:
+            if rx_infra.search(a.get("radio") or ""):
+                por.setdefault(a["radio"], []).append(a)
+        itens = []
+        for nome, ls in sorted(por.items()):
+            v = _valor_da_celula([a.get(campo_a) for a in ls], campo_a)
+            cor = cor_da_leitura(v, campo_a)
+            cores_fixos.add(cor)
+            la = sorted(a["lat"] for a in ls)[len(ls) // 2]
+            lo = sorted(a["lon"] for a in ls)[len(ls) // 2]
+            saidas = [a.get("servidor") for a in ls if a.get("servidor")]
+            sai = max(set(saidas), key=saidas.count) if saidas else None
+            linhas = [(nome_da_aba(campo_a), fmt_leitura(v, campo_a)),
+                      ("Leituras", str(len(ls)))]
+            if sai:
+                linhas.append(("Sai por", sai))
+            tab = "".join(f"<tr><td>{_esc(k)}</td><td><b>{_esc(x)}</b></td></tr>"
+                          for k, x in linhas)
+            itens.append(_placemark(
+                nome, f"<![CDATA[<table style='font-size:12px;margin-top:6px'>"
+                      f"{tab}</table>]]>", f"fx{cor}", ponto=(la, lo)))
+        if not itens:
+            return ""
+        return (f"<Folder><name>ERB/ERM ({len(itens)})</name><open>0</open>"
+                f"<description><![CDATA[Quadrado na cor da mediana das "
+                f"leituras de cada ERB/ERM.]]></description>{''.join(itens)}"
+                f"</Folder>")
 
     def _calor_no_kmz(amostras_aba, campo, visivel, sufixo="", rotulo=None):
         if not comprimir:
@@ -7024,7 +7285,7 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             import tempfile as _tf, os as _os
             nome_png = f"legenda_{campo_a}.png"
             cam = _os.path.join(_tf.mkdtemp(), nome_png)
-            _legenda_de_faixas_png(cam, campo_a)
+            _legenda_de_faixas_png(cam, campo_a, banda=banda)
             with open(cam, "rb") as fh:
                 extras.append((f"files/{nome_png}", fh.read()))
         except Exception as e:
@@ -7088,27 +7349,27 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 _rotulo_trecho([v], un_a, campo_a),
                 f"<![CDATA[{n} leitura{'s' if n != 1 else ''}]]>",
                 f"q{cor}", ponto=(la, lo)))
+        # O calor é a camada que abre ligada: é a que se lê de relance.
+        calor = _calor_overlay(campo_a)
+        if calor:
+            dentro.append(calor)
+        fx = _fixos_na_aba(campo_a, un_a)
+        if fx:
+            dentro.append(fx)
         if contornos or soltos:
             # TODOS os contornos antes de TODAS as cores: com um contorno
             # por veículo intercalado, o de um cobria a cor do outro no
-            # cruzamento de pistas.
+            # cruzamento de pistas. Desligada quando há calor: as duas
+            # juntas se cobrem.
             dentro.append(
                 f"<Folder><name>{CAMADA_DO_RASTRO} ({len(por_radio_rastro)} "
                 f"rádio{'s' if len(por_radio_rastro) != 1 else ''})</name>"
-                f"<open>0</open>{''.join(contornos)}{''.join(fitas)}"
+                f"<open>0</open><visibility>{0 if calor else 1}</visibility>"
+                f"{''.join(contornos)}{''.join(fitas)}"
                 f"{''.join(soltos)}</Folder>")
         leg = _legenda_na_tela(campo_a)
-        if leg and (contornos or soltos):
+        if leg and (contornos or soltos or calor):
             dentro.append(leg)
-
-        # ── calor (opcional, desligado) ──
-        # Fica para quem quiser a mancha em vez da fita. Opcional porque
-        # o raio fixo em volta de cada amostra é justamente o que deixava
-        # buraco entre leituras espaçadas.
-        if com_calor:
-            png = _calor_no_kmz(am, campo_a, False)
-            if png:
-                dentro.append(png)
 
         # pontos de medição, com balão e linha do tempo
         usados, passo = _decimar(sorted(am, key=lambda x: x.get("ts") or 0),
@@ -7125,9 +7386,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
             rotulo = (_rotulo_trecho([v], un_a, campo_a)
                       if isinstance(v, (int, float))
                       else a.get("radio", ""))
+            # Sem TimeStamp: com ele o Google Earth abre a barra de tempo e
+            # esconde o que está fora do intervalo escolhido. A hora está
+            # no balão.
             marcas.append(_placemark(rotulo, _balao_amostra(a), f"q{cor}",
-                                     ponto=(a["lat"], a["lon"]),
-                                     quando=quando_a))
+                                     ponto=(a["lat"], a["lon"])))
         nota = (f" — 1 a cada {passo} amostras" if passo > 1 else "")
         # Desligada: com milhares de leituras, os pontos cobrem a fita.
         # Ligada, dá o balão de cada leitura com todas as grandezas.
@@ -7167,8 +7430,11 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 f"<description><![CDATA[Cor por {_esc(rot_a)}{_esc(req)}"
                 f"]]></description>{''.join(dentro)}</Folder>")
 
-    for i, cp in enumerate(campos):
-        pastas.append(_aba(cp, visivel=(i == 0)))
+    # Uma grandeza por vez: no painel do Google Earth as abas viram botão
+    # de rádio, e ligar uma desliga a outra.
+    abas = [_aba(cp, visivel=(i == 0)) for i, cp in enumerate(campos)]
+    pastas.append(f"<Folder><name>Grandeza</name><open>1</open>"
+                  f"<styleUrl>#radio</styleUrl>{''.join(abas)}</Folder>")
 
     # ── Pegada de cada repetidora ──
     # As abas acima misturam as repetidoras: a cobertura disponível é o
@@ -7224,9 +7490,25 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     for cor in sorted(cores_ponto):
         estilos.append(
             f'<Style id="q{cor}"><IconStyle><color>{_kml_cor(cor)}</color>'
-            f'<scale>0.42</scale><Icon><href>http://maps.google.com/mapfiles/'
-            f'kml/shapes/placemark_circle.png</href></Icon></IconStyle>'
-            f'<LabelStyle><scale>0</scale></LabelStyle></Style>')
+            f'<scale>0.5</scale><Icon><href>{ico_pt}</href></Icon>'
+            f'<hotSpot x="0.5" y="0.5" xunits="fraction" yunits="fraction"/>'
+            f'</IconStyle><LabelStyle><scale>0</scale></LabelStyle>'
+            f'{_balao_com_selo(cor)}</Style>')
+    # Quadrado da ERB/ERM: nome só ao passar o mouse, para não cobrir o mapa.
+    for cor in sorted(cores_fixos):
+        for sufixo, esc_i, esc_l in (("n", 0.85, 0), ("h", 1.2, 0.9)):
+            estilos.append(
+                f'<Style id="fx{cor}{sufixo}"><IconStyle><color>{_kml_cor(cor)}'
+                f'</color><scale>{esc_i}</scale><Icon><href>{ico_fx}</href>'
+                f'</Icon><hotSpot x="0.5" y="0.5" xunits="fraction" '
+                f'yunits="fraction"/></IconStyle><LabelStyle><scale>{esc_l}'
+                f'</scale></LabelStyle>{_balao_com_selo(cor)}</Style>')
+        estilos.append(
+            f'<StyleMap id="fx{cor}"><Pair><key>normal</key><styleUrl>#fx{cor}n'
+            f'</styleUrl></Pair><Pair><key>highlight</key><styleUrl>#fx{cor}h'
+            f'</styleUrl></Pair></StyleMap>')
+    if comprimir:
+        extras.extend(icones_kmz().items())
 
     # ── 5. Medições manuais (iperf / trace) ──
     itens_m = []
@@ -7278,10 +7560,20 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         + f"<p><small>Gerado por rajant_monitor em "
           f"{datetime.now():%d/%m/%Y %H:%M}</small></p>]]>")
 
+    lats = sorted(a["lat"] for a in am); lons = sorted(a["lon"] for a in am)
+    olhar = ""
+    if lats:
+        ext = max(_dist_m(lats[0], lons[0], lats[-1], lons[0]),
+                  _dist_m(lats[0], lons[0], lats[0], lons[-1]), 300.0)
+        olhar = (f"<LookAt><longitude>{(lons[0] + lons[-1]) / 2:.6f}</longitude>"
+                 f"<latitude>{(lats[0] + lats[-1]) / 2:.6f}</latitude>"
+                 f"<altitude>0</altitude><heading>0</heading><tilt>0</tilt>"
+                 f"<range>{ext * 1.35:.0f}</range>"
+                 f"<altitudeMode>relativeToGround</altitudeMode></LookAt>")
     doc = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
-           f'<name>{rot_doc} — {quando:%d/%m/%Y}</name>'
-           f'<description>{desc}</description>'
+           f'<name>{rot_doc} — {quando:%d/%m/%Y}</name><open>1</open>'
+           f'{olhar}<description>{desc}</description>'
            f'{"".join(estilos)}{"".join(pastas)}</Document></kml>')
 
     # A banda entra no nome: os arquivos vão para a mesma pasta e, sem
@@ -8018,6 +8310,7 @@ def importar_meshmapper(caminho, con=None, nome=None):
     sv, amostras, peers = ler_meshmapper(caminho)
     if not amostras:
         raise RuntimeError(f"{Path(caminho).name}: nenhuma amostra com posicao")
+    amostras, peers, sv["descartadas_parado"] = descartar_parados(amostras, peers)
     sv["cobertura"] = cobertura_disponivel(amostras, peers)
     fechar = con is None
     con = con or banco()
@@ -8065,6 +8358,7 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
                             "erro": str(e), "amostras": 0})
             log.warning(f"[meshmapper] {Path(c).name}: {e}")
             continue
+        am_i, pr_i, desc_i = descartar_parados(am_i, pr_i)
         # A cobertura e por ARQUIVO: os numeros de ponto se repetem entre
         # capturas, e cruza-los ligaria o vizinho de uma ao trajeto de
         # outra.
@@ -8074,6 +8368,7 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
         amostras.extend(am_i); peers.extend(pr_i)
         origens.append({"arquivo": Path(c).name, "ok": True,
                         "movel": sv_i.get("movel"), "cobertura": cob_i,
+                        "descartadas_parado": desc_i,
                         "amostras": len(am_i), "peers": len(pr_i),
                         "inicio": sv_i.get("inicio"), "fim": sv_i.get("fim"),
                         "versao_bcc": sv_i.get("versao_bcc"),
@@ -8108,6 +8403,7 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
             "padrao": PADRAO_INFRA,
         },
         "origens": origens,
+        "descartadas_parado": sum(o.get("descartadas_parado", 0) for o in ok),
     }
 
     fechar = con is None
@@ -8435,6 +8731,69 @@ def _slug_arquivo(txt):
 # caracterizam a cobertura da area; um caminhao encostado, nao — ele tem
 # sinal otimo e vai embora no minuto seguinte.
 PADRAO_INFRA = r"^\s*(ERB|ERM)\b"
+
+
+# Parado = a menos disto da última leitura guardada do mesmo rádio E a
+# menos de VEL_PARADO_KMH. O erro do GPS de um equipamento parado passa de
+# 5 m; a velocidade separa o parado do caminhão que anda devagar, com
+# leituras a 5 m uma da outra — esse não está no mesmo ponto.
+RAIO_MESMO_PONTO_M = 10.0
+VEL_PARADO_KMH = 3.6          # 1 m/s
+
+
+def parado_no_mesmo_ponto(ultimo, lat, lon, vel_kmh, raio_m=RAIO_MESMO_PONTO_M):
+    """A leitura é do mesmo ponto da última guardada (`ultimo` = (lat, lon))?
+    Sem velocidade, decide só a distância."""
+    if ultimo is None or lat is None or lon is None:
+        return False
+    if vel_kmh is not None and vel_kmh >= VEL_PARADO_KMH:
+        return False
+    return _dist_m(ultimo[0], ultimo[1], lat, lon) < raio_m
+
+
+def descartar_parados(amostras, peers=None, raio_m=RAIO_MESMO_PONTO_M):
+    """Uma leitura por parada: tira a leitura do rádio parado a menos de
+    `raio_m` da última leitura GUARDADA dele.
+
+    Equipamento parado — carregadeira no banco, caminhão na fila, ERM no
+    poste — dava dezenas de leituras no mesmo lugar, e cada uma pesava
+    nos percentuais, nas medianas e no mapa como um trecho de estrada
+    medido. Compara-se com a última guardada, não com a anterior: o
+    parado que se arrasta 2 m por leitura não escapa, e o caminhão que
+    volta ao mesmo lugar mais tarde conta de novo.
+
+    `peers` (vizinhos ligados à amostra por `ponto`, a posição dela na
+    lista, contando de 1) sai junto: os da leitura descartada saem, e os
+    outros ganham o `ponto` novo.
+
+    Devolve (amostras, peers, n_descartadas).
+    """
+    guardadas, novo_ponto, ult, ant = [], {}, {}, {}
+    for i, a in enumerate(amostras, start=1):
+        lat, lon = a.get("lat"), a.get("lon")
+        r = a.get("radio")
+        if lat is not None and lon is not None:
+            # `vel` é km/h (gpsSpeedKph). O MeshMapper não traz: sai do
+            # deslocamento desde a leitura anterior do mesmo rádio.
+            vel = a.get("vel")
+            p = ant.get(r)
+            if vel is None and p is not None and a.get("ts") and p[2] \
+                    and a["ts"] > p[2]:
+                vel = _dist_m(p[0], p[1], lat, lon) / (a["ts"] - p[2]) * 3.6
+            ant[r] = (lat, lon, a.get("ts"))
+            if parado_no_mesmo_ponto(ult.get(r), lat, lon, vel, raio_m):
+                continue
+            ult[r] = (lat, lon)
+        guardadas.append(a)
+        novo_ponto[i] = len(guardadas)
+    if peers is None:
+        return guardadas, None, len(amostras) - len(guardadas)
+    pr = []
+    for p in peers:
+        j = novo_ponto.get(p.get("ponto"))
+        if j is not None:
+            pr.append(dict(p, ponto=j))
+    return guardadas, pr, len(amostras) - len(guardadas)
 
 
 def cobertura_disponivel(amostras, peers, padrao=None):
@@ -13205,7 +13564,7 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
             _moldura_anglo(s, 0.55, 1.45, 7.3, 5.4,
                            f"Survey_*_todas{suf}.kmz",
                            f"aba: {nome_da_aba(campo)}   ·   "
-                           f"camada: {CAMADA_DO_RASTRO}"
+                           f"camada: {CAMADA_DO_CALOR}"
                            + (f"   ·   {b}" if b else ""))
             rotulos, pcts, un = distribuicao(am_b, campo)
             if rotulos:

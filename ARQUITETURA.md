@@ -62,7 +62,7 @@ malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
 | famílias de métrica | 101 |
 | endpoints HTTP | 26 |
 | tabelas SQLite | 3 |
-| testes | 610, em 83 classes |
+| testes | 624, em 85 classes |
 | comentários | 10% das linhas |
 
 Os 10% de comentário não são enfeite: quase todos registram uma armadilha
@@ -82,7 +82,7 @@ que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 para dar errado no lugar onde ninguém pode depurar.
 
 O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 610 testes e as âncoras de seção (§26).
+segura isso são os 624 testes e as âncoras de seção (§26).
 
 ### Dependências
 
@@ -869,11 +869,11 @@ duas pontas: é ela que limita o enlace e decide se falta rádio ali.
 
 ## 12. Survey: o mapa de calor
 
-**Opcional desde que o rastro virou a fita do trajeto** (§ "Estrutura do
-arquivo" e "Uma régua só"): só sai com `kmz_com_calor = true`, e desligado
-no painel. Com amostras a 60–80 m e raio de 25 m, o calor saía em bolhas
-soltas no mapa do cliente — é um limite do método, descrito abaixo, e a
-fita não o tem. O que segue descreve o calor quando pedido.
+**Histórico.** O que segue descreve o calor antigo, de núcleo por
+amostra, que ainda desenha a pasta "Por repetidora". A camada principal
+do KMZ hoje é o **calor por faixa** (`calor_por_faixas`): cada pixel toma
+a faixa com mais trecho medido num raio de 40 m, sobre o caminho de cada
+veículo entre duas leituras — ver LEIAME_SURVEY.md, "O mapa".
 
 O calor é um **raster georreferenciado** (`GroundOverlay`). Cada amostra
 pinta um núcleo de raio limitado à sua volta; fora dele, transparente.
@@ -954,15 +954,18 @@ melhor" (rtt, perda, interferência, ruído).
 doc.kml
   ├── Estilos: l<cor> (fita, opaca, 7 px) por faixa · lcontorno · q<cor> (pontos usados)
   ├── [BreadCrumbs]        (opcional, kmz_com_equipamentos)
-  ├── Aba: RSSI            ← visível
-  │     ├── Trajeto        todos os contornos, depois todas as fitas, depois os pontos isolados
-  │     ├── ScreenOverlay "Legenda"   (files/legenda_<campo>.png)
-  │     ├── [GroundOverlay "Calor"]   (opcional, kmz_com_calor, desligado)
-  │     ├── Medições       (desligada)
-  │     └── Fora do requisito (desligada)
-  ├── Aba: SNR             ← invisível
-  ├── Aba: Ruído / Latência / Perda / Interferência
-files/legenda_<campo>.png
+  ├── Grandeza            (botão de rádio: uma aba por vez)
+  │   ├── Aba: RSSI        ← visível
+  │   │     ├── GroundOverlay "Mapa de calor"  (files/calor_<campo>.png)
+  │   │     ├── ERB/ERM    quadrados na cor da mediana
+  │   │     ├── Trajeto    (desligada) contornos, fitas, pontos isolados
+  │   │     ├── ScreenOverlay "Legenda"   (files/legenda_<campo>.png)
+  │   │     ├── Medições   (desligada, sem TimeStamp)
+  │   │     └── Fora do requisito (desligada)
+  │   ├── Aba: SNR         ← invisível
+  │   └── Aba: Ruído / Custo do caminho / …
+files/calor_<campo>.png · files/legenda_<campo>.png
+files/pt_dot.png · files/fx_square.png   (ícones: sem internet na mina)
 ```
 
 Uma aba por grandeza, **só a primeira visível**: ligadas juntas, as fitas
@@ -1211,7 +1214,6 @@ não há Grafana. Zero CDN, zero build: abre como arquivo.
 | `painel_html` | caminho do painel próprio |
 | `survey_no_semanal` | `true` volta ao deck único |
 | `identidade_anglo` | `false` mantém o visual original do template |
-| `kmz_com_calor` | `true` acrescenta o calor, desligado no painel |
 | `kmz_com_equipamentos` | `true` devolve os alfinetes dos BCs |
 | `imagens_no_ppt` | `false` = molduras vazias para colar print |
 | `zonas_grade_m` | lado da célula na agregação |

@@ -47,6 +47,27 @@ A linha de status mostra **ms/leitura** ao lado do **passo real**. Se o
 passo real ficar acima do pedido com leitura lenta, o gargalo é a rede
 até os rádios, não a ferramenta.
 
+## Leituras de equipamento parado
+
+Equipamento parado — carregadeira no banco, caminhão na fila, ERM no poste
+— dava uma leitura a cada 10 s no mesmo lugar, e cada uma pesava nos
+percentuais, nas medianas e no mapa como um trecho de estrada medido. Na
+coleta de 26/09 (13:38–13:54) eram **46% das leituras em 5,8 GHz e 56% em
+2,4 GHz**.
+
+Agora fica **uma leitura por parada**: a leitura é descartada quando o
+rádio está a menos de **10 m** da última leitura guardada dele **e** a
+menos de **3,6 km/h** (1 m/s). A velocidade separa o parado do caminhão
+que anda devagar — esse, com leituras a 5 m, não está no mesmo ponto. Sem
+velocidade (MeshMapper), ela sai do deslocamento desde a leitura anterior.
+Compara-se com a última GUARDADA, e o caminhão que volta ao mesmo lugar
+mais tarde conta de novo.
+
+Vale na coleta ao vivo (o parado também não recebe trace, que só
+ocuparia a tarefa do rádio) e nos arquivos do MeshMapper, antes do banco:
+mapa, PPT e Excel usam o mesmo conjunto. O quadro da coleta mostra quantas
+foram descartadas ("Parados"), e o fim da coleta também.
+
 ## Coleta ao vivo: o enlace de saída
 
 A lista de vizinhos do rádio mostra o custo de **um salto** até cada um;
@@ -249,34 +270,37 @@ Quanto o enlace escolhido deixou na mesa é a coluna *Δ não usado (dB)* do
 Excel. Vale conferi-la: delta grande com cobertura boa não é falta de
 rádio, é escolha de caminho, e repetidora nova não resolveria.
 
-## O mapa: trajeto contínuo, como o MeshMapper
+## O mapa: calor por faixa
 
-O rastro é uma **fita contínua** por onde o rádio passou, como o
-MeshMapper da Rajant desenha — não mais bolhas de calor. Com amostras
-espaçadas, o calor de raio fixo saía em bolhas soltas e borradas, com o
-chão da cava tingindo a cor pela transparência.
+O KMZ abre no **mapa de calor por faixa**, no estilo do KMZ de referência
+de 27/09/2026:
 
-- **Uma linha por caminho, não uma por veículo.** Na coleta com 29
-  rádios nas mesmas estradas, uma linha por veículo virava uma faixa larga
-  e salpicada: o GPS de cada caminhão erra alguns metros para um lado, e a
-  cor de um aparecia por baixo da do outro. Agora as leituras de todos se
-  juntam em grupos de 12 m ao longo da pista; a linha passa pelo meio das
-  leituras (o meio da pista) e é suavizada para tirar o zigue-zague do GPS.
-- **Cada ponto da linha vale a mediana das leituras a até 12 m dele**, de
-  todos os veículos — sempre uma leitura real, nunca média; com número par,
-  a do meio do lado pior. Um caminhão bom e um ruim no mesmo trecho não
-  alternam mais verde e vermelho.
-- **Cinza é trecho sem valor** para a grandeza — nenhuma leitura ali teve
-  aquela medida (no custo do caminho: nenhuma com trace). Está na legenda.
-- **A linha parte onde houve buraco** de medição (tempo ou salto de
-  posição), em vez de traçar uma reta por onde ninguém passou.
-- **Opaca, com contorno escuro por baixo**: a cor vista é a cor da faixa.
-- **Cada leitura, com rádio e hora**, continua na pasta *Medições*
-  (desligada): clique num ponto para ver a leitura original.
-- **A legenda vai na tela**, dentro de cada aba. O print do Google Earth
-  que vai para o slide leva junto a régua com que foi pintado.
+- **Cor = a faixa da legenda com mais trecho medido num raio de 40 m.**
+  O trecho é o caminho do veículo entre duas leituras, e cada leitura é
+  dona da metade dele até a vizinha — nenhum valor é inventado entre duas
+  leituras. Contar só as leituras deixava o mapa em contas soltas: depois
+  do descarte dos parados, um caminhão a 40 km/h fica com leituras a
+  20–100 m uma da outra. Empate vai para a faixa pior.
+- **Transparente** onde não há leitura por perto; **cinza claro** onde só
+  há leitura sem valor (no custo do caminho: sem trace). A cor é a da
+  régua, exata — só a transparência varia —, com sombra suave fora da
+  mancha para ela se separar do chão da cava.
+- **ERB/ERM ficam fora do calor** (a leitura delas é o enlace de uma torre
+  com outra) e aparecem como **quadrados** na cor da mediana das leituras
+  de cada uma; o nome aparece ao passar o mouse, e o balão diz por onde ela
+  sai.
+- **Uma grandeza por vez**: no painel, RSSI, SNR, Ruído e Custo do caminho
+  são botões de rádio — ligar uma desliga a outra.
+- **Legenda em cartão escuro na tela**, com a banda, a linha do requisito
+  entre as faixas que atendem e as que não, e o cinza.
+- **Trilha** (uma linha por caminho) e **Medições** (um ponto por leitura,
+  com balão) continuam na aba, desligadas, para consulta.
+- **Sem barra de tempo**: as leituras não levam TimeStamp — com ele, o
+  Google Earth escondia o que ficava fora do intervalo escolhido. A hora
+  está no balão.
+- **Ícones dentro do KMZ**: os do servidor do Google não abrem na mina sem
+  internet. O arquivo abre já enquadrado na área medida.
 
-O calor continua disponível, desligado: `[relatorio] kmz_com_calor = true`.
 
 ## A régua de cores: de onde vem cada valor
 

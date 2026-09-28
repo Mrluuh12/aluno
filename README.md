@@ -11,7 +11,7 @@ Prometheus. Roda em rede isolada.
 ```bash
 python3 rajant_monitor.py                      # sobe exportador + página web
 python3 rajant_monitor.py --testar-fundo       # confere o fundo dos mapas
-python3 teste_parser.py                        # 610 testes
+python3 teste_parser.py                        # 624 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
@@ -23,7 +23,7 @@ A página web fica em `http://<servidor>:<porta_relatorio>/` com quatro abas:
 |---|---|
 | `rajant_monitor.py` | tudo: coleta, métricas, relatórios, survey, página web |
 | `survey_meshmapper.py` | gerador de relatório a partir da captura do MeshMapper (não usa rede) |
-| `teste_parser.py` | 610 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 624 testes; roda sem rádio e sem a lib `rajant_api` |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, banco, invariantes |
 | `AUDITORIA_METRICAS.md` | as ~103 métricas conferidas campo a campo contra os `.proto` |
 | `SITE_SURVEY.md` | o módulo de survey: captura, análise, PPT, KML |
@@ -73,7 +73,6 @@ fundo_local  = orto.png                     # alternativa; exige fundo_bbox
 fundo_bbox   = -27.7250,-27.7400,-50.0580,-50.0760
 zonas_grade_m = 50
 imagens_no_ppt = false             # false = molduras vazias p/ colar print
-kmz_com_calor        = false       # true = também o calor, desligado
 kmz_com_equipamentos = false       # true = devolve os alfinetes dos BCs
 ```
 
@@ -182,50 +181,37 @@ como *"medi e deu tudo fora"*, que é o oposto de *"não medi"*.
 - **Ponto sem enlace** vem com tipo `N/A` e custo 2147483647 (INT_MAX).
   Vira amostra *sem sinal*, não amostra com sinal ruim.
 
-## O KMZ: o trajeto, como o MeshMapper desenha
+## O KMZ: mapa de calor por faixa
 
-O rastro é uma **fita contínua** por onde o rádio passou, colorida pela
-faixa da legenda. Era calor — um núcleo de raio fixo por amostra —, e com
-amostras a 60–80 m (o espaçamento que a coleta ao vivo produzia) o mapa
-saía em bolhas soltas e borradas, com o chão avermelhado da cava tingindo
-a cor pela transparência. O MeshMapper da Rajant desenha linha; o laudo
-passou a desenhar também.
+O KMZ abre no **mapa de calor por faixa**, no estilo do KMZ de referência
+de 27/09/2026:
 
-**Cada trecho mostra uma leitura real.** A amostra é dona do caminho até
-o ponto médio com a vizinha: a cor troca no meio entre duas leituras, e
-nenhum trecho mostra média nem cor interpolada. É a mesma regra que o
-calor usava ("vale a amostra mais próxima"), levada para a linha.
+- **Cor = a faixa da legenda com mais trecho medido num raio de 40 m.**
+  O trecho é o caminho do veículo entre duas leituras, e cada leitura é
+  dona da metade dele até a vizinha — nenhum valor é inventado entre duas
+  leituras. Contar só as leituras deixava o mapa em contas soltas: depois
+  do descarte dos parados, um caminhão a 40 km/h fica com leituras a
+  20–100 m uma da outra. Empate vai para a faixa pior.
+- **Transparente** onde não há leitura por perto; **cinza claro** onde só
+  há leitura sem valor (no custo do caminho: sem trace). A cor é a da
+  régua, exata — só a transparência varia —, com sombra suave fora da
+  mancha para ela se separar do chão da cava.
+- **ERB/ERM ficam fora do calor** (a leitura delas é o enlace de uma torre
+  com outra) e aparecem como **quadrados** na cor da mediana das leituras
+  de cada uma; o nome aparece ao passar o mouse, e o balão diz por onde ela
+  sai.
+- **Uma grandeza por vez**: no painel, RSSI, SNR, Ruído e Custo do caminho
+  são botões de rádio — ligar uma desliga a outra.
+- **Legenda em cartão escuro na tela**, com a banda, a linha do requisito
+  entre as faixas que atendem e as que não, e o cinza.
+- **Trilha** (uma linha por caminho) e **Medições** (um ponto por leitura,
+  com balão) continuam na aba, desligadas, para consulta.
+- **Sem barra de tempo**: as leituras não levam TimeStamp — com ele, o
+  Google Earth escondia o que ficava fora do intervalo escolhido. A hora
+  está no balão.
+- **Ícones dentro do KMZ**: os do servidor do Google não abrem na mina sem
+  internet. O arquivo abre já enquadrado na área medida.
 
-Isso foi decidido medindo, não por gosto. No mesmo trajeto de um arquivo
-real:
-
-| regra | % fora do requisito |
-|---|---|
-| amostras cruas (referência) | 81,1% *(estatística de tempo)* |
-| **leitura mais próxima** | **92,1%** *(estatística de área)* |
-| média ponderada | 100,0% |
-
-A média não escondia problema: ela **apagava o que era bom**. As poucas
-leituras de −45 dBm sumiam ao serem promediadas com as vizinhas ruins.
-
-**A fita parte nos buracos de medição** — tempo acima de 3× a mediana do
-próprio trajeto (piso 30 s) ou salto de posição acima de 250 m. Era a reta
-cortando a cava que tinha tirado a linha do padrão. Leitura isolada entre
-dois buracos sai como ponto: sem linha a traçar, mas é medição.
-
-**Só entra quem andou.** Rádio parado dá dezenas de amostras no mesmo
-ponto: vira um rabisco de GPS verde, porque BC fixo enxerga o vizinho de
-perto.
-
-**Opaca, com contorno escuro por baixo.** Todos os contornos vão antes de
-todas as cores: com um contorno por veículo intercalado, o de um cobria a
-cor do outro no cruzamento de pistas.
-
-**A legenda vai na tela**, em cada aba, gerada das mesmas faixas que
-pintam a linha, com a fonte da régua no rodapé. O print colado no slide
-leva a própria régua.
-
-O calor continua disponível, desligado: `kmz_com_calor = true`.
 
 ### A régua de cores
 
@@ -472,7 +458,7 @@ python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print(m.Bread
 > 3.11 e anteriores ainda têm a função. O shim é o que faz as duas versões
 > novas funcionarem.
 >
-> Verificado com o programa inteiro em Python 3.13: 610 testes, geração de PPT
+> Verificado com o programa inteiro em Python 3.13: 624 testes, geração de PPT
 > e build do PyInstaller, tudo passando.
 
 O shim reproduz o comportamento antigo, inclusive **sem validação de

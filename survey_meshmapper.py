@@ -140,6 +140,9 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
 
     aviso(f"  equipamento(s) ..... {sv.get('movel')}")
     aviso(f"  amostras ........... {len(amostras)}")
+    if sv.get("descartadas_parado"):
+        aviso(f"  parado, descartadas  {sv['descartadas_parado']} "
+              f"(uma leitura por parada)")
     aviso(f"  vizinhos lidos ..... {len(peers)}")
     aviso(f"  duração ............ {dur:.1f} min")
     aviso(f"  intervalo real ..... {rm._mm_intervalo_real(amostras)} s")

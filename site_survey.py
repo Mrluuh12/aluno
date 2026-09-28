@@ -127,6 +127,12 @@ def verificar():
         problemas.append("tkinter")
 
     try:
+        import sv_ttk  # noqa: F401
+        print("  ok      tema da janela (sv_ttk)")
+    except Exception:
+        print("  aviso   sv_ttk ausente: a janela abre com o tema de reserva")
+
+    try:
         import rajant_monitor as _rm
         print("  ok      rajant-api presente" if _rm.Breadcrumb is not None
               else "  aviso   rajant-api ausente: a aba Coleta não funciona, "
@@ -173,65 +179,70 @@ def main():
 
     AZUL   = "#" + rm.ANGLO["azul"]
     AZUL2  = "#" + rm.ANGLO["azul2"]
-    FUNDO  = "#" + rm.ANGLO["fundo"]
-    CARTAO = "#" + rm.ANGLO["cartao"]
-    TEXTO  = "#" + rm.ANGLO["texto"]
-    SUAVE  = "#" + rm.ANGLO["suave"]
-    LINHA  = "#" + rm.ANGLO["linha"]
+    SUAVE  = "#6B7280"
+    VERM   = "#C0392B"
 
     cfg = rm.carregar_config()
     jan = tk.Tk()
     jan.title(TITULO)
-    # Altura fixa de 820 px numa tela de 768 joga o rodapé — com os
-    # botões de Iniciar e Parar — para fora do monitor, e o programa fica
-    # sem como ser usado. A janela nasce cabendo na tela, com margem para
-    # a barra de tarefas.
-    # Largura até 1600: com a escala do Windows em 125–150%, as letras
-    # crescem e 1200 px cortava os botões da direita.
+    # A janela nasce cabendo na tela (768 px de altura, com a barra de
+    # tarefas). Largura até 1600: com a escala do Windows em 125–150%, as
+    # letras crescem e 1200 px cortava os botões da direita.
     larg = max(900, min(1600, jan.winfo_screenwidth() - 80))
     alt = max(600, min(860, jan.winfo_screenheight() - 90))
     jan.geometry(f"{larg}x{alt}")
     jan.minsize(900, 560)
-    # No Windows, maximizada: numa tela de 768 px são ~50 px a mais, e é a
-    # lista de equipamentos que fica com eles.
     if sys.platform.startswith("win"):
         try:
             jan.state("zoomed")
         except Exception:
             pass
-    jan.configure(bg=FUNDO)
     fila = queue.Queue()
     est = {"coleta": None, "achados": {}, "arquivos": [], "lista": {}}
 
+    # ── tema ──
+    # Sun Valley: os mesmos controles do ttk com a cara do Windows 11. Sem
+    # ele (exe antigo, pacote faltando), o "clam" com as cores da Anglo —
+    # a janela abre do mesmo jeito.
     st = ttk.Style()
-    try: st.theme_use("clam")
-    except Exception: pass
-    st.configure("TFrame", background=FUNDO)
-    st.configure("TNotebook", background=FUNDO, borderwidth=0)
-    st.configure("TNotebook.Tab", padding=(18, 6), font=("Segoe UI", 10))
-    st.map("TNotebook.Tab", background=[("selected", FUNDO)],
-           foreground=[("selected", AZUL)])
-    st.configure("TLabel", background=FUNDO, foreground=TEXTO,
-                 font=("Segoe UI", 10))
-    st.configure("Sec.TLabel", font=("Segoe UI", 10, "bold"))
+    try:
+        import sv_ttk
+        sv_ttk.set_theme("light")
+        FUNDO = st.lookup("TFrame", "background") or "#FAFAFA"
+        CARTAO = "#FFFFFF"
+    except Exception:
+        FUNDO, CARTAO = "#F3F4F6", "#FFFFFF"
+        try: st.theme_use("clam")
+        except Exception: pass
+        # Fundo branco nos controles: os cartões são brancos e um bloco
+        # cinza dentro deles parecia outra caixa.
+        st.configure(".", background=CARTAO, font=("Segoe UI", 10))
+        st.configure("Card.TFrame", background=CARTAO, relief="solid",
+                     borderwidth=1)
+        st.configure("Accent.TButton", background=AZUL, foreground="white",
+                     font=("Segoe UI", 10, "bold"), padding=(16, 7),
+                     borderwidth=0)
+        st.map("Accent.TButton", background=[("active", AZUL2),
+                                             ("disabled", "#9AA6C4")])
+        st.configure("TButton", padding=(12, 5))
+        st.configure("Treeview", rowheight=24, fieldbackground=CARTAO,
+                     background=CARTAO)
+        st.configure("TNotebook.Tab", padding=(18, 6))
+    st.configure("Titulo.TLabel", font=("Segoe UI", 11, "bold"))
     st.configure("Fraco.TLabel", foreground=SUAVE, font=("Segoe UI", 9))
-    st.configure("TCheckbutton", background=FUNDO, foreground=TEXTO)
-    st.configure("Azul.TButton", background=AZUL, foreground="white",
-                 font=("Segoe UI", 10, "bold"), padding=(16, 9), borderwidth=0)
-    st.map("Azul.TButton", background=[("active", AZUL2),
-                                       ("disabled", "#9AA6C4")])
-    st.configure("TButton", padding=(12, 7))
-    st.configure("Peq.TButton", padding=(8, 2))
-    st.configure("Tr.Treeview", rowheight=21, fieldbackground=CARTAO,
-                 background=CARTAO, foreground=TEXTO)
-    st.configure("Tr.Treeview.Heading", font=("Segoe UI", 9, "bold"))
+    st.configure("Metrica.TLabel", font=("Segoe UI", 12, "bold"))
+    st.configure("Rotulo.TLabel", foreground=SUAVE, font=("Segoe UI", 8))
+    jan.configure(bg=FUNDO)
 
-    topo = tk.Frame(jan, bg=AZUL, height=44)
+    topo = tk.Frame(jan, bg=AZUL, height=42)
     topo.pack(fill="x"); topo.pack_propagate(False)
     tk.Label(topo, text="Site Survey", bg=AZUL, fg="white",
-             font=("Segoe UI", 15, "bold")).pack(side="left", padx=20)
-    tk.Label(topo, text="Rajant", bg=AZUL, fg="#C7D2F0",
-             font=("Segoe UI", 10)).pack(side="left", pady=(6, 0))
+             font=("Segoe UI", 14, "bold")).pack(side="left", padx=(18, 8))
+    tk.Label(topo, text="Rajant · Anglo American", bg=AZUL, fg="#C7D2F0",
+             font=("Segoe UI", 9)).pack(side="left", pady=(4, 0))
+
+    def cartao(pai, **kw):
+        return ttk.Frame(pai, style="Card.TFrame", padding=(12, 8), **kw)
 
     # ORDEM DE EMPACOTAMENTO, e não é detalhe: o `pack` serve quem chega
     # primeiro. Um Notebook com expand=True empacotado antes do rodapé
@@ -239,11 +250,11 @@ def main():
     # os botões de Iniciar e Parar saíram da tela. Rodapé e registro são
     # reservados AGORA, presos ao fundo; o Notebook fica com a sobra.
     nb = ttk.Notebook(jan)
-    ab_col = ttk.Frame(nb, padding=12); nb.add(ab_col, text="Coleta")
-    ab_arq = ttk.Frame(nb, padding=12); nb.add(ab_arq, text="Arquivos do MeshMapper")
+    ab_col = ttk.Frame(nb, padding=(10, 8)); nb.add(ab_col, text="Coleta")
+    ab_arq = ttk.Frame(nb, padding=(10, 8)); nb.add(ab_arq, text="Arquivos do MeshMapper")
 
     # ═══════════ comum às duas abas: destino e o que gerar ═══════════
-    rod = ttk.Frame(jan, padding=(14, 0, 14, 8))
+    rod = ttk.Frame(jan, padding=(14, 2, 14, 8))
     rod.pack(side="bottom", fill="x")
     ttk.Label(rod, text="Salvar em").pack(side="left")
     v_saida = tk.StringVar(value=str(Path.home() / "Documents"))
@@ -252,80 +263,99 @@ def main():
     def escolher_pasta():
         d = filedialog.askdirectory(title="Onde salvar")
         if d: v_saida.set(d)
-    ttk.Button(rod, text="Procurar...", command=escolher_pasta).pack(side="left")
+    ttk.Button(rod, text="Procurar…", command=escolher_pasta).pack(side="left")
     v_kmz = tk.BooleanVar(value=True)
     v_ppt = tk.BooleanVar(value=True)
     v_xls = tk.BooleanVar(value=True)
-    for txt, var in (("KMZ", v_kmz), ("PPT", v_ppt), ("Excel", v_xls)):
-        ttk.Checkbutton(rod, text=txt, variable=var).pack(side="left", padx=(14, 0))
+    for txt_, var in (("KMZ", v_kmz), ("PPT", v_ppt), ("Excel", v_xls)):
+        ttk.Checkbutton(rod, text=txt_, variable=var).pack(side="left", padx=(14, 0))
 
     # ═══════════════════════ ABA COLETA ══════════════════════════
     if rm.Breadcrumb is None:
-        # Sem a rajant-api a coleta não roda, mas a aba de arquivos sim.
-        # Dizer isso aqui evita o usuário marcar equipamento e descobrir
-        # o problema depois de esperar a descoberta.
-        ttk.Label(ab_col, style="Sec.TLabel",
-                  text="A biblioteca rajant-api não está instalada nesta "
-                       "máquina.").pack(anchor="w", pady=(40, 6))
-        ttk.Label(ab_col, style="Fraco.TLabel",
-                  text="A coleta ao vivo precisa dela e de rede até a malha. "
-                       "A aba de arquivos funciona sem.").pack(anchor="w")
+        ttk.Label(ab_col, style="Titulo.TLabel",
+                  text="rajant-api não instalada — coleta indisponível"
+                  ).pack(anchor="w", pady=(40, 6))
         ttk.Label(ab_col, style="Fraco.TLabel", text=(
-            "    pip install rajant-api --no-deps\n"
-            "    pip install \"protobuf==4.23.4\"")).pack(anchor="w", pady=10)
+            "pip install rajant-api --no-deps\n"
+            "pip install \"protobuf==4.23.4\"")).pack(anchor="w")
     else:
-        ttk.Label(ab_col, text="1. Rede", style="Sec.TLabel").pack(anchor="w")
-        # Em cada linha, os botões são empacotados ANTES dos campos e das
-        # dicas: se faltar largura (escala do Windows alta), quem encolhe é
-        # a dica, não o botão.
-        lr = ttk.Frame(ab_col); lr.pack(fill="x", pady=(4, 8))
-        b_desc = ttk.Button(lr, text="Procurar equipamentos", style="Azul.TButton")
+        # ── Rede ──
+        # Em cada linha, os botões são empacotados ANTES dos campos: se
+        # faltar largura (escala do Windows alta), quem encolhe é o campo,
+        # não o botão.
+        lr = cartao(ab_col); lr.pack(fill="x", pady=(0, 8))
+        b_desc = ttk.Button(lr, text="Procurar equipamentos", style="Accent.TButton")
         b_desc.pack(side="right")
+        ttk.Label(lr, text="Rede", style="Titulo.TLabel").pack(side="left", padx=(0, 14))
         ttk.Label(lr, text="Seeds").pack(side="left")
         v_seeds = tk.StringVar(value=cfg.get("rede", "seeds",
                                              fallback="10.188.96.140"))
-        ttk.Entry(lr, textvariable=v_seeds, width=30).pack(side="left", padx=(6, 12))
+        ttk.Entry(lr, textvariable=v_seeds, width=26).pack(side="left", padx=(6, 12))
         ttk.Label(lr, text="Usuário").pack(side="left")
         v_role = tk.StringVar(value=rm.papel_bcapi(
             cfg.get("rede", "role", fallback="CO")))
-        ttk.Entry(lr, textvariable=v_role, width=8).pack(side="left", padx=(6, 12))
+        ttk.Entry(lr, textvariable=v_role, width=7).pack(side="left", padx=(6, 12))
         ttk.Label(lr, text="Senha").pack(side="left")
         v_senha = tk.StringVar(value=cfg.get("rede", "password", fallback=""))
-        ttk.Entry(lr, textvariable=v_senha, width=15,
+        ttk.Entry(lr, textvariable=v_senha, width=16,
                   show="•").pack(side="left", padx=(6, 12))
         ttk.Label(lr, text="Porta").pack(side="left")
         v_porta = tk.StringVar(value=cfg.get("rede", "port", fallback="2300"))
-        ttk.Entry(lr, textvariable=v_porta, width=7).pack(side="left", padx=(6, 12))
+        ttk.Entry(lr, textvariable=v_porta, width=6).pack(side="left", padx=(6, 12))
 
-        # Título, contador e botões de marcar numa linha só. Numa tela de
-        # 768 px cada linha fixa a mais é uma linha a menos da lista de
-        # equipamentos — na v16 ela sumiu por inteiro, e o rádio que não se
-        # vê não se marca.
-        l2 = ttk.Frame(ab_col); l2.pack(fill="x", pady=(2, 0))
+        # ── Coleta (reservada ANTES da lista: ela cresce, isto não some) ──
+        baixo = cartao(ab_col)
+        baixo.pack(side="bottom", fill="x", pady=(8, 0))
+        l3 = ttk.Frame(baixo); l3.pack(fill="x")
+        b_par = ttk.Button(l3, text="Parar e gerar", state="disabled")
+        b_par.pack(side="right")
+        b_ini = ttk.Button(l3, text="Iniciar coleta", style="Accent.TButton")
+        b_ini.pack(side="right", padx=8)
+        lc = ttk.Frame(l3); lc.pack(side="left", fill="x", expand=True)
+        ttk.Label(lc, text="Coleta", style="Titulo.TLabel").pack(side="left", padx=(0, 14))
+        ttk.Label(lc, text="Passo (m)").pack(side="left")
+        v_passo = tk.StringVar(value=str(int(col.PASSO_M_PADRAO)))
+        ttk.Entry(lc, textvariable=v_passo, width=5).pack(side="left", padx=(6, 12))
+        ttk.Label(lc, text="Duração").pack(side="left")
+        v_min = tk.StringVar(value="Sem limite")
+        ttk.Combobox(lc, textvariable=v_min, width=10,
+                     values=("Sem limite", "15 min", "30 min", "60 min",
+                             "120 min")).pack(side="left", padx=(6, 12))
+        v_trace = tk.BooleanVar(value=True)
+        ttk.Checkbutton(lc, text="Trace", variable=v_trace).pack(side="left")
+        v_dest = tk.StringVar(value=rm.DESTINO_TRACE_PADRAO)
+        ttk.Entry(lc, textvariable=v_dest, width=13).pack(side="left", padx=(4, 6))
+        b_tt = ttk.Button(lc, text="Testar trace")
+        b_tt.pack(side="left")
+
+        # Métricas da coleta em blocos, um número por bloco.
+        lm = ttk.Frame(baixo); lm.pack(fill="x", pady=(8, 0))
+        metricas = {}
+        for chave, rot in (("tempo", "Tempo"), ("amostras", "Amostras"),
+                           ("equip", "Equipamentos"), ("ritmo", "Leituras/s"),
+                           ("passo", "Passo real"), ("parados", "Parados"),
+                           ("falhas", "Falhas"), ("trace", "Trace")):
+            f = ttk.Frame(lm); f.pack(side="left", padx=(0, 22))
+            ttk.Label(f, text=rot, style="Rotulo.TLabel").pack(anchor="w")
+            v = tk.StringVar(value="—")
+            ttk.Label(f, textvariable=v, style="Metrica.TLabel").pack(anchor="w")
+            metricas[chave] = v
+
+        # ── Equipamentos ──
+        qd_c = cartao(ab_col)
+        l2 = ttk.Frame(qd_c); l2.pack(fill="x", pady=(0, 6))
         lb = ttk.Frame(l2); lb.pack(side="right")
-        ttk.Label(l2, text="2. Equipamentos",
-                  style="Sec.TLabel").pack(side="left")
-        lbl_sel = ttk.Label(l2, style="Fraco.TLabel", text=(
-            f"parte dos seeds e dos {len(rm.REDE_CONHECIDA)} rádios "
-            f"conhecidos, e segue os vizinhos"))
+        ttk.Label(l2, text="Equipamentos", style="Titulo.TLabel").pack(side="left")
+        lbl_sel = ttk.Label(l2, style="Fraco.TLabel", text="")
         lbl_sel.pack(side="left", padx=(10, 0))
-
-        # Mesma regra de dentro da aba: tudo que fica ABAIXO da lista é
-        # reservado antes dela. A lista cresce com a janela; os botões
-        # não podem encolher até sumir por causa disso.
-        baixo = ttk.Frame(ab_col)
-        baixo.pack(side="bottom", fill="x")
-
-        qd = ttk.Frame(ab_col); qd.pack(fill="both", expand=True, pady=(4, 4))
-        # height=8, não 12: com a janela cabendo em 768 px, uma lista alta
-        # demais empurra o resto. Ela cresce sozinha quando há espaço.
+        qd = ttk.Frame(qd_c)
         cols = ("sel", "nome", "ip", "gps", "vizinhos", "obs")
-        arv = ttk.Treeview(qd, columns=cols, show="headings", height=8,
-                           style="Tr.Treeview", selectmode="extended")
-        for c, t, w, an in (("sel", "", 34, "center"),
+        arv = ttk.Treeview(qd, columns=cols, show="headings", height=6,
+                           selectmode="extended")
+        for c, t, w, an in (("sel", "", 36, "center"),
                             ("nome", "Equipamento", 230, "w"),
                             ("ip", "IP", 130, "w"), ("gps", "GPS", 60, "center"),
-                            ("vizinhos", "Vizinhos", 75, "center"),
+                            ("vizinhos", "Vizinhos", 80, "center"),
                             ("obs", "Observação", 320, "w")):
             arv.heading(c, text=t); arv.column(c, width=w, anchor=an)
         rol = ttk.Scrollbar(qd, orient="vertical", command=arv.yview)
@@ -333,7 +363,9 @@ def main():
         arv.pack(side="left", fill="both", expand=True)
         rol.pack(side="right", fill="y")
         arv.tag_configure("semgps", foreground=SUAVE)
-        arv.tag_configure("erro", foreground="#C0392B")
+        arv.tag_configure("erro", foreground=VERM)
+        qd.pack(fill="both", expand=True)
+        qd_c.pack(fill="both", expand=True)
 
         marcados = set()
 
@@ -341,8 +373,8 @@ def main():
             com = sum(1 for ip in marcados
                       if est["achados"].get(ip, {}).get("tem_gps"))
             lbl_sel.configure(
-                text=f"{len(marcados)} marcado(s) de {len(est['achados'])}  ·  "
-                     f"{com} com GPS — só esses entram no mapa")
+                text=f"{len(marcados)} de {len(est['achados'])} marcados  ·  "
+                     f"{com} com GPS")
 
         def _pinta(ip):
             if arv.exists(ip):
@@ -373,68 +405,38 @@ def main():
             for ip in est["achados"]: _pinta(ip)
             _conta()
 
-        for txt, q in (("Marcar todos", "todos"), ("Só com GPS", "gps"),
-                       ("Só veículos", "moveis"), ("Desmarcar", "nenhum")):
-            ttk.Button(lb, text=txt, style="Peq.TButton",
+        for txt_, q in (("Todos", "todos"), ("Com GPS", "gps"),
+                        ("Veículos", "moveis"), ("Nenhum", "nenhum")):
+            ttk.Button(lb, text=txt_,
                        command=lambda q=q: marcar(q)).pack(side="left", padx=(6, 0))
 
-        # 3. Coleta: o título divide a linha com os botões de Iniciar e
-        # Parar; passo e trace ficam na linha de baixo.
-        l3 = ttk.Frame(baixo); l3.pack(fill="x", pady=(2, 0))
-        b_par = ttk.Button(l3, text="Parar e gerar relatórios", state="disabled")
-        b_par.pack(side="right")
-        b_ini = ttk.Button(l3, text="Iniciar coleta", style="Azul.TButton")
-        b_ini.pack(side="right", padx=8)
-        ttk.Label(l3, text="3. Coleta", style="Sec.TLabel").pack(side="left")
-        lc = ttk.Frame(baixo); lc.pack(fill="x", pady=(2, 4))
-        # Na MESMA linha do passo, à direita: uma linha própria custava à
-        # lista de equipamentos as linhas que ela não tinha para dar.
-        lt = ttk.Frame(lc); lt.pack(side="right")
-        v_trace = tk.BooleanVar(value=True)
-        ttk.Checkbutton(lt, text="Trace até",
-                        variable=v_trace).pack(side="left")
-        v_dest = tk.StringVar(value=rm.DESTINO_TRACE_PADRAO)
-        ttk.Entry(lt, textvariable=v_dest, width=14).pack(side="left", padx=6)
-        b_tt = ttk.Button(lt, text="Testar no selecionado", style="Peq.TButton")
-        b_tt.pack(side="left", padx=(6, 0))
-        ttk.Label(lc, text="Uma amostra a cada").pack(side="left")
-        v_passo = tk.StringVar(value=str(int(col.PASSO_M_PADRAO)))
-        ttk.Entry(lc, textvariable=v_passo, width=6).pack(side="left", padx=6)
-        ttk.Label(lc, text="metros").pack(side="left", padx=(0, 18))
-        ttk.Label(lc, text="Parar após").pack(side="left")
-        v_min = tk.StringVar(value="0")
-        ttk.Entry(lc, textvariable=v_min, width=6).pack(side="left", padx=6)
-        ttk.Label(lc, text="min (0 = até parar)",
-                  style="Fraco.TLabel").pack(side="left", padx=(0, 18))
-
-        pn = tk.Frame(baixo, bg=CARTAO, highlightbackground=LINHA,
-                      highlightthickness=1)
-        pn.pack(fill="x", pady=(0, 0))
-        v_stat = tk.StringVar(value="parado")
-        tk.Label(pn, textvariable=v_stat, bg=CARTAO, fg=TEXTO, anchor="w",
-                 font=("Consolas", 10)).pack(fill="x", padx=10, pady=4)
-
     # ══════════════════════ ABA ARQUIVOS ═════════════════════════
-    ttk.Label(ab_arq, text="1. Arquivos da captura",
-              style="Sec.TLabel").pack(anchor="w")
-    ttk.Label(ab_arq, text=".kmz, data.json ou os .csv",
-              style="Fraco.TLabel").pack(anchor="w")
-    qa = ttk.Frame(ab_arq); qa.pack(fill="both", expand=True, pady=(4, 6))
-    lst = tk.Listbox(qa, height=14, bg=CARTAO, fg=TEXTO, relief="flat",
-                     highlightbackground=LINHA, highlightthickness=1,
-                     selectmode="extended", font=("Consolas", 9))
+    ca = cartao(ab_arq)
+    la = ttk.Frame(ca); la.pack(side="bottom", fill="x", pady=(8, 0))
+    b_ger = ttk.Button(la, text="Gerar relatórios", style="Accent.TButton")
+    b_ger.pack(side="right")
+    v_juntar = tk.BooleanVar(value=True)
+    ttk.Checkbutton(la, text="Relatório único",
+                    variable=v_juntar).pack(side="right", padx=12)
+    la_h = ttk.Frame(ca); la_h.pack(fill="x", pady=(0, 6))
+    ttk.Label(la_h, text="Arquivos", style="Titulo.TLabel").pack(side="left")
+    lbl_arq = ttk.Label(la_h, text="", style="Fraco.TLabel")
+    lbl_arq.pack(side="left", padx=(10, 0))
+    qa = ttk.Frame(ca); qa.pack(fill="both", expand=True)
+    lst = tk.Listbox(qa, height=12, bg=CARTAO, relief="flat",
+                     highlightthickness=1, highlightbackground="#D6DAE3",
+                     selectmode="extended", font=("Consolas", 9),
+                     activestyle="none", selectbackground=AZUL)
     rl2 = ttk.Scrollbar(qa, orient="vertical", command=lst.yview)
     lst.configure(yscrollcommand=rl2.set)
     lst.pack(side="left", fill="both", expand=True); rl2.pack(side="right", fill="y")
-
-    lbl_arq = ttk.Label(ab_arq, text="nenhum arquivo", style="Fraco.TLabel")
+    ca.pack(fill="both", expand=True)
 
     def _lista():
         lst.delete(0, "end")
         for a in est["arquivos"]: lst.insert("end", a)
         n = len(est["arquivos"])
-        lbl_arq.configure(text="nenhum arquivo" if not n
-                          else f"{n} arquivo(s)")
+        lbl_arq.configure(text=f"{n} arquivo(s)" if n else "")
 
     def escolher():
         novos = filedialog.askopenfilenames(title="Capturas do MeshMapper",
@@ -448,29 +450,17 @@ def main():
             del est["arquivos"][i]
         _lista()
 
-    la = ttk.Frame(ab_arq); la.pack(fill="x")
-    ttk.Button(la, text="Escolher arquivos...", style="Azul.TButton",
-               command=escolher).pack(side="left")
-    ttk.Button(la, text="Remover selecionado",
-               command=remover).pack(side="left", padx=6)
-    ttk.Button(la, text="Limpar",
-               command=lambda: (est["arquivos"].clear(), _lista())).pack(side="left")
-    lbl_arq.pack(side="right")
-
-    v_juntar = tk.BooleanVar(value=True)
-    ttk.Checkbutton(ab_arq, text="Juntar tudo num relatório só",
-                    variable=v_juntar).pack(anchor="w", pady=(8, 0))
-    b_ger = ttk.Button(ab_arq, text="Gerar relatórios", style="Azul.TButton")
-    b_ger.pack(anchor="w", pady=(10, 0))
+    for txt_, cmd in (("Adicionar arquivos…", escolher), ("Remover", remover),
+                      ("Limpar", lambda: (est["arquivos"].clear(), _lista()))):
+        ttk.Button(la, text=txt_, command=cmd).pack(side="left", padx=(0, 6))
 
     # ═══════════════════════ andamento ═══════════════════════════
-    # Altura menor e sem expand: numa tela de 768 px o registro roubava o
-    # espaço da lista de equipamentos, que é onde se trabalha.
-    txt = tk.Text(jan, height=4, bg=CARTAO, fg=TEXTO, relief="flat",
-                  font=("Consolas", 9), wrap="word")
-    txt.pack(side="bottom", fill="x", expand=False, padx=14, pady=(2, 6))
+    txt = tk.Text(jan, height=4, bg=CARTAO, relief="flat", font=("Consolas", 9),
+                  wrap="word", highlightthickness=1,
+                  highlightbackground="#D6DAE3", padx=8, pady=4)
+    txt.pack(side="bottom", fill="x", expand=False, padx=14, pady=(2, 4))
     # Só agora, com o fundo já reservado: o Notebook fica com a sobra.
-    nb.pack(fill="both", expand=True, padx=12, pady=(6, 2))
+    nb.pack(fill="both", expand=True, padx=12, pady=(8, 2))
 
     def escreve(t):
         txt.insert("end", str(t) + "\n"); txt.see("end")
@@ -480,7 +470,7 @@ def main():
         if not est["arquivos"]:
             messagebox.showwarning(TITULO, "Escolha ao menos um arquivo.")
             return
-        b_ger.configure(state="disabled", text="Gerando...")
+        b_ger.configure(state="disabled", text="Gerando…")
         txt.delete("1.0", "end")
         arqs = list(est["arquivos"]); juntar = v_juntar.get()
         alvo = v_saida.get()
@@ -501,7 +491,7 @@ def main():
 
     if rm.Breadcrumb is not None:
         def descobrir():
-            b_desc.configure(state="disabled", text="Procurando...")
+            b_desc.configure(state="disabled", text="Procurando…")
             txt.delete("1.0", "end")
             seeds = [s.strip() for s in
                      v_seeds.get().replace(";", ",").split(",") if s.strip()]
@@ -527,6 +517,11 @@ def main():
                     fila.put(("achados", {}))
             threading.Thread(target=trab, daemon=True).start()
 
+        def _minutos():
+            import re as _re
+            m = _re.search(r"\d+([.,]\d+)?", v_min.get() or "")
+            return float(m.group(0).replace(",", ".")) if m else 0.0
+
         def iniciar():
             alvos = {ip: est["achados"][ip]["nome"] for ip in marcados}
             if not alvos:
@@ -536,13 +531,9 @@ def main():
                 passo = float(v_passo.get().replace(",", "."))
                 if passo <= 0: raise ValueError
             except ValueError:
-                messagebox.showwarning(
-                    TITULO, "Metros deve ser um número maior que zero.")
+                messagebox.showwarning(TITULO, "Passo: um número maior que zero.")
                 return
-            try:
-                minutos = float(v_min.get().replace(",", ".") or 0)
-            except ValueError:
-                minutos = 0.0
+            minutos = _minutos()
             c = col.Coleta(alvos, role=v_role.get(), senha=v_senha.get(),
                            porta=int(v_porta.get() or 2300), passo_m=passo,
                            aviso=lambda t: fila.put(("log", t)),
@@ -559,7 +550,7 @@ def main():
             def trab():
                 try:
                     c.rodar(minutos)
-                    fila.put(("log", "gerando relatórios..."))
+                    fila.put(("log", "gerando relatórios…"))
                     feitos = col.gravar_e_gerar(
                         c, alvo, fazer_kmz=kmz, fazer_ppt=ppt, fazer_excel=xls,
                         aviso=lambda t: fila.put(("log", t)))
@@ -573,17 +564,16 @@ def main():
         def parar():
             c = est.get("coleta")
             if c:
-                b_par.configure(state="disabled", text="Gerando...")
+                b_par.configure(state="disabled", text="Gerando…")
                 c.parar()
 
         def testar_trace():
             sel = [i for i in arv.selection() if i in est["achados"]]
             if not sel:
-                messagebox.showwarning(
-                    TITULO, "Selecione um rádio na lista (clique no nome).")
+                messagebox.showwarning(TITULO, "Selecione um rádio na lista.")
                 return
             ip = sel[0]
-            b_tt.configure(state="disabled", text="Testando...")
+            b_tt.configure(state="disabled", text="Testando…")
             role, senha = v_role.get(), v_senha.get()
             porta = int(v_porta.get() or 2300)
             dest, pasta = v_dest.get().strip(), v_saida.get()
@@ -612,15 +602,13 @@ def main():
                 if tipo == "log":
                     escreve(val)
                 elif tipo == "teste_fim":
-                    b_tt.configure(state="normal", text="Testar no selecionado")
+                    b_tt.configure(state="normal", text="Testar trace")
                 elif tipo == "achados":
                     est["achados"] = val
                     for i in arv.get_children(): arv.delete(i)
                     resp = sum(1 for v in val.values() if not v.get("erro"))
                     escreve(f"{resp} de {len(val)} responderam")
-                    # Quem respondeu primeiro, e dentro disso por nome:
-                    # com 156 endereços de partida, a lista abre cheia de
-                    # rádio fora do ar e o que interessa fica embaixo.
+                    # Quem respondeu primeiro, e dentro disso por nome.
                     for ip, v in sorted(
                             val.items(),
                             key=lambda kv: (bool(kv[1].get("erro")),
@@ -629,8 +617,7 @@ def main():
                         if v.get("erro"):
                             tag, gps, obs = "erro", "—", v["erro"][:70]
                         elif not v.get("tem_gps"):
-                            tag, gps = "semgps", "não"
-                            obs = "sem posição: entra no censo, não no mapa"
+                            tag, gps, obs = "semgps", "não", "sem GPS"
                         else:
                             tag, gps, obs = "", "sim", ""
                         arv.insert("", "end", iid=ip, tags=(tag,),
@@ -644,8 +631,7 @@ def main():
                         b_ger.configure(state="normal", text="Gerar relatórios")
                     else:
                         b_ini.configure(state="normal")
-                        b_par.configure(state="disabled",
-                                        text="Parar e gerar relatórios")
+                        b_par.configure(state="disabled", text="Parar e gerar")
                         b_desc.configure(state="normal")
                         est["coleta"] = None
                     if val:
@@ -657,26 +643,25 @@ def main():
         c = est.get("coleta")
         if c and c.inicio:
             s = c.status()
-            passo = f"{s['passo_m']:g} m" if s["passo_m"] else "—"
-            lei = (f"{s['leitura_ms']} ms/leitura"
-                   if s.get("leitura_ms") is not None else "")
             if s.get("trace_parado"):
-                tr = "   trace desligado"
+                tr = "desligado"
             elif s.get("trace_ok") or s.get("trace_sem") or s.get("trace_ocupado"):
-                tr = (f"   trace {s['trace_ok']} ok"
-                      + (f" · {s['trace_ocupado']} ocupado"
-                         if s.get("trace_ocupado") else "")
-                      + (f" · {s['trace_sem']} rádio(s) sem"
-                         if s.get("trace_sem") else ""))
+                tr = (f"{s['trace_ok']} ok"
+                      + (f" · {s['trace_ocupado']} ocup." if s.get("trace_ocupado") else "")
+                      + (f" · {s['trace_sem']} sem" if s.get("trace_sem") else ""))
             else:
-                tr = ""
-            v_stat.set(
-                f"{int(s['duracao_s'])//60:02d}:{int(s['duracao_s'])%60:02d}"
-                f"   {s['amostras']} amostras   {s['equipamentos']} equipamentos"
-                f"   {s['leituras_s']:.1f} leituras/s   {lei}"
-                f"   passo real {passo}"
-                f"   {s['repetidos']} posições repetidas   {s['falhas']} falhas"
-                f"{tr}")
+                tr = "—"
+            d = int(s["duracao_s"])
+            for chave, valor in (
+                    ("tempo", f"{d // 60:02d}:{d % 60:02d}"),
+                    ("amostras", f"{s['amostras']}"),
+                    ("equip", f"{s['equipamentos']}"),
+                    ("ritmo", f"{s['leituras_s']:.1f}"),
+                    ("passo", f"{s['passo_m']:g} m" if s["passo_m"] else "—"),
+                    ("parados", f"{s.get('parados', 0)}"),
+                    ("falhas", f"{s['falhas']}"),
+                    ("trace", tr)):
+                metricas[chave].set(valor)
         jan.after(300, bombear)
 
     _lista()
