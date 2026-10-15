@@ -53,7 +53,7 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "IPs no cache",
+      "title": "IPs monitorados",
       "gridPos": {
         "x": 0,
         "y": 1,
@@ -64,7 +64,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Cache em disco de IPs descobertos.",
+      "description": "A lista da frota no código mais os achados pela descoberta. (O nome rajant_cache_total ficou da época do cache em disco.)",
       "targets": [
         {
           "datasource": {
@@ -73,7 +73,7 @@
           },
           "editorMode": "code",
           "expr": "rajant_cache_total",
-          "legendFormat": "cache",
+          "legendFormat": "monitorados",
           "range": true,
           "instant": false,
           "refId": "A",
@@ -261,7 +261,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Fração do cache que respondeu no último ciclo.",
+      "description": "Fração dos IPs monitorados que respondeu no último ciclo.",
       "targets": [
         {
           "datasource": {
@@ -1588,7 +1588,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Seed inacessível impede a redescoberta — a frota continua sendo coletada pelo cache em disco, mas BCs novos não entram.",
+      "description": "Seed inacessível não para a coleta: a lista da frota está no código e é coletada sempre. O seed é só mais um ponto de partida da descoberta.",
       "targets": [
         {
           "datasource": {

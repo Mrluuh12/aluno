@@ -18,7 +18,7 @@ isolada.
 python3 rajant_monitor.py                      # exportador + Prometheus + Grafana, em segundo plano
 python3 rajant_monitor.py --exportador         # só exportador + página web, nesta janela
 python3 rajant_monitor.py --gerar-relatorio 2026-10-08 2026-10-14 --demo
-python3 teste_parser.py                        # 188 testes
+python3 teste_parser.py                        # 194 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` (padrão 8010):
@@ -31,7 +31,7 @@ diagnóstico de um BreadCrumb pelo IP.
 |---|---|
 | `rajant_monitor.py` | coleta, métricas, relatório semanal (Excel/PPT), página web |
 | `servico_rajant.py` | modo serviço: sobe e vigia exportador, Prometheus e Grafana |
-| `teste_parser.py` | 188 testes; roda sem rádio e sem a lib `rajant_api` |
+| `teste_parser.py` | 194 testes; roda sem rádio e sem a lib `rajant_api` |
 | `build/` | geração do `.exe` (PyInstaller), `parar_tudo.bat` e o `prometheus.yml` de exemplo |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, invariantes |
 | `AUDITORIA_METRICAS.md` | as métricas conferidas campo a campo contra os `.proto` |
@@ -95,7 +95,7 @@ que:
 ### Sem administrador
 
 - **A pasta do monitor tem de ser sua.** Ele grava `config.ini`, logs e
-  cache ao lado do `.exe`. Use algo como `C:\Users\SEU_USUARIO\RajantMonitor`,
+  relatórios ao lado do `.exe`. Use algo como `C:\Users\SEU_USUARIO\RajantMonitor`,
   não `Program Files`. Se a pasta não aceitar gravação, a janela diz isso em
   vez de ir para o fundo.
 - **Prometheus e Grafana na versão zip**, extraídos numa pasta sua (os dois
@@ -136,7 +136,7 @@ Logs, todos ao lado do `.exe`:
 | `logs\prometheus.log`, `logs\grafana.log` | saída dos dois (recomeça ao passar de 20 MB) |
 | `logs\exportador_erros.log` | só o que escapar do log do exportador |
 
-`config.ini`, cache e logs ficam **sempre** na pasta do executável, de onde
+`config.ini` e logs ficam **sempre** na pasta do executável, de onde
 quer que ele seja chamado (atalho na Área de Trabalho, outra pasta).
 
 ## Grafana: dado que parou de chegar
@@ -185,15 +185,15 @@ filtrar_tag = true
 padrao_tag  = ^[A-Z]{2,5}[- ]?\d{2,}     ; CA-1035, ERM-22 PTP CAM, RED065, PCP-002
 ```
 
-- O nome vem do próprio rádio; se ele não respondeu ainda, do cache e da
-  lista da malha da mina (`REDE_CONHECIDA`). IP que nunca deu nome não
-  aparece nem como offline.
+- O nome vem do próprio rádio; se ele não respondeu ainda, da lista da
+  frota no código (`REDE_CONHECIDA`). IP que nunca deu nome não aparece nem
+  como offline.
 - O vizinho é identificado pelo IP ou, quando o peer não traz IP, pelo
   `encapId` (o sufixo do número de série). O rótulo `peer` das séries de
   enlace passou a ser a **tag** do vizinho, não o IP.
 - O descarte é auditável: vai para o log (`ignorado: nome sem tag`) e para
   `rajant_bc_sem_tag`.
-- As 155 entradas nomeadas da malha casam com o padrão; o teste confere.
+- Os 142 nomes da lista da frota casam com o padrão; o teste confere.
 
 As séries antigas, com IP no lugar do nome, ficam no histórico do
 Prometheus até saírem do intervalo de tempo do painel.
@@ -203,22 +203,33 @@ As chaves antigas `somente_com_tag` e `prefixos_frota` saíram; `filtrar_tag`
 
 ## Quem entra na coleta
 
-Por padrão o exporter **descobre** a malha: parte dos seeds e segue os peers
-de cada BC.
+**Os IPs da frota estão no código**, em `REDE_CONHECIDA`
+(`rajant_monitor.py`): os 142 do `rajant_ips_cache.json` da operação, com
+nome. Não há mais cache — o programa não lê nem grava
+`rajant_ips_cache.json` (se o arquivo antigo estiver na pasta, o log avisa
+que pode ser apagado).
+
+- **Todos são coletados sempre**, respondam ou não: rádio fora do ar aparece
+  offline no Grafana em vez de sumir, e a coleta parte mesmo com o seed
+  fora do ar.
+- Cinco IPs estavam no arquivo com o próprio IP no lugar do nome — a
+  leitura do State que falhava em rádio grande (ver "O que o exportador faz
+  por cima dela"). O nome deles veio do cache anterior da operação:
+  `10.188.96.30` ERB-01 PLATO 17, `10.188.96.160` ERB-14, `10.188.97.70`
+  ERM-07, `10.188.99.38` CA-1038, `10.188.99.44` CA-1044.
+- **Equipamento novo:** a descoberta (ligada por padrão) segue os vizinhos
+  e o acha enquanto o programa roda. Para ele seguir monitorado depois de um
+  reinício — inclusive se estiver fora do ar na hora —, acrescente a linha
+  `"IP": "NOME",` em `REDE_CONHECIDA` e gere o `.exe` de novo.
 
 ```ini
 [coleta]
-descoberta  = true    ; false = só os IPs de [rede] seeds
-usar_cache  = true    ; false = não lê nem escreve o cache em disco
+descoberta  = true    ; false = só a lista do código e os [rede] seeds
 ```
 
-**Lista fixa.** Com `descoberta = false`, ponha todos os IPs em
-`[rede] seeds` (separados por vírgula) e o exporter coleta exatamente
-aqueles. Seed que não responde **continua na lista**: um BC precisa seguir
-monitorado justamente quando cai.
-
-**Cache desligado.** Ele guarda o que a descoberta já viu um dia e
-ressuscita endereço que saiu da rede. Com lista fixa, não serve para nada.
+`[rede] seeds` virou opcional: são só pontos de partida a mais para a
+descoberta. As chaves `usar_cache` e `falhas_para_remover` saíram (o log
+avisa se encontrar).
 
 ## Relatório semanal
 

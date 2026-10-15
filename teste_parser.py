@@ -657,9 +657,6 @@ class TestSeriesNoMetrics(unittest.TestCase):
         c.re_tag = rm.re.compile(rm.PADRAO_TAG_PADRAO, rm.re.I)
         c.nomes = {"10.188.97.220": "ERM-22 PTP CAM"}
         c.nome_encap = {}
-        class Cache:
-            def nome(self, ip): return None
-        c.cache = Cache()
         return c
 
     def test_vizinho_que_sumiu_sai_do_metrics(self):
@@ -1025,8 +1022,7 @@ class TestIntervaloMoveis(unittest.TestCase):
         c = rm.RajantCollector(
             seeds=[], role="VIEW", password="", port=2300, interval=interval,
             max_threads=1, timeout=1, tentativas=1, falhas_limite=3,
-            manter_s=300, redesc_ciclos=10, falhas_remover=20,
-            cache=rm.CacheIPs(os.path.join(tempfile.mkdtemp(), "c.json")),
+            manter_s=300, redesc_ciclos=10,
             interval_moveis=moveis,
             padrao_movel=self.PADRAO if padrao is None else padrao)
         return c
@@ -1272,26 +1268,15 @@ class TestDescobertaEFiltro(unittest.TestCase):
         # Um BC que caiu agora tem de continuar monitorado, senao ele
         # some da metrica justamente quando cai.
         fonte = inspect.getsource(rm.RajantCollector.descobrir)
-        self.assertIn("alvos = set(self.seeds)", fonte)
-
-    def test_cache_desligado_nao_escreve_disco(self):
-        tmp = tempfile.mkdtemp()
-        try:
-            cam = Path(tmp) / "c.json"
-            c = rm.CacheIPs(str(cam), ativo=False)
-            c.adicionar("10.0.0.1", "CA-1001")
-            self.assertFalse(cam.exists(), "escreveu com o cache desligado")
-            self.assertEqual(c.total(), 1, "deveria guardar em memoria")
-            c2 = rm.CacheIPs(str(cam), ativo=True)
-            c2.adicionar("10.0.0.2", "CA-1002")
-            self.assertTrue(cam.exists())
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn("alvos = set(self.seeds) | lista", fonte)
 
     def test_config_traz_as_chaves(self):
-        for chave in ("descoberta", "usar_cache", "filtrar_tag", "padrao_tag",
+        for chave in ("descoberta", "filtrar_tag", "padrao_tag",
                       "segurar_serie_s"):
             self.assertIn(chave, rm.DEFAULT_CONFIG, chave)
+        # Sem cache: os IPs estão no código.
+        for velha in ("usar_cache", "falhas_para_remover"):
+            self.assertNotIn(velha + " ", rm.DEFAULT_CONFIG)
         # As chaves antigas sairam do padrao: o config.ini ja instalado as
         # tem escritas (false e 300), e com o nome antigo elas seguiriam
         # valendo e o filtro e a retirada nunca ligariam.
@@ -1301,12 +1286,112 @@ class TestDescobertaEFiltro(unittest.TestCase):
     def test_padrao_de_tag_aceita_a_rede_da_mina_e_recusa_ip(self):
         c = self._col(None, rm.PADRAO_TAG_PADRAO)
         nomes = [n for n in rm.REDE_CONHECIDA.values() if n]
-        self.assertGreater(len(nomes), 150)
+        self.assertGreater(len(nomes), 140)
         for n in nomes:
             self.assertTrue(c.tem_tag(n), n)
         for n in ("10.188.99.217", "", None, "teste-lab", "Rajant BC",
                   "eth0udp25", "wlan0wds33"):
             self.assertFalse(c.tem_tag(n), n)
+
+
+class TestListaNoCodigo(unittest.TestCase):
+    """Os IPs da frota ficam no código, sem rajant_ips_cache.json (campo,
+    15/10/2026: "preciso que esses IPs sejam incluídos direto no código
+    sem a utilização de um IPs cache")."""
+
+    LISTA = {"10.250.0.1": "CA-9001", "10.250.0.2": "ERM-99 PTP"}
+
+    def test_a_lista_e_a_da_operacao(self):
+        R = rm.REDE_CONHECIDA
+        self.assertEqual(len(R), 142)
+        for ip, nome in R.items():
+            self.assertRegex(ip, r"^10\.188\.\d+\.\d+$")
+            self.assertTrue(nome and nome != ip, ip)
+            self.assertTrue(rm.re.search(rm.PADRAO_TAG_PADRAO, nome, rm.re.I), nome)
+        # Os cinco que o cache gravou com o IP no lugar do nome.
+        for ip, nome in (("10.188.96.30", "ERB-01 PLATO 17"),
+                         ("10.188.96.160", "ERB-14"), ("10.188.97.70", "ERM-07"),
+                         ("10.188.99.38", "CA-1038"), ("10.188.99.44", "CA-1044")):
+            self.assertEqual(R[ip], nome)
+        self.assertNotIn("10.188.99.217", R)          # o IP sem nome
+
+    def test_nao_existe_mais_cache(self):
+        self.assertFalse(hasattr(rm, "CacheIPs"))
+        fonte = open(rm.__file__, encoding="utf-8").read()
+        self.assertNotIn("CACHE_FILE", fonte)
+        self.assertNotIn("self.cache", fonte)
+
+    def _coletor(self, descoberta=True, seeds=("10.250.9.9",)):
+        return rm.RajantCollector(
+            seeds=list(seeds), role="VIEW", password="x", port=2300,
+            interval=60, max_threads=4, timeout=1, tentativas=1,
+            falhas_limite=1, manter_s=0, redesc_ciclos=10,
+            descoberta=descoberta, padrao_tag=rm.PADRAO_TAG_PADRAO)
+
+    def _descobrir(self, coletor):
+        class BCForaDoAr:
+            def __init__(s, **k): s.connection = None
+            def reachable(s): return False
+        tmp = tempfile.mkdtemp(); cwd = os.getcwd()
+        try:
+            os.chdir(tmp)
+            with mock.patch.object(rm, "REDE_CONHECIDA", dict(self.LISTA)), \
+                 mock.patch.object(rm, "exigir_rajant_api", lambda: BCForaDoAr):
+                coletor.descobrir()
+            return os.listdir(tmp)
+        finally:
+            os.chdir(cwd); shutil.rmtree(tmp, ignore_errors=True)
+            for ip in list(self.LISTA) + ["10.250.9.9"]:
+                rm.retirar_series(ip); rm._estados.pop(ip, None)
+
+    def test_tudo_fora_do_ar_e_a_lista_continua_monitorada(self):
+        # Antes: seed fora do ar e cache vazio = "Aguardando..." e nada era
+        # coletado. Agora a lista do código basta para partir.
+        c = self._coletor()
+        arquivos = self._descobrir(c)
+        self.assertTrue(set(self.LISTA) <= c.bcs)
+        self.assertNotIn("rajant_ips_cache.json", arquivos)   # não grava nada
+
+    def test_radio_da_lista_fora_do_ar_aparece_offline_com_o_nome(self):
+        from prometheus_client import generate_latest
+        c = self._coletor()
+        visto = {}
+        orig = rm.marcar_offline
+        def espia(ip, nome, est, agora):
+            orig(ip, nome, est, agora)
+            visto[ip] = generate_latest().decode()
+        with mock.patch.object(rm, "marcar_offline", espia):
+            self._descobrir(c)
+        self.assertIn('bc="ERM-99 PTP"', visto["10.250.0.2"])
+        self.assertIn('rajant_online{bc="CA-9001",ip="10.250.0.1"} 0.0',
+                      visto["10.250.0.1"])
+
+    def test_ip_que_nunca_respondeu_nao_conta_como_respondendo(self):
+        # 142 IPs fora do alcance davam "57 respondendo": contava quem ainda
+        # não tinha batido falhas_antes_offline, mesmo sem nunca ter
+        # respondido.
+        est = rm.EstadoBC(3, 0)
+        self.assertFalse(est.respondendo)
+        est.falha()
+        self.assertFalse(est.offline)          # ainda na tolerância
+        self.assertFalse(est.respondendo)      # mas não respondeu
+        est.ok({"sistema": {}}, 1.0)
+        self.assertTrue(est.respondendo)
+        est.falha()
+        self.assertFalse(est.respondendo)
+
+    def test_descoberta_desligada_coleta_a_lista_e_os_seeds(self):
+        c = self._coletor(descoberta=False)
+        self._descobrir(c)
+        self.assertEqual(c.bcs, set(self.LISTA) | {"10.250.9.9"})
+
+    def test_nome_vem_da_lista_quando_o_radio_nao_respondeu(self):
+        c = self._coletor()
+        with mock.patch.object(rm, "REDE_CONHECIDA", dict(self.LISTA)):
+            self.assertEqual(c.nome_conhecido("10.250.0.2"), "ERM-99 PTP")
+            c.nomes["10.250.0.2"] = "ERM-99 PTP CAM"   # o do rádio vence
+            self.assertEqual(c.nome_conhecido("10.250.0.2"), "ERM-99 PTP CAM")
+            self.assertIsNone(c.nome_conhecido("10.250.0.77"))
 
 
 class TestShimSslWrapSocket(unittest.TestCase):
@@ -2362,8 +2447,7 @@ class TestLeituraDoEstado(unittest.TestCase):
         c = rm.RajantCollector(
             seeds=[], role="VIEW", password="", port=2300, interval=60,
             max_threads=1, timeout=1, tentativas=1, falhas_limite=3,
-            manter_s=0, redesc_ciclos=10, falhas_remover=20,
-            cache=rm.CacheIPs(os.path.join(tempfile.mkdtemp(), "c.json")),
+            manter_s=0, redesc_ciclos=10,
             padrao_tag=rm.PADRAO_TAG_PADRAO)
         return c
 

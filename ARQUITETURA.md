@@ -63,7 +63,7 @@ foi descontinuado e saiu do código; está no histórico do git.
 | classes | 6 |
 | famílias de métrica | 101 |
 | endpoints HTTP | 5 |
-| testes | 188, em 31 classes |
+| testes | 194, em 32 classes |
 | comentários | ~13% das linhas |
 
 Os comentários quase todos registram uma armadilha concreta. A convenção é
@@ -217,11 +217,15 @@ falhas seguidas derrubam.
 Deque de `(timestamp, online)` com janelas deslizantes de 1 h, 24 h e 7 d
 (metodologia BCE): operação, turno e relatório.
 
-### CacheIPs
+### A lista da frota, sem cache
 
-IPs e nomes já vistos, persistidos em disco. Existe para sobreviver a
-reinício com o seed fora do ar. Ressuscita endereço que saiu da rede, e por
-isso pode ser desligado (`[coleta] usar_cache = false`).
+Não há cache em disco. Os IPs da frota estão em `REDE_CONHECIDA`, no
+código: os 142 do `rajant_ips_cache.json` da operação (15/10/2026), com
+nome. O cache existia para sobreviver a reinício com o seed fora do ar; a
+lista no código faz isso sem arquivo nenhum, e sem o defeito dele — o cache
+ressuscitava endereço que saiu da rede e guardava o IP no lugar do nome
+quando a leitura falhava (cinco rádios estavam assim; o nome deles veio do
+cache anterior da operação).
 
 ---
 
@@ -261,7 +265,8 @@ monotônico, que não diz hora nenhuma e não serve para `time() - x`.
 
 ## 7. Descoberta, coleta e tag
 
-O `RajantCollector` parte dos *seeds* e caminha pelos peers, em lotes. Cada
+O `RajantCollector` parte da lista do código (`REDE_CONHECIDA`, inteira,
+respondendo ou não) e dos *seeds*, e caminha pelos peers, em lotes. Cada
 ciclo dispara uma thread por BC, limitadas por semáforo (`max_threads`).
 
 ### Nó físico ≠ IP
@@ -280,8 +285,9 @@ ser vista sai de `rajant_bc_primario`/`rajant_bc_interfaces`.
 
 ### Lista fechada é fechada
 
-Com `descoberta = false`, o ciclo **não** reintroduz peers pela porta dos
-fundos. Seed que não responde **continua na lista**.
+Com `descoberta = false`, coleta exatamente a lista do código e os seeds,
+e o ciclo **não** reintroduz peers pela porta dos fundos. IP que não
+responde **continua na lista**.
 
 ### Coleta acelerada dos móveis
 
@@ -293,13 +299,11 @@ tempo todo; torre, não.
 
 `filtrar_tag = true` (padrão) só publica nome que casa com `padrao_tag`
 (`^[A-Z]{2,5}[- ]?\d{2,}`, sem diferenciar maiúsculas): CA-1035, ERM-22 PTP
-CAM, RED065, PCP-002. As 155 entradas nomeadas de `REDE_CONHECIDA` casam; IP
-não casa.
+CAM, RED065, PCP-002. Os 142 nomes de `REDE_CONHECIDA` casam; IP não casa.
 
 - **O nome** vem de `nome_conhecido(ip)`: o que o rádio informou nesta
-  execução, depois o cache, depois `REDE_CONHECIDA`. IP sem nome por nenhum
-  dos três não entra no `/metrics` nem como offline — era o `10.188.99.217`
-  do Grafana.
+  execução, depois `REDE_CONHECIDA`. IP sem nome por nenhum dos dois não
+  entra no `/metrics` nem como offline — era o `10.188.99.217` do Grafana.
 - **O vizinho** é resolvido por `nome_vizinho(peer)`: pelo IP, ou, quando o
   peer só traz MAC, pelo `encapId`, que é o sufixo do número de série do
   vizinho (`nome_encap`, montado com o serial de cada BC coletado; conferido
@@ -316,7 +320,8 @@ não casa.
 Prefixo `rajant_`. Agrupadas como aparecem no código:
 
 ### Descoberta (4)
-`cache_total` · `cache_online` · `seed_status` · `bc_sem_tag`
+`cache_total` (IPs monitorados; o nome ficou da época do cache) ·
+`cache_online` (quantos responderam) · `seed_status` · `bc_sem_tag`
 
 ### Sistema (16)
 `online` · `uptime_s` · `temperatura_c` · `temperatura_classe` ·
@@ -395,11 +400,10 @@ rádio.
    `--status`, `--parar`) também saem antes do argparse;
    no `.exe`, a pasta de trabalho vira a do executável
 2. lê config, resolve seeds, valida `padrao_tag`, avisa chave antiga
-3. `CacheIPs` (ou desligado)
-4. `start_http_server(metrics_port)` — o `/metrics`
-5. servidor de relatórios em thread (salvo `--sem-relatorios`)
-6. banner no log com seeds, descoberta, cache, tag, séries, portas
-7. laço: descoberta → ciclo → espera
+3. `start_http_server(metrics_port)` — o `/metrics`
+4. servidor de relatórios em thread (salvo `--sem-relatorios`)
+5. banner no log com a lista, descoberta, tag, séries, portas
+6. laço: descoberta → ciclo → espera
 
 ---
 
@@ -626,7 +630,7 @@ sem clique.
 
 | chave | o que faz |
 |---|---|
-| `seeds` | IPs de partida (vírgula) |
+| `seeds` | IPs de partida a mais (vírgula); opcional — a lista da frota está no código |
 | `password` / `role` | credenciais da BCAPI; `role` em qualquer caixa |
 | `porta_bcapi` | 2300 |
 
@@ -641,9 +645,7 @@ sem clique.
 | `falhas_antes_offline` | 3 | falhas seguidas para `online = 0` |
 | `segurar_serie_s` | 0 | segundos que as séries de um BC que falhou ficam |
 | `redescoberta_ciclos` | 10 | a cada quantos ciclos redescobre |
-| `falhas_para_remover` | 20 | tira do cache após N falhas |
-| `descoberta` | true | `false` = só os seeds |
-| `usar_cache` | true | `false` = não lê nem escreve o cache |
+| `descoberta` | true | `false` = só a lista do código e os seeds |
 | `filtrar_tag` | true | só equipamento com tag |
 | `padrao_tag` | `^[A-Z]{2,5}[- ]?\d{2,}` | o formato da tag |
 | `intervalo_moveis_segundos` | 20 | ciclo curto dos móveis; 0 = desliga |
@@ -700,7 +702,7 @@ Chaves antigas ignoradas, com aviso no log: `manter_ultimo_valor_s`,
 
 ## 18. Testes
 
-`teste_parser.py`: **188 testes em 31 classes**, rodando **sem rádio e sem a
+`teste_parser.py`: **194 testes em 32 classes**, rodando **sem rádio e sem a
 `rajant_api`** (há um stub no topo). Com a biblioteca instalada, roda também
 os testes do protocolo real contra um rádio simulado; sem ela, esses são
 pulados.
@@ -709,7 +711,7 @@ pulados.
 |---|---|
 | parser | `TestBlocoConfiguration`, `TestCamposInexistentes`, `TestInstaMesh`, `TestAPT`, `TestClientesAP`, `TestPeers`, `TestGPS`, `TestSistema`, `TestRadio`, `TestCamposDescartados`, `TestGpsTimeParaSegundos` |
 | publicação e séries | `TestPublicar`, `TestCPUDerivada`, `TestRobustez`, `TestSeriesNoMetrics`, `TestInterferencia` |
-| coleta e tag | `TestIntervaloMoveis`, `TestDescobertaEFiltro`, `TestIdentidadeDoVizinho`, `TestLeituraDoEstado` |
+| coleta e tag | `TestIntervaloMoveis`, `TestDescobertaEFiltro`, `TestListaNoCodigo`, `TestIdentidadeDoVizinho`, `TestLeituraDoEstado` |
 | protocolo | `TestLoginBCAPI` (rádio falso que fala o login e o State reais, em pedaços como pelo TLS), `TestShimSslWrapSocket` |
 | modo serviço | `TestServicoSegundoPlano` (Prometheus e Grafana falsos, porta já atendida, pid, dois cliques) |
 | relatório | `TestSemanalSemSurvey`, `TestTituloDoSlide`, `TestRemocaoDaSecaoDeSurvey`, `TestSlidesTecnicosNoSemanal`, `TestIdentidadeAnglo`, `TestIdentidadeNoSemanal` |
@@ -822,7 +824,7 @@ rádios.
 As posições mudam a cada alteração; **use os nomes, não as linhas**:
 
 ```
-config, cache, logging, métricas          →  DEFAULT_CONFIG, CacheIPs
+config, logging, métricas                 →  DEFAULT_CONFIG
 disponibilidade e estado                  →  JanelaDisponibilidade, EstadoBC
 helpers e parser                          →  extrair_blocos, parse_state
 ping, séries, publicação                  →  ping_rtt, SeriesDoBC, publicar

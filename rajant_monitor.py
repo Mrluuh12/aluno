@@ -49,7 +49,9 @@ except ImportError:
 # CONFIG
 # ══════════════════════════════════════════════════════════════
 CONFIG_FILE = "config.ini"
-CACHE_FILE  = "rajant_ips_cache.json"
+# Arquivo do cache antigo: não é mais lido nem gravado (a lista está no
+# código, REDE_CONHECIDA). Só para avisar que pode ser apagado.
+CACHE_ANTIGO = "rajant_ips_cache.json"
 
 DEFAULT_CONFIG = """\
 [rede]
@@ -70,16 +72,10 @@ falhas_antes_offline    = 3
 # Grafana mostra o buraco em vez de uma linha reta no último valor.
 segurar_serie_s         = 0
 redescoberta_ciclos     = 10
-falhas_para_remover     = 20
-# Descoberta pela malha: parte dos seeds e segue os peers de cada BC.
-# false = coleta SÓ os IPs listados em [rede] seeds, sem seguir peer
-# nenhum. Use quando a lista de equipamentos é conhecida e fixa: a
-# descoberta acha tudo que responde na malha, inclusive o que não é da
-# frota.
+# Os IPs da frota estão no código (REDE_CONHECIDA) e são coletados sempre.
+# Descoberta: a partir deles, segue os vizinhos de cada BC e acha rádio
+# novo. false = coleta SÓ a lista do código e os [rede] seeds.
 descoberta              = true
-# Cache de IPs em disco (rajant_ips_cache.json). false = não lê nem
-# escreve; a partida depende só dos seeds.
-usar_cache              = true
 # Só publica equipamento com TAG no nome (CA-1035, ERM-22, ERB-02, RED065,
 # PCP-002...). IP sem nome, rádio de terceiro e rádio de teste ficam fora
 # do /metrics e do Grafana — inclusive como vizinho de outro rádio. O que
@@ -107,75 +103,6 @@ def carregar_config():
         Path(CONFIG_FILE).write_text(DEFAULT_CONFIG, encoding="utf-8")
     cfg.read(CONFIG_FILE, encoding="utf-8")
     return cfg
-
-# ══════════════════════════════════════════════════════════════
-# CACHE DE IPs EM DISCO
-# ══════════════════════════════════════════════════════════════
-class CacheIPs:
-    def __init__(self, caminho=CACHE_FILE, ativo=True):
-        """`ativo=False` deixa o cache inerte: não lê nem escreve o disco.
-
-        Quem tem a lista fixa dos próprios equipamentos não quer o cache —
-        ele guarda o que a descoberta já encontrou um dia e ressuscita
-        endereço que saiu da rede, mantendo equipamento fantasma na
-        métrica muito depois de ele ter ido embora.
-        """
-        self.ativo   = ativo
-        self.caminho = Path(caminho)
-        self.lock    = threading.Lock()
-        self._dados  = {}
-        if ativo:
-            self._carregar()
-        else:
-            log.info("[cache] desligado: partida so pelos seeds")
-
-    def _carregar(self):
-        if self.caminho.exists():
-            try:
-                self._dados = json.loads(self.caminho.read_text(encoding="utf-8"))
-                log.info(f"[cache] {len(self._dados)} IPs carregados de {self.caminho}")
-            except Exception as e:
-                log.warning(f"[cache] Erro ao carregar: {e}")
-                self._dados = {}
-
-    def _salvar(self):
-        # Desligado: guarda em memoria para o ciclo, nao toca no disco.
-        if not self.ativo: return
-        try:
-            self.caminho.write_text(
-                json.dumps(self._dados, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception: pass
-
-    def adicionar(self, ip, nome=""):
-        with self.lock:
-            if ip not in self._dados:
-                log.debug(f"[cache] Novo: {ip} ({nome})")
-            self._dados[ip] = {"nome": nome or ip, "ultima_vez": time.time(), "falhas": 0}
-            self._salvar()
-
-    def registrar_falha(self, ip, limite=20):
-        with self.lock:
-            if ip not in self._dados: return
-            self._dados[ip]["falhas"] = self._dados[ip].get("falhas", 0) + 1
-            if limite > 0 and self._dados[ip]["falhas"] >= limite:
-                log.warning(f"[cache] {ip} removido ({self._dados[ip]['falhas']} falhas)")
-                del self._dados[ip]
-            self._salvar()
-
-    def registrar_sucesso(self, ip, nome=""):
-        with self.lock:
-            if ip in self._dados:
-                self._dados[ip]["falhas"] = 0
-                self._dados[ip]["ultima_vez"] = time.time()
-                if nome: self._dados[ip]["nome"] = nome
-            self._salvar()
-
-    def todos_ips(self):
-        with self.lock: return set(self._dados.keys())
-    def nome(self, ip):
-        with self.lock: return self._dados.get(ip, {}).get("nome", ip)
-    def total(self):
-        with self.lock: return len(self._dados)
 
 # ══════════════════════════════════════════════════════════════
 # LOGGING
@@ -216,12 +143,15 @@ LSEED = ["seed"]
 # MÉTRICAS
 # ══════════════════════════════════════════════════════════════
 # Descoberta
-m_cache_total  = Gauge("rajant_cache_total",  "IPs no cache", [])
+# Nomes da época do cache, mantidos para não quebrar painel e histórico:
+# hoje são os IPs monitorados (lista do código + descobertos) e quantos
+# deles responderam no último ciclo.
+m_cache_total  = Gauge("rajant_cache_total",  "IPs monitorados", [])
 # Equipamentos que responderam mas foram descartados por nao terem
 # prefixo de frota. Existe para o descarte ser AUDITAVEL: sem isto,
 # um erro no filtro sumiria com equipamento sem deixar rastro.
 m_bc_sem_tag   = Gauge("rajant_bc_sem_tag",  "BCs ignorados por nao ter tag")
-m_cache_online = Gauge("rajant_cache_online", "IPs online",   [])
+m_cache_online = Gauge("rajant_cache_online", "IPs respondendo", [])
 m_seed_status  = Gauge("rajant_seed_status",  "Seed OK=1",    LSEED)
 
 # Sistema
@@ -572,6 +502,13 @@ class EstadoBC:
 
     @property
     def offline(self): return self.falhas_consec >= self.falhas_limite
+
+    @property
+    def respondendo(self):
+        """A última tentativa deu certo. É o que rajant_online diz; `offline`
+        espera `falhas_limite` falhas, e um IP da lista que nunca respondeu
+        contaria como no ar até lá."""
+        return self.falhas_consec == 0 and self.ultima_dados is not None
 
     def expirou(self, agora):
         if self.manter_s <= 0: return True
@@ -1669,14 +1606,13 @@ def marcar_offline(ip, nome, est, agora):
 class RajantCollector:
     def __init__(self, seeds, role, password, port, interval,
                  max_threads, timeout, tentativas, falhas_limite,
-                 manter_s, redesc_ciclos, falhas_remover, cache,
+                 manter_s, redesc_ciclos,
                  interval_moveis=0, padrao_movel="", descoberta=True,
                  prefixos_tag=None, padrao_tag=None):
         self.seeds=seeds; self.role=role; self.password=password; self.port=port
         self.interval=interval; self.max_threads=max_threads; self.timeout=timeout
         self.tentativas=tentativas; self.falhas_limite=falhas_limite
         self.manter_s=manter_s; self.redesc_ciclos=redesc_ciclos
-        self.falhas_remover=falhas_remover; self.cache=cache
         self.descoberta=descoberta
         # Filtro de tag: `padrao_tag` (regex) ou, no formato antigo, a lista
         # de prefixos. Nenhum dos dois = aceita qualquer nome.
@@ -1717,7 +1653,7 @@ class RajantCollector:
         """Classifica pelo nome do BC. Nome ainda desconhecido conta como
         móvel para não deixar equipamento novo fora do primeiro ciclo."""
         if not self.re_movel: return True
-        nome = (self.nomes.get(ip) or self.cache.nome(ip) or "").strip()
+        nome = (self.nomes.get(ip) or REDE_CONHECIDA.get(ip) or "").strip()
         if not nome or nome == ip: return True
         return bool(self.re_movel.search(nome))
 
@@ -1741,9 +1677,9 @@ class RajantCollector:
         return True
 
     def nome_conhecido(self, ip):
-        """O nome de um IP pelo que já se sabe: coleta, cache, rede da mina."""
+        """O nome de um IP pelo que já se sabe: o que o rádio informou nesta
+        execução, ou a lista da malha no código."""
         return ((self.nomes.get(ip) or "").strip()
-                or (self.cache.nome(ip) or "").strip()
                 or (REDE_CONHECIDA.get(ip) or "").strip() or None)
 
     def nome_vizinho(self, p):
@@ -1795,8 +1731,6 @@ class RajantCollector:
                 self.sem_tag.discard(ip)
 
                 est.ok(dados, ts)
-                self.cache.adicionar(ip, nome)
-                self.cache.registrar_sucesso(ip, nome)
                 if dados["sistema"].get("serial_num"):
                     self.nome_encap[dados["sistema"]["serial_num"]] = nome
                 publicar(ip, dados, est,
@@ -1819,7 +1753,6 @@ class RajantCollector:
                     time.sleep(2**(tentativa-1))
                 else:
                     est.falha()
-                    self.cache.registrar_falha(ip, self.falhas_remover)
                     # IP que nunca respondeu e não tem nome conhecido, ou
                     # cujo nome não é tag, não entra no /metrics nem como
                     # offline: viraria uma linha "10.188.99.217" no Grafana.
@@ -1879,21 +1812,22 @@ class RajantCollector:
             finally:
                 fechar_sessao(bc)
 
-        cache_ips    = self.cache.todos_ips()
+        lista = set(REDE_CONHECIDA)
 
         if not self.descoberta:
-            # Lista fechada: coleta exatamente os seeds, sem seguir peer
-            # nenhum. A descoberta acha tudo que RESPONDE na malha —
-            # inclusive equipamento de terceiro e rádio de teste —, e
-            # quem tem a lista dos proprios equipamentos nao quer isso.
-            # Usa os seeds CONFIGURADOS, nao so os que responderam: um
-            # BC offline agora tem de continuar sendo monitorado, senao
-            # ele desaparece da metrica justamente quando cai.
-            alvos = set(self.seeds)
+            # Lista fechada: coleta exatamente a lista do código e os
+            # seeds, sem seguir peer nenhum. A descoberta acha tudo que
+            # RESPONDE na malha — inclusive equipamento de terceiro e
+            # rádio de teste —, e quem tem a lista dos proprios
+            # equipamentos nao quer isso. Todos, nao so os que
+            # responderam: um BC offline agora tem de continuar sendo
+            # monitorado, senao ele desaparece da metrica justamente
+            # quando cai.
+            alvos = set(self.seeds) | lista
             with self.lock:
                 self.bcs = set(alvos)
             log.info(f"  Descoberta DESLIGADA: {len(alvos)} IP(s) fixos "
-                     f"de [rede] seeds")
+                     f"(lista do codigo + seeds)")
             if seeds_fail:
                 log.warning(f"  {len(seeds_fail)} sem resposta agora, "
                             f"mantidos na lista: "
@@ -1905,17 +1839,18 @@ class RajantCollector:
             log.info("="*55)
             return
 
-        ponto_inicio = set(seeds_ok) | cache_ips
-        if not seeds_ok and cache_ips:
-            log.warning(f"  Seeds offline! Usando {len(cache_ips)} IPs do cache.")
-        elif not seeds_ok and not cache_ips:
-            log.error("  Seeds offline e cache vazio! Aguardando..."); return
-
-        log.info(f"  Seeds OK:{len(seeds_ok)} | Cache:{len(cache_ips)} IPs")
+        # A lista do código entra inteira, responda ou não: com o seed fora
+        # do ar a partida continua, e rádio offline segue monitorado.
+        ponto_inicio = set(seeds_ok) | lista
+        with self.lock:
+            self.bcs.update(lista)
+        log.info(f"  Seeds OK:{len(seeds_ok)} | Lista do codigo:{len(lista)} IPs")
         fila, vis = set(ponto_inicio), set()
         while fila: fila = self._lote(fila, vis)
-        m_cache_total.set(self.cache.total())
-        log.info(f"  Total: {len(self.bcs)} BCs | Cache: {self.cache.total()} IPs")
+        m_cache_total.set(len(self.bcs))
+        fora = len(self.bcs - lista)
+        log.info(f"  Total: {len(self.bcs)} BCs"
+                 + (f" ({fora} achados pela descoberta, fora da lista)" if fora else ""))
         log.info("="*55)
 
     def ciclo(self, apenas_moveis=False):
@@ -1941,9 +1876,10 @@ class RajantCollector:
             t = threading.Thread(target=worker, daemon=True)
             threads.append(t); t.start()
         for t in threads: t.join(timeout=self.timeout+10)
-        online = sum(1 for ip in self.bcs if not estado(ip, self.falhas_limite, self.manter_s).offline)
+        online = sum(1 for ip in self.bcs
+                     if estado(ip, self.falhas_limite, self.manter_s).respondendo)
         m_cache_online.set(online)
-        m_cache_total.set(self.cache.total())
+        m_cache_total.set(len(self.bcs))
         self._publicar_identidade()
 
     def _publicar_identidade(self):
@@ -3904,14 +3840,20 @@ def _slides_tecnicos(p, d, cfg, ini_d, fim_d, disp_g, meta_g, canal_poluido):
 
 
 # ══════════════════════════════════════════════════════════════
-# A MALHA CONHECIDA
+# A MALHA CONHECIDA — os IPs da frota, no código
 # ══════════════════════════════════════════════════════════════
-# Os rádios da mina, por IP e nome. É de onde sai a tag de um IP que ainda
-# não respondeu nesta execução (vizinho visto só pelo IP, rádio fora do ar
-# desde a partida): sem ela o equipamento seria descartado por falta de
-# tag. O nome que o rádio informa e o cache têm prioridade.
+# Os rádios da mina, por IP e nome: a lista do rajant_ips_cache.json da
+# operação (15/10/2026), agora fixa aqui — o programa não lê nem grava
+# cache nenhum. Cinco IPs estavam no arquivo com o próprio IP no lugar do
+# nome (leitura que falhou, ver ler_estado); o nome deles veio do cache
+# anterior da operação: ERB-01 PLATO 17, ERB-14, ERM-07, CA-1038, CA-1044.
 #
-# Lista tirada dos caches reais da operação.
+# TODOS são coletados sempre, respondam ou não: rádio fora do ar aparece
+# offline no Grafana em vez de sumir. É também o ponto de partida da
+# descoberta, que segue os vizinhos de cada um e acha rádio novo — que,
+# para seguir monitorado depois de um reinício, entra nesta lista.
+#
+# O nome que o próprio rádio informa tem prioridade sobre o daqui.
 REDE_CONHECIDA = {
     "10.188.96.30": "ERB-01 PLATO 17",
     "10.188.96.40": "ERB-02",
@@ -3945,7 +3887,6 @@ REDE_CONHECIDA = {
     "10.188.97.140": "ERM-14",
     "10.188.97.148": "ERM-31 PTP CAM",
     "10.188.97.150": "ERM-15 PTP",
-    "10.188.97.154": "ERM-32 PTP CAM",
     "10.188.97.160": "ERM-16",
     "10.188.97.164": "ERM-33 PTP CAM",
     "10.188.97.170": "ERM-17",
@@ -3961,10 +3902,8 @@ REDE_CONHECIDA = {
     "10.188.99.2": "CA-1002",
     "10.188.99.3": "CA-1003",
     "10.188.99.4": "CA-1004",
-    "10.188.99.5": "CA-1005",
     "10.188.99.6": "CA-1006",
     "10.188.99.7": "CA-1007",
-    "10.188.99.9": "CA-1009",
     "10.188.99.10": "CA-1010",
     "10.188.99.11": "CA-1011",
     "10.188.99.13": "CA-1013",
@@ -3992,7 +3931,6 @@ REDE_CONHECIDA = {
     "10.188.99.36": "CA-1036",
     "10.188.99.37": "CA-1037",
     "10.188.99.38": "CA-1038",
-    "10.188.99.39": "CA-1039",
     "10.188.99.40": "CA-1040",
     "10.188.99.41": "CA-1041",
     "10.188.99.42": "CA-1042",
@@ -4020,9 +3958,7 @@ REDE_CONHECIDA = {
     "10.188.99.136": "EH-6101",
     "10.188.99.137": "EH-6102",
     "10.188.99.138": "RED002",
-    "10.188.99.139": "RED004",
     "10.188.99.140": "EH-6003",
-    "10.188.99.141": "RED065",
     "10.188.99.146": "EH-6550",
     "10.188.99.147": "EH-6551",
     "10.188.99.151": "PF-4601",
@@ -4031,19 +3967,16 @@ REDE_CONHECIDA = {
     "10.188.99.157": "PF-4703",
     "10.188.99.158": "PF-4704",
     "10.188.99.159": "PF-4705",
-    "10.188.99.167": "TT-3503 TECWISE",
     "10.188.99.169": "TT-3505 TECWISE",
     "10.188.99.170": "TT-3506",
     "10.188.99.171": "TT-3507",
     "10.188.99.172": "TT-3508 TECWISE",
     "10.188.99.173": "TT-3509 TECWISE",
     "10.188.99.174": "TT-3510 TECWISE",
-    "10.188.99.175": "TT-3511 TECWISE",
     "10.188.99.176": "TT-3512 TECWISE",
     "10.188.99.189": "TT-3705",
     "10.188.99.190": "TT-3706",
     "10.188.99.192": "TT-3802",
-    "10.188.99.194": "PA-5801",
     "10.188.99.195": "PA-5802",
     "10.188.99.199": "TN-4001",
     "10.188.99.200": "TN-4002",
@@ -4051,14 +3984,10 @@ REDE_CONHECIDA = {
     "10.188.99.212": "EH-6404",
     "10.188.99.213": "EH-6405",
     "10.188.99.216": "CP-7001",
-    "10.188.99.217": None,
-    "10.188.99.218": "CP-7003",
     "10.188.99.219": "CP-7004",
-    "10.188.99.224": "PR-7202",
     "10.188.99.227": "MA-5101",
     "10.188.99.229": "MA-5103",
     "10.188.99.230": "MA-5104",
-    "10.188.99.237": "EH-6552",
     "10.188.99.238": "EH-6553",
     "10.188.99.240": "MA-5201",
     "10.188.99.241": "MA-5202",
@@ -4067,7 +3996,6 @@ REDE_CONHECIDA = {
     "10.188.100.157": "PF-4703 FLANDERS",
     "10.188.100.158": "PF-4704 FLANDERS",
     "10.188.105.170": "TT-3506 KOMATSU",
-    "10.188.105.171": "TT-3507 KOMATSU",
     "10.188.111.46": "PCP-002 Sensing POD",
 }
 
@@ -5093,7 +5021,7 @@ def iniciar_servidor_relatorios(cfg):
 # ══════════════════════════════════════════════════════════════
 def main():
     import servico_rajant
-    # Executável: config.ini, logs, cache e relatórios ficam AO LADO dele,
+    # Executável: config.ini, logs e relatórios ficam AO LADO dele,
     # de onde quer que tenha sido chamado (atalho, outra pasta). Antes iam
     # para a pasta corrente.
     if getattr(sys, "frozen", False):
@@ -5155,7 +5083,6 @@ def main():
     falhas_lim= cfg.getint("coleta","falhas_antes_offline", fallback=3)
     manter_s  = cfg.getint("coleta","segurar_serie_s",      fallback=0)
     redesc    = cfg.getint("coleta","redescoberta_ciclos",  fallback=10)
-    falhas_rem= cfg.getint("coleta","falhas_para_remover",  fallback=20)
     # Coleta acelerada dos móveis. O padrão de nome
     # vem de [relatorio] padrao_movel — mesma fonte que classifica os
     # equipamentos nos relatórios, para não divergirem.
@@ -5227,11 +5154,9 @@ def main():
                  f"({', '.join(e['nome'] for e in dados['ethernet']) or 'NENHUMA'})")
         return
 
-    if not seeds:    log.error("Nenhum seed configurado (secao [rede], chave seeds)."); sys.exit(1)
     if not password: log.error("Senha nao configurada (secao [rede], chave password)."); sys.exit(1)
 
     descoberta_on = cfg.getboolean("coleta", "descoberta", fallback=True)
-    cache_on      = cfg.getboolean("coleta", "usar_cache",  fallback=True)
     padrao_tag = None
     if cfg.getboolean("coleta", "filtrar_tag", fallback=True):
         padrao_tag = cfg.get("coleta", "padrao_tag",
@@ -5247,8 +5172,14 @@ def main():
         if cfg.has_option("coleta", velha):
             log.info(f"[coleta] '{velha}' nao e mais usado (agora: '{nova}', "
                      f"padrao {cfg.get('coleta', nova, fallback='o do programa')})")
+    for velha in ("usar_cache", "falhas_para_remover"):
+        if cfg.has_option("coleta", velha):
+            log.info(f"[coleta] '{velha}' nao e mais usado: os IPs estao no "
+                     f"codigo (REDE_CONHECIDA), sem cache")
+    if Path(CACHE_ANTIGO).exists():
+        log.info(f"[coleta] {CACHE_ANTIGO} nao e mais lido nem gravado; "
+                 f"pode apagar")
 
-    cache = CacheIPs(CACHE_FILE, ativo=cache_on)
     start_http_server(mport)
 
     # ── Servidor web de relatorios (thread separada) ──
@@ -5262,11 +5193,10 @@ def main():
     log.info("="*60)
     log.info("  RAJANT MONITOR — EXPORTER + RELATORIOS")
     log.info("="*60)
-    log.info(f"  Seeds:     {len(seeds)} IP(s)")
-    log.info(f"  Descoberta:{'ligada' if descoberta_on else 'DESLIGADA (so os seeds)'}")
-    log.info("  Cache:     "
-             + (f"{CACHE_FILE} ({cache.total()} IPs)" if cache_on
-                else "desligado"))
+    log.info(f"  Lista:     {len(REDE_CONHECIDA)} IPs no codigo"
+             + (f" + {len(set(seeds) - set(REDE_CONHECIDA))} seed(s) fora dela"
+                if set(seeds) - set(REDE_CONHECIDA) else ""))
+    log.info(f"  Descoberta:{'ligada' if descoberta_on else 'DESLIGADA (so a lista e os seeds)'}")
     log.info("  Tag:       " + (f"so nomes no formato {padrao_tag}"
                                  if padrao_tag else "SEM filtro (filtrar_tag = false)"))
     log.info("  Series:    " + (f"seguram {manter_s}s apos falha" if manter_s > 0
@@ -5282,7 +5212,6 @@ def main():
         interval=interval, max_threads=max_thr, timeout=timeout,
         tentativas=tentativas, falhas_limite=falhas_lim,
         manter_s=manter_s, redesc_ciclos=redesc,
-        falhas_remover=falhas_rem, cache=cache,
         interval_moveis=int_moveis, padrao_movel=padr_movel,
         descoberta=descoberta_on, padrao_tag=padrao_tag,
     )

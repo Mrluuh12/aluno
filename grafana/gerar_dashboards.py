@@ -1332,10 +1332,12 @@ def dash_coletor():
 
     L.secao("Estado do coletor")
     L.fila(
-        (3, cartao("IPs no cache",
-                   alvos(('rajant_cache_total', "cache")),
+        (3, cartao("IPs monitorados",
+                   alvos(('rajant_cache_total', "monitorados")),
                    campo(dec=0, cor="fixed", preenchimento=0),
-                   "Cache em disco de IPs descobertos.", grafico="none")),
+                   "A lista da frota no código mais os achados pela "
+                   "descoberta. (O nome rajant_cache_total ficou da época "
+                   "do cache em disco.)", grafico="none")),
         (3, cartao("IPs online",
                    alvos(('rajant_cache_online', "online")),
                    campo(dec=0, cor="fixed"))),
@@ -1344,7 +1346,8 @@ def dash_coletor():
                            "cobertura")),
                     campo("percent", 1, 0, 100, cor="thresholds",
                           limiares=deg([(CRIT, None), (ATEN, 90), (OK, 98)])),
-                    "Fração do cache que respondeu no último ciclo.")),
+                    "Fração dos IPs monitorados que respondeu no último "
+                    "ciclo.")),
         (3, cartao("Seeds OK",
                    alvos(('sum(rajant_seed_status)', "seeds")),
                    campo(dec=0, cor="thresholds",
@@ -1438,9 +1441,9 @@ def dash_coletor():
                     alvos(('rajant_seed_status', "{{seed}}")),
                     campo(dec=0, mapas=MAPA_LINK, cor="thresholds",
                           limiares=deg([(CRIT, None), (OK, 1)])),
-                    "Seed inacessível impede a redescoberta — a frota "
-                    "continua sendo coletada pelo cache em disco, mas BCs "
-                    "novos não entram.",
+                    "Seed inacessível não para a coleta: a lista da frota "
+                    "está no código e é coletada sempre. O seed é só mais "
+                    "um ponto de partida da descoberta.",
                     mostrar_valor="never"),
         h=6)
 

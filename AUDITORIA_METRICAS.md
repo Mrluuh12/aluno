@@ -60,8 +60,8 @@ simplesmente não publica quando o valor é `None`.
 | `rajant_bc_primario` | — (agrupamento por IP) | n/a | 0/1 | ✅ verificado |
 | `rajant_bc_interfaces` | — (agrupamento por IP) | n/a | contagem | ✅ verificado |
 | `rajant_nos_fisicos_total` | — (agrupamento por IP) | n/a | contagem | ✅ verificado |
-| `rajant_cache_total` | — (cache local) | n/a | contagem | ✅ verificado |
-| `rajant_cache_online` | — (cache local) | n/a | contagem | ✅ verificado |
+| `rajant_cache_total` | — (coletor: IPs monitorados) | n/a | contagem | ✅ verificado |
+| `rajant_cache_online` | — (coletor: IPs que responderam) | n/a | contagem | ✅ verificado |
 | `rajant_seed_status` | — (coletor) | n/a | 0/1 | ✅ verificado |
 
 **Novas:**
