@@ -1,15 +1,11 @@
 """
-Modo serviço do rajant_monitor: sobe Prometheus, Grafana e o exportador em
-segundo plano, sem janela, e os reergue se caírem.
+Segundo plano do rajant_monitor: sobe Prometheus, Grafana e o exportador
+sem janela, e os reergue se caírem.
 
-    rajant_monitor.exe --servico            roda o supervisor (fica no ar)
-    rajant_monitor.exe --iniciar            sobe o supervisor oculto e volta
-    rajant_monitor.exe --parar              derruba o supervisor e os três
-    rajant_monitor.exe --status             o que está no ar, e em que porta
-    rajant_monitor.exe --instalar-usuario   sobe no logon deste usuário (sem admin)
-    rajant_monitor.exe --remover-usuario    tira do logon
-    rajant_monitor.exe --instalar-servico   tarefa agendada: sobe com o Windows (admin)
-    rajant_monitor.exe --remover-servico    tira a tarefa agendada
+    rajant_monitor.exe              (dois cliques) sobe tudo oculto e fecha
+    rajant_monitor.exe --parar      derruba o supervisor e os três
+    rajant_monitor.exe --status     o que está no ar, e em que porta
+    rajant_monitor.exe --servico    o supervisor, nesta janela
 
 A configuração fica em [servicos] do config.ini. Caminho vazio = procura
 nos lugares de instalação comuns; o log diz o que achou e o que não achou.
@@ -22,7 +18,6 @@ import os, sys, time, json, socket, signal, logging, subprocess, glob
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-NOME_TAREFA = "Rajant Monitor"
 ARQ_PID = "servico.pid"
 ARQ_LOG = "servico.log"
 PASTA_LOGS = "logs"
@@ -39,18 +34,18 @@ DEFAULTS_SERVICOS = {
     "iniciar_prometheus": "true",
     "iniciar_grafana": "true",
     "iniciar_exportador": "true",
-    # Segundos de espera ao ligar a máquina antes de subir tudo: a rede e
-    # os serviços do Windows ainda estão subindo.
-    "espera_inicial_s": "20",
+    # Segundos de espera antes de subir tudo. 0 com dois cliques; quem puser
+    # o .exe para abrir com o Windows dá tempo para a rede subir.
+    "espera_inicial_s": "0",
 }
 
 # Acrescentada ao fim do config.ini quando falta — acrescentada, não
 # regravada: regravar o arquivo apagaria os comentários do usuário.
 SECAO_SERVICOS = """
 [servicos]
-# Modo serviço (rajant_monitor.exe --servico): sobe estes programas em
-# segundo plano, sem janela, e os reergue se caírem. Caminho vazio =
-# procurar nos lugares de instalação comuns (o servico.log diz o que achou).
+# Dois cliques no rajant_monitor.exe sobem estes programas em segundo
+# plano, sem janela, e os reerguem se caírem. Caminho vazio = procurar nos
+# lugares de instalação comuns (o servico.log diz o que achou).
 # Ex.: prometheus_exe = C:\\prometheus\\prometheus.exe
 prometheus_exe     =
 prometheus_args    = --config.file=prometheus.yml
@@ -63,8 +58,9 @@ grafana_porta      = 3000
 iniciar_prometheus = true
 iniciar_grafana    = true
 iniciar_exportador = true
-# Espera ao ligar a máquina, antes de subir tudo (a rede ainda está subindo).
-espera_inicial_s   = 20
+# Segundos de espera antes de subir tudo (útil se o .exe abrir junto com o
+# Windows, enquanto a rede ainda sobe).
+espera_inicial_s   = 0
 """
 
 EH_WINDOWS = sys.platform.startswith("win")
@@ -74,18 +70,24 @@ log = logging.getLogger("servico")
 # ── onde estamos ──────────────────────────────────────────────
 def pasta_do_programa():
     """A pasta do .exe (ou do .py). Tudo — config, logs, pid — é relativo a
-    ela: iniciado pelo Agendador como SYSTEM, a pasta corrente seria
-    C:\\Windows\\System32, e o config.ini nasceria lá."""
+    ela: aberto por atalho ou de outra pasta, a pasta corrente seria outra,
+    e o config.ini nasceria lá."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-def comando_do_exportador():
-    """Como chamar o exportador: o mesmo .exe, ou o .py pelo mesmo Python."""
+def comando_do_programa():
+    """O mesmo .exe, ou o .py pelo mesmo Python."""
     if getattr(sys, "frozen", False):
         return [sys.executable]
     return [sys.executable, str(pasta_do_programa() / "rajant_monitor.py")]
+
+
+def comando_do_exportador():
+    # --exportador explícito: sem argumento o programa sobe o segundo plano,
+    # e o supervisor abriria outro supervisor em vez do exportador.
+    return comando_do_programa() + ["--exportador"]
 
 
 # ── configuração ──────────────────────────────────────────────
@@ -424,9 +426,9 @@ def rodar(cfg, base=None, voltas=None, intervalo=5.0, espera_inicial=None):
     if ant and ant != os.getpid() and pid_vivo(ant):
         log.info(f"já há um supervisor no ar (pid {ant}); saindo")
         return 1
-    # Já, e não só depois da espera inicial: nesses 20 s um segundo
-    # --iniciar não veria ninguém e abriria outro supervisor, e o --parar
-    # não acharia o que parar.
+    # Já, e não só depois da espera inicial: nela um segundo duplo clique
+    # não veria ninguém e abriria outro supervisor, e o --parar não acharia
+    # o que parar.
     _gravar_pid([], base)
     servicos, avisos = montar_servicos(cfg, base)
     log.info("=" * 60)
@@ -436,7 +438,7 @@ def rodar(cfg, base=None, voltas=None, intervalo=5.0, espera_inicial=None):
     for a in avisos:
         log.info(f"  AVISO: {a}")
     if espera_inicial is None:
-        espera_inicial = cfg.getint("servicos", "espera_inicial_s", fallback=20)
+        espera_inicial = cfg.getint("servicos", "espera_inicial_s", fallback=0)
     if espera_inicial > 0:
         log.info(f"  aguardando {espera_inicial} s antes de subir")
         time.sleep(espera_inicial)
@@ -500,219 +502,90 @@ def status(cfg, base=None):
     servicos, avisos = montar_servicos(cfg, base)
     for a in avisos:
         print(f"  aviso: {a}")
-    ini = inicializacao()
-    if ini is not None:
-        print("Inicialização: " + ("; ".join(ini) if ini else
-              "NENHUMA — depois de reiniciar, nada sobe sozinho"))
     return 0
 
 
-def xml_da_tarefa(cmd, pasta):
-    """Definição da tarefa agendada. Pelo XML, e não pelas opções do
-    schtasks: tarefa criada pela linha de comando vem com "parar se rodar
-    mais de 3 dias" — o supervisor seria derrubado na quinta-feira."""
-    from xml.sax.saxutils import escape
-    exe, args = cmd[0], " ".join(cmd[1:])
-    return f"""<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>Rajant Monitor: exportador, Prometheus e Grafana em segundo plano.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <BootTrigger><Enabled>true</Enabled></BootTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
-    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>{escape(exe)}</Command>
-      <Arguments>{escape(args)}</Arguments>
-      <WorkingDirectory>{escape(str(pasta))}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"""
-
-
-def instalar_tarefa(base=None):
+def _console_proprio():
+    """Aberto com dois cliques? Aí o console é só deste processo e fecha
+    junto com ele: a mensagem precisa de tempo na tela para ser lida.
+    Aberto pelo cmd, o console é do cmd e continua lá."""
     if not EH_WINDOWS:
-        print("A tarefa agendada é do Windows. No Linux, use um serviço do "
-              "systemd chamando:  rajant_monitor.py --servico")
-        return 1
-    base = Path(base or pasta_do_programa())
-    cmd = comando_do_exportador() + ["--servico"]
-    xml = base / "tarefa_rajant_monitor.xml"
-    xml.write_text(xml_da_tarefa(cmd, base), encoding="utf-16")
-    r = subprocess.run(["schtasks", "/Create", "/TN", NOME_TAREFA, "/XML",
-                        str(xml), "/F"], capture_output=True, text=True)
-    print((r.stdout or "") + (r.stderr or ""))
-    if r.returncode != 0:
-        print("Não foi possível criar a tarefa. Rode como administrador "
-              "(botão direito > Executar como administrador).\n"
-              "Sem administrador nesta máquina: instalar_inicializacao_usuario.bat "
-              "(sobe no logon do seu usuário).")
-        return r.returncode
-    subprocess.run(["schtasks", "/Run", "/TN", NOME_TAREFA], capture_output=True)
-    print(f"Tarefa '{NOME_TAREFA}' criada e iniciada. Ela sobe sozinha a cada "
-          f"vez que o Windows liga, mesmo sem ninguém fazer login.")
-    return 0
-
-
-def remover_tarefa(base=None):
-    parar_tudo(base)
-    if not EH_WINDOWS:
-        return 0
-    r = subprocess.run(["schtasks", "/Delete", "/TN", NOME_TAREFA, "/F"],
-                       capture_output=True, text=True)
-    print((r.stdout or "") + (r.stderr or ""))
-    return r.returncode
-
-
-# ── inicialização sem administrador ──────────────────────────
-# HKCU\...\Run: o Windows roda o comando no logon DESTE usuário. Não pede
-# administrador — é a chave que Teams e OneDrive usam para abrir com o
-# Windows. Limite: só roda depois do login, e o logoff encerra tudo.
-CHAVE_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
-
-
-def linha_de_inicio():
-    """O comando gravado no Run. Entre aspas: a pasta pode ter espaço."""
-    return subprocess.list2cmdline(comando_do_exportador() + ["--iniciar"])
-
-
-def _run_ler():
-    import winreg
+        return False
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CHAVE_RUN) as k:
-            return winreg.QueryValueEx(k, NOME_TAREFA)[0]
-    except OSError:
-        return None
-
-
-def _run_gravar(valor):
-    import winreg
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, CHAVE_RUN, 0,
-                            winreg.KEY_SET_VALUE) as k:
-        winreg.SetValueEx(k, NOME_TAREFA, 0, winreg.REG_SZ, valor)
-
-
-def _run_apagar():
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CHAVE_RUN, 0,
-                            winreg.KEY_SET_VALUE) as k:
-            winreg.DeleteValue(k, NOME_TAREFA)
-        return True
-    except OSError:
+        import ctypes
+        lista = (ctypes.c_uint * 4)()
+        return ctypes.windll.kernel32.GetConsoleProcessList(lista, 4) == 1
+    except Exception:
         return False
 
 
-def _tarefa_existe():
-    r = subprocess.run(["schtasks", "/Query", "/TN", NOME_TAREFA],
-                       capture_output=True, creationflags=0x08000000)
-    return r.returncode == 0
-
-
-def inicializacao():
-    """O que faz o monitor subir sozinho, em texto. None fora do Windows."""
-    if not EH_WINDOWS:
-        return None
-    achados = []
+def _aguardar(segundos):
+    """Segura a janela por `segundos`; qualquer tecla fecha antes. Com
+    prazo, e não input(): aberto escondido, um input() ficaria esperando
+    para sempre uma tecla que ninguém pode apertar."""
+    print(f"\n(esta janela fecha em {segundos} s; qualquer tecla fecha agora)")
     try:
-        if _tarefa_existe():
-            achados.append(f"tarefa '{NOME_TAREFA}' (sobe com a máquina)")
-    except OSError:
-        pass
-    valor = _run_ler()
-    if valor:
-        txt = f"logon de {os.environ.get('USERNAME', 'este usuário')}"
-        if valor != linha_de_inicio():
-            # Pasta movida ou copiada: o logon abriria a versão antiga.
-            txt += f" — ATENÇÃO, aponta para outro lugar: {valor}"
-        achados.append(txt)
-    return achados
+        import msvcrt
+        fim = time.time() + segundos
+        while time.time() < fim:
+            if msvcrt.kbhit():
+                msvcrt.getch()
+                return
+            time.sleep(0.1)
+    except ImportError:
+        time.sleep(segundos)
 
 
-def iniciar(base=None):
-    """Sobe o supervisor oculto e volta na hora. É o que o logon chama: a
-    janela deste processo abre e fecha, e o supervisor fica num console
-    escondido."""
+def _enderecos(cfg):
+    print(f"  Grafana:     http://localhost:"
+          f"{cfg.get('servicos', 'grafana_porta', fallback='3000')}")
+    print(f"  Relatórios:  http://localhost:"
+          f"{cfg.get('relatorio', 'porta_relatorio', fallback='8010')}")
+    print("  Para parar:  parar_tudo.bat  (ou rajant_monitor.exe --parar)")
+
+
+def iniciar(cfg, base=None, segurar_janela=None):
+    """O que os dois cliques fazem: sobe o supervisor oculto, diz o que
+    subiu e o que faltou, e fecha. O supervisor fica num console escondido
+    e sobe Prometheus, Grafana e o exportador."""
     base = Path(base or pasta_do_programa())
+    if segurar_janela is None:
+        segurar_janela = _console_proprio()
     ant = _ler_pid(base).get("supervisor")
     if ant and pid_vivo(ant):
-        print(f"O supervisor já está no ar (pid {ant}).")
+        print(f"O Rajant Monitor já está rodando em segundo plano (pid {ant}).")
+        _enderecos(cfg)
+        if segurar_janela:
+            _aguardar(8)
         return 0
+    if not pasta_gravavel(base):
+        print(f"ERRO: esta pasta não aceita gravação pelo seu usuário: {base}\n"
+              f"O monitor grava config.ini e logs ao lado do .exe. Copie a "
+              f"pasta inteira para um lugar seu (ex.: "
+              f"{Path(os.environ.get('USERPROFILE', '~')) / 'RajantMonitor'}) "
+              f"e abra de lá.")
+        if segurar_janela:
+            _aguardar(60)
+        return 1
+    servicos, avisos = montar_servicos(cfg, base)
     flags, si = _abrir_oculto()
-    p = subprocess.Popen(comando_do_exportador() + ["--servico"], cwd=str(base),
+    p = subprocess.Popen(comando_do_programa() + ["--servico"], cwd=str(base),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, creationflags=flags,
                          startupinfo=si, start_new_session=not EH_WINDOWS)
-    print(f"Supervisor iniciado em segundo plano (pid {p.pid}). "
-          f"Registro: {base / ARQ_LOG}")
+    print(f"Rajant Monitor rodando em segundo plano (pid {p.pid}):")
+    for sv in servicos:
+        print(f"  {sv.nome:<11} {sv.cmd[0]}")
+    for a in avisos:
+        print(f"  AVISO: {a}")
+    _enderecos(cfg)
+    print(f"  Registro:    {base / ARQ_LOG}")
+    if segurar_janela:
+        _aguardar(60 if avisos else 8)
     return 0
 
 
-def instalar_usuario(base=None):
-    base = Path(base or pasta_do_programa())
-    if not EH_WINDOWS:
-        print("A inicialização no logon é do Windows. No Linux, use um "
-              "serviço do systemd --user chamando:  rajant_monitor.py --servico")
-        return 1
-    if not pasta_gravavel(base):
-        print(f"Esta pasta não aceita gravação pelo seu usuário: {base}\n"
-              f"O monitor grava config.ini, logs e cache ao lado do .exe. Copie "
-              f"a pasta inteira para um lugar seu, por exemplo "
-              f"{Path(os.environ.get('USERPROFILE', 'C:/Users/voce')) / 'RajantMonitor'}, "
-              f"e rode de lá.")
-        return 1
-    linha = linha_de_inicio()
-    try:
-        _run_gravar(linha)
-    except OSError as e:
-        print(f"Não foi possível gravar a inicialização do usuário: {e}")
-        return 1
-    print(f"Pronto: o Rajant Monitor sobe sozinho quando "
-          f"{os.environ.get('USERNAME', 'este usuário')} entrar no Windows, "
-          f"sem administrador.\n"
-          f"  Comando: {linha}\n"
-          f"  Atenção: com a máquina ligada e ninguém logado, nada roda; "
-          f"logoff encerra tudo. Bloquear a tela (Win+L) não para nada.")
-    return iniciar(base)
-
-
-def remover_usuario(base=None):
-    parar_tudo(base)
-    if not EH_WINDOWS:
-        return 0
-    print("Inicialização no logon removida." if _run_apagar()
-          else "Não havia inicialização no logon.")
-    return 0
-
-
-ACOES = {"--servico", "--iniciar", "--parar", "--status",
-         "--instalar-usuario", "--remover-usuario",
-         "--instalar-servico", "--remover-servico"}
+ACOES = {"--servico", "--iniciar", "--parar", "--status"}
 
 
 def executar(acao, cfg_loader):
@@ -721,17 +594,9 @@ def executar(acao, cfg_loader):
     os.chdir(base)
     if acao == "--parar":
         return parar_tudo(base)
-    if acao == "--iniciar":
-        return iniciar(base)
-    if acao == "--instalar-usuario":
-        return instalar_usuario(base)
-    if acao == "--remover-usuario":
-        return remover_usuario(base)
-    if acao == "--instalar-servico":
-        return instalar_tarefa(base)
-    if acao == "--remover-servico":
-        return remover_tarefa(base)
     cfg = cfg_servicos(cfg_loader(), base / "config.ini")
     if acao == "--status":
         return status(cfg, base)
+    if acao == "--iniciar":
+        return iniciar(cfg, base)
     return rodar(cfg, base)

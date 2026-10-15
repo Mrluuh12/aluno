@@ -58,12 +58,12 @@ foi descontinuado e saiu do código; está no histórico do git.
 
 | | |
 |---|---|
-| linhas | ~5300 (`rajant_monitor.py`) + ~740 (`servico_rajant.py`) |
+| linhas | ~5300 (`rajant_monitor.py`) + ~600 (`servico_rajant.py`) |
 | funções no topo | 101 |
 | classes | 6 |
 | famílias de métrica | 101 |
 | endpoints HTTP | 5 |
-| testes | 189, em 31 classes |
+| testes | 188, em 31 classes |
 | comentários | ~13% das linhas |
 
 Os comentários quase todos registram uma armadilha concreta. A convenção é
@@ -391,7 +391,8 @@ rádio.
 
 ### Sequência de subida
 
-1. ações de serviço (`--servico`, `--status`...) saem antes do argparse;
+1. sem argumento → `iniciar()` (§10); ações de serviço (`--servico`,
+   `--status`, `--parar`) também saem antes do argparse;
    no `.exe`, a pasta de trabalho vira a do executável
 2. lê config, resolve seeds, valida `padrao_tag`, avisa chave antiga
 3. `CacheIPs` (ou desligado)
@@ -404,58 +405,46 @@ rádio.
 
 ## 10. Modo serviço
 
-`servico_rajant.py`, chamado por `rajant_monitor.exe --servico`.
+`servico_rajant.py`. Sem argumento (dois cliques no `.exe`), o `main()`
+chama `iniciar()`; qualquer argumento é linha de comando, como sempre foi.
 
-### A tarefa do Windows
+### Os dois cliques
 
-`--instalar-servico` (pelo `instalar_inicializacao.bat`, como admin) cria a
-tarefa **Rajant Monitor** por **XML**, não pelas opções do `schtasks`: tarefa
-criada pela linha de comando vem com "parar se rodar mais de 3 dias", e o
-supervisor seria derrubado na quinta-feira. O XML põe:
+`iniciar()`:
 
-| | |
-|---|---|
-| gatilho | `BootTrigger` — na inicialização, sem ninguém logado |
-| usuário | `S-1-5-18` (SYSTEM), privilégio mais alto |
-| limite de execução | `PT0S` — nenhum |
-| se falhar | reinicia a cada 1 min |
-| bateria | não para nem deixa de iniciar |
+1. se o `servico.pid` aponta para um supervisor vivo, diz que já está
+   rodando e para — não abre outro;
+2. confere com `pasta_gravavel()` que a pasta do `.exe` aceita gravação;
+3. monta os serviços (para mostrar **antes** de ir para o fundo o que vai
+   subir e o que faltou — depois, o aviso só estaria no `servico.log`);
+4. abre `--servico` com `_abrir_oculto()` e mostra o que subiu, os avisos,
+   os endereços e como parar.
 
-Como SYSTEM a pasta corrente é `C:\Windows\System32`; por isso o `main()`
-faz `chdir` para a pasta do `.exe` antes de tudo.
+A janela só espera quando o console é **só dela** (`GetConsoleProcessList`
+devolve 1: dois cliques). Aberto pelo `cmd`, o console é do `cmd` e a saída
+fica lá. A espera é com prazo (8 s, ou 60 s se houver aviso; qualquer tecla
+fecha antes) e não `input()`: aberto escondido, um `input()` deixaria um
+processo esperando para sempre uma tecla que ninguém pode apertar.
 
-### Sem administrador: o login do usuário
+O supervisor abre o exportador com **`--exportador`** explícito: sem ele, o
+mesmo `.exe` sem argumento abriria outro supervisor, em laço.
 
-`--instalar-usuario` (pelo `instalar_inicializacao_usuario.bat`) grava o
-valor **Rajant Monitor** em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-(`winreg`, sem ferramenta externa): o Windows roda o comando no login daquele
-usuário, e a chave é dele — não pede administrador. O valor é
-`linha_de_inicio()`, o `.exe` entre aspas (a pasta pode ter espaço) com
-`--iniciar`.
+`pasta_gravavel()` confere **criando um arquivo de verdade**: `os.access` no
+Windows só olha o atributo somente-leitura, e `Program Files` sem
+administrador passa nele e falha na hora de gravar — o supervisor morreria
+calado num console escondido. A mesma conferência vira aviso para as pastas
+`data\` do Prometheus e do Grafana, que os dois gravam dentro da própria
+instalação.
 
-`--iniciar` abre `--servico` com o mesmo `_abrir_oculto()` dos filhos e
-volta na hora: a janela do `.exe` de console pisca e fecha, o supervisor fica
-num console escondido. Se o `servico.pid` aponta para um supervisor vivo, não
-abre outro.
-
-Antes de gravar, `pasta_gravavel()` confere a pasta do `.exe` **criando um
-arquivo de verdade**: `os.access` no Windows só olha o atributo
-somente-leitura, e `Program Files` sem administrador passa nele e falha na
-hora de gravar — o supervisor morreria calado num console escondido. A mesma
-conferência vira aviso para as pastas `data\` do Prometheus e do Grafana, que
-os dois gravam dentro da própria instalação.
-
-Limites, que não têm contorno sem administrador: só roda depois do login, e
-o logoff encerra tudo. `--status` diz o que está configurado (tarefa, login
-ou nenhum) e avisa se o valor do login aponta para outra pasta — o monitor
-copiado para outro lugar, com o login ainda abrindo a versão antiga.
+Nada disso pede administrador. O limite é o da sessão do Windows: logoff
+encerra tudo, e depois de reiniciar são os dois cliques de novo.
 
 ### O supervisor
 
 `rodar()`: instância única (pelo `servico.pid`), grava o pid **antes** da
-espera inicial (nesses 20 s um segundo `--iniciar` abriria outro supervisor,
-e o `--parar` não acharia nada), espera `espera_inicial_s`, monta os
-serviços e confere a cada 5 s.
+espera inicial (nela um segundo duplo clique abriria outro supervisor, e o
+`--parar` não acharia nada), espera `espera_inicial_s` (0 por padrão),
+monta os serviços e confere a cada 5 s.
 
 `Servico.verificar()`:
 
@@ -480,8 +469,8 @@ nunca o próprio processo nem o próprio grupo.
 ### Onde estão os programas
 
 `[servicos] prometheus_exe` e `grafana_exe`; vazio = procurar em
-`raizes_de_instalacao()` (pasta do monitor, a de cima, `C:\`, `D:\`,
-`Program Files`). O Grafana roda com `--homepath` na raiz da instalação (a
+`raizes_de_instalacao()` (pasta do monitor, a de cima, a pasta do usuário,
+`AppData\Local\Programs`, `C:\`, `D:\`, `Program Files`). O Grafana roda com `--homepath` na raiz da instalação (a
 pasta acima de `bin\`); `grafana.exe` novo recebe `server`. O Prometheus roda
 na própria pasta, então `--config.file=prometheus.yml` é o de lá.
 
@@ -695,10 +684,9 @@ Chaves antigas ignoradas, com aviso no log: `manter_ultimo_valor_s`,
 
 | flag | o que faz |
 |---|---|
-| (nenhuma) | exportador + página web |
-| `--servico` / `--iniciar` / `--status` / `--parar` | supervisor (§10) |
-| `--instalar-usuario` / `--remover-usuario` | sobe no login, sem administrador |
-| `--instalar-servico` / `--remover-servico` | a tarefa do Windows (administrador) |
+| (nenhuma) | exportador + Prometheus + Grafana em segundo plano (§10) |
+| `--exportador` | só exportador + página web, nesta janela |
+| `--servico` / `--status` / `--parar` | supervisor (§10) |
 | `--seed` / `--role` / `--password` / `--port` | rede e credenciais |
 | `--interval` / `--metrics-port` / `--porta-relatorio` | ciclo e portas |
 | `--sem-relatorios` | sobe só o exporter |
@@ -712,7 +700,7 @@ Chaves antigas ignoradas, com aviso no log: `manter_ultimo_valor_s`,
 
 ## 18. Testes
 
-`teste_parser.py`: **189 testes em 31 classes**, rodando **sem rádio e sem a
+`teste_parser.py`: **188 testes em 31 classes**, rodando **sem rádio e sem a
 `rajant_api`** (há um stub no topo). Com a biblioteca instalada, roda também
 os testes do protocolo real contra um rádio simulado; sem ela, esses são
 pulados.
@@ -723,7 +711,7 @@ pulados.
 | publicação e séries | `TestPublicar`, `TestCPUDerivada`, `TestRobustez`, `TestSeriesNoMetrics`, `TestInterferencia` |
 | coleta e tag | `TestIntervaloMoveis`, `TestDescobertaEFiltro`, `TestIdentidadeDoVizinho`, `TestLeituraDoEstado` |
 | protocolo | `TestLoginBCAPI` (rádio falso que fala o login e o State reais, em pedaços como pelo TLS), `TestShimSslWrapSocket` |
-| modo serviço | `TestServicoSegundoPlano` (Prometheus e Grafana falsos, porta já atendida, pid, tarefa XML) |
+| modo serviço | `TestServicoSegundoPlano` (Prometheus e Grafana falsos, porta já atendida, pid, dois cliques) |
 | relatório | `TestSemanalSemSurvey`, `TestTituloDoSlide`, `TestRemocaoDaSecaoDeSurvey`, `TestSlidesTecnicosNoSemanal`, `TestIdentidadeAnglo`, `TestIdentidadeNoSemanal` |
 | web | `TestPaginaSoRelatorios` (servidor de verdade numa porta livre), `TestPainelHTML` |
 
@@ -744,8 +732,8 @@ tudo.
 `build/gerar_exe.bat` gera `rajant_monitor.exe` no Windows, em cinco passos
 com log completo em `build/log_build.txt`, e copia para `dist\rajant_monitor\`
 o que é editável sem recompilar: `painel/`, `marca/`, o template, o
-`config.ini` e os arquivos de `build\windows\` (instalar/remover a
-inicialização, parar tudo, iniciar oculto, `prometheus_exemplo.yml`).
+`config.ini` e os arquivos de `build\windows\` (`parar_tudo.bat`,
+`prometheus_exemplo.yml`).
 
 Decisões que custaram:
 
@@ -818,12 +806,11 @@ rádios.
 | linha reta no Grafana | `segurar_serie_s` alto | §6 |
 | rádio não aparece | nome sem tag | log `ignorado: nome sem tag`, `rajant_bc_sem_tag` (§7) |
 | "autenticacao falhou" em todos | papel inexistente ou senha | a mensagem diz qual (§4) |
-| nada sobe depois de reiniciar | inicialização não criada, ou caminhos | `--status`, `servico.log` (§10) |
-| sem administrador na máquina | — | `instalar_inicializacao_usuario.bat`: sobe no login (§10) |
-| sobe no login mas não grava log | pasta sem permissão (Program Files) | copie para uma pasta do usuário (§10) |
+| Grafana ou Prometheus não sobe | caminho não achado ou pasta sem gravação | a janela dos dois cliques, `--status`, `servico.log` (§10) |
+| "pasta não aceita gravação" | monitor em Program Files | copie para uma pasta do usuário (§10) |
 | Grafana não sobe sem admin | instalado pelo `.msi` | versão zip numa pasta do usuário |
 | Grafana não sobe pelo supervisor | já é serviço do Windows | `iniciar_grafana = false` |
-| `config.ini` em `System32` | versão antiga do exe | o atual faz `chdir` para a pasta dele |
+| `config.ini` em outra pasta | versão antiga do exe, aberta por atalho | o atual faz `chdir` para a pasta dele |
 | 150 BCs viram 600 | agrupamento de nó físico | `_publicar_identidade` (§7) |
 | deck sem logo | falta a pasta `marca/` | §13 |
 | botão do menu não navega | hyperlink no run | `_limpar_link_de_texto` (§12) |
@@ -850,8 +837,8 @@ main                                      →  main
 ```
 
 `servico_rajant.py`: localização (`achar_prometheus`, `achar_grafana`),
-processos (`_abrir_oculto`, `matar`), `Servico`, `rodar`, tarefa
-(`xml_da_tarefa`, `instalar_tarefa`), `executar`.
+processos (`_abrir_oculto`, `matar`, `pasta_gravavel`), `Servico`, `rodar`,
+os dois cliques (`iniciar`), `executar`.
 
 ---
 

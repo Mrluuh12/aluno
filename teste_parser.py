@@ -852,19 +852,6 @@ class TestServicoSegundoPlano(unittest.TestCase):
         self.assertTrue(exe.endswith("grafana-server"))
         self.assertEqual(Path(raiz), (self.tmp / "grafana").resolve())
 
-    def test_tarefa_agendada_sem_limite_de_tempo(self):
-        # schtasks /Create sem XML põe "parar após 3 dias".
-        from xml.dom.minidom import parseString
-        xml = self.sr.xml_da_tarefa([r"C:\rm\rajant_monitor.exe", "--servico"],
-                                    r"C:\rm")
-        doc = parseString(xml.replace('encoding="UTF-16"', 'encoding="UTF-8"'))
-        txt = lambda t: doc.getElementsByTagName(t)[0].firstChild.data
-        self.assertEqual(txt("ExecutionTimeLimit"), "PT0S")
-        self.assertEqual(txt("UserId"), "S-1-5-18")              # SYSTEM
-        self.assertEqual(len(doc.getElementsByTagName("BootTrigger")), 1)
-        self.assertEqual(txt("Arguments"), "--servico")
-        self.assertEqual(txt("WorkingDirectory"), r"C:\rm")
-
     def test_exportador_sob_o_servico_nao_escreve_no_console(self):
         import logging as _lg
         with mock.patch.dict(os.environ, {"RAJANT_SERVICO": "1"}):
@@ -878,61 +865,84 @@ class TestServicoSegundoPlano(unittest.TestCase):
         self.assertLess(fonte.index("servico_rajant.executar"),
                         fonte.index("ap.parse_args()"))
 
-    # ── sem administrador (campo, 15/10/2026: "não tenho acesso ao
-    # administrador na máquina") ──────────────────────────────────────
-    def test_logon_grava_o_comando_entre_aspas(self):
-        # Pasta com espaço: sem aspas o Windows tentaria abrir "C:\Rajant".
-        exe = r"C:\Rajant Monitor\rajant_monitor.exe"
-        with mock.patch.object(self.sr, "comando_do_exportador",
-                               return_value=[exe]):
-            linha = self.sr.linha_de_inicio()
-        self.assertEqual(linha, f'"{exe}" --iniciar')
+    # ── dois cliques no .exe (campo, 15/10/2026: "pode ser o executável
+    # mesmo") ───────────────────────────────────────────────────────────
+    def test_sem_argumento_sobe_o_segundo_plano(self):
+        fonte = inspect.getsource(rm.main)
+        self.assertIn('else ["--iniciar"]', fonte)
+        self.assertLess(fonte.index('["--iniciar"]'), fonte.index("ap.parse_args()"))
 
-    def test_instalar_usuario_grava_no_logon_e_ja_inicia(self):
-        gravado = []
-        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
-             mock.patch.object(self.sr, "_run_gravar", gravado.append), \
-             mock.patch.object(self.sr, "iniciar", return_value=0) as ini, \
-             mock.patch.object(self.sr, "linha_de_inicio",
-                               return_value='"C:\\rm\\rajant_monitor.exe" --iniciar'):
-            self.assertEqual(self.sr.instalar_usuario(self.tmp), 0)
-        self.assertEqual(gravado, ['"C:\\rm\\rajant_monitor.exe" --iniciar'])
-        ini.assert_called_once()
+    def test_o_exportador_e_chamado_com_flag_explicita(self):
+        # Sem a flag, o .exe aberto pelo supervisor subiria OUTRO supervisor
+        # (sem argumento = segundo plano), em laço.
+        self.assertEqual(self.sr.comando_do_exportador()[-1], "--exportador")
+        sv, _ = self.sr.montar_servicos(
+            self._cfg_com(iniciar_exportador="true"), self.tmp)
+        exp = [s for s in sv if s.nome == "Exportador"][0]
+        self.assertEqual(exp.cmd[-1], "--exportador")
+        self.assertIn('"--exportador"', inspect.getsource(rm.main))
 
-    def test_instalar_usuario_recusa_pasta_sem_gravacao(self):
-        # Program Files sem administrador: o monitor nao conseguiria gravar
-        # config.ini nem log, e morreria calado num console escondido.
+    def _cfg_com(self, **extra):
+        import configparser
+        c = configparser.ConfigParser()
+        c.read_dict({"servicos": dict(self.cfg["servicos"], **extra)})
+        return c
+
+    def _iniciar(self, **kw):
         import io, contextlib
         saida = io.StringIO()
-        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
-             mock.patch.object(self.sr, "pasta_gravavel", return_value=False), \
-             mock.patch.object(self.sr, "_run_gravar") as grava, \
+        with mock.patch.object(self.sr.subprocess, "Popen") as po, \
              contextlib.redirect_stdout(saida):
-            self.assertEqual(self.sr.instalar_usuario(self.tmp), 1)
-        grava.assert_not_called()
-        self.assertIn("não aceita gravação", saida.getvalue())
-
-    def test_remover_usuario_para_e_apaga(self):
-        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
-             mock.patch.object(self.sr, "_run_apagar", return_value=True) as apaga, \
-             mock.patch.object(self.sr, "parar_tudo") as para:
-            self.sr.remover_usuario(self.tmp)
-        apaga.assert_called_once(); para.assert_called_once()
+            po.return_value.pid = 4321
+            cod = self.sr.iniciar(self.cfg, self.tmp, segurar_janela=False, **kw)
+        return cod, po, saida.getvalue()
 
     def test_iniciar_abre_o_supervisor_oculto_e_volta(self):
-        with mock.patch.object(self.sr.subprocess, "Popen") as po:
-            po.return_value.pid = 4321
-            self.assertEqual(self.sr.iniciar(self.tmp), 0)
+        cod, po, txt = self._iniciar()
+        self.assertEqual(cod, 0)
         args, kw = po.call_args
         self.assertEqual(args[0][-1], "--servico")
         self.assertEqual(kw["cwd"], str(self.tmp))
         self.assertIs(kw["stdout"], self.sr.subprocess.DEVNULL)
+        # A janela diz o que subiu e onde abrir.
+        self.assertIn("Prometheus", txt); self.assertIn("Grafana", txt)
+        self.assertIn(f"http://localhost:{self.pg}", txt)
+        self.assertIn("parar_tudo.bat", txt)
+
+    def test_iniciar_mostra_o_que_faltou(self):
+        # Antes de ir para o fundo: depois, o aviso só estaria no log.
+        self.cfg.set("servicos", "grafana_exe", str(self.tmp / "nao_existe"))
+        _, _, txt = self._iniciar()
+        self.assertIn("AVISO: Grafana não encontrado", txt)
+        self.assertIn("grafana_exe", txt)
 
     def test_iniciar_nao_duplica_o_supervisor(self):
         (self.tmp / "servico.pid").write_text(json.dumps({"supervisor": os.getpid()}))
-        with mock.patch.object(self.sr.subprocess, "Popen") as po:
-            self.assertEqual(self.sr.iniciar(self.tmp), 0)
+        cod, po, txt = self._iniciar()
+        self.assertEqual(cod, 0)
         po.assert_not_called()
+        self.assertIn("já está rodando", txt)
+
+    def test_iniciar_recusa_pasta_sem_gravacao(self):
+        # Program Files sem administrador: o supervisor não gravaria log nem
+        # pid e morreria calado no console escondido.
+        with mock.patch.object(self.sr, "pasta_gravavel", return_value=False):
+            cod, po, txt = self._iniciar()
+        self.assertEqual(cod, 1)
+        po.assert_not_called()
+        self.assertIn("não aceita gravação", txt)
+
+    def test_janela_nao_espera_tecla_para_sempre(self):
+        # Aberto escondido, um input() travaria um processo para sempre.
+        import ast
+        chamadas = [n.func.id for n in ast.walk(ast.parse(inspect.getsource(self.sr)))
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        self.assertNotIn("input", chamadas)
+        t0 = time.time()
+        with mock.patch.object(self.sr.time, "sleep") as dorme:
+            self.sr._aguardar(3)
+        self.assertLess(time.time() - t0, 2)
+        self.assertTrue(dorme.called)
 
     def test_pid_gravado_antes_da_espera_inicial(self):
         # Nos 20 s de espera ao ligar, um segundo --iniciar abriria outro
@@ -965,31 +975,14 @@ class TestServicoSegundoPlano(unittest.TestCase):
         (self.tmp / "arquivo").write_text("x")
         self.assertFalse(self.sr.pasta_gravavel(self.tmp / "arquivo" / "sub"))
 
-    def test_status_diz_o_que_sobe_sozinho(self):
-        import io, contextlib
-        for ini, esperado in ((["logon de mina"], "Inicialização: logon de mina"),
-                              ([], "NENHUMA")):
-            saida = io.StringIO()
-            with mock.patch.object(self.sr, "inicializacao", return_value=ini), \
-                 contextlib.redirect_stdout(saida):
-                self.sr.status(self.cfg, self.tmp)
-            self.assertIn(esperado, saida.getvalue())
+    def test_acoes(self):
+        self.assertEqual(self.sr.ACOES,
+                         {"--servico", "--iniciar", "--parar", "--status"})
+        self.assertIn('acao == "--iniciar"', inspect.getsource(self.sr.executar))
 
-    def test_logon_apontando_para_pasta_antiga_e_avisado(self):
-        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
-             mock.patch.object(self.sr, "_tarefa_existe", return_value=False), \
-             mock.patch.object(self.sr, "_run_ler",
-                               return_value='"D:\\velho\\rajant_monitor.exe" --iniciar'), \
-             mock.patch.object(self.sr, "linha_de_inicio",
-                               return_value='"C:\\novo\\rajant_monitor.exe" --iniciar'):
-            ini = self.sr.inicializacao()
-        self.assertEqual(len(ini), 1)
-        self.assertIn("outro lugar", ini[0])
-
-    def test_acoes_novas_sao_despachadas(self):
-        for a in ("--iniciar", "--instalar-usuario", "--remover-usuario"):
-            self.assertIn(a, self.sr.ACOES)
-            self.assertIn(f'acao == "{a}"', inspect.getsource(self.sr.executar))
+    def test_sem_espera_inicial_por_padrao(self):
+        # Era 20 s para o boot; com dois cliques, 20 s olhando para nada.
+        self.assertEqual(self.sr.DEFAULTS_SERVICOS["espera_inicial_s"], "0")
 
 
 class TestRobustez(unittest.TestCase):

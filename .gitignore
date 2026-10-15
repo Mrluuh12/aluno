@@ -16,6 +16,5 @@ rajant_monitor.log
 servico.log*
 servico.pid
 logs/
-tarefa_rajant_monitor.xml
 rajant_monitor.log.*
 rajant_ips_cache.json

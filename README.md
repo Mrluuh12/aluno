@@ -15,10 +15,10 @@ isolada.
 ## Por onde começar
 
 ```bash
-python3 rajant_monitor.py                      # sobe exportador + página web
-python3 rajant_monitor.py --servico            # exportador + Prometheus + Grafana, em segundo plano
+python3 rajant_monitor.py                      # exportador + Prometheus + Grafana, em segundo plano
+python3 rajant_monitor.py --exportador         # só exportador + página web, nesta janela
 python3 rajant_monitor.py --gerar-relatorio 2026-10-08 2026-10-14 --demo
-python3 teste_parser.py                        # 189 testes
+python3 teste_parser.py                        # 188 testes
 ```
 
 A página web fica em `http://<servidor>:<porta_relatorio>/` (padrão 8010):
@@ -31,8 +31,8 @@ diagnóstico de um BreadCrumb pelo IP.
 |---|---|
 | `rajant_monitor.py` | coleta, métricas, relatório semanal (Excel/PPT), página web |
 | `servico_rajant.py` | modo serviço: sobe e vigia exportador, Prometheus e Grafana |
-| `teste_parser.py` | 189 testes; roda sem rádio e sem a lib `rajant_api` |
-| `build/` | geração do `.exe` (PyInstaller) e os `.bat` de inicialização |
+| `teste_parser.py` | 188 testes; roda sem rádio e sem a lib `rajant_api` |
+| `build/` | geração do `.exe` (PyInstaller), `parar_tudo.bat` e o `prometheus.yml` de exemplo |
 | `ARQUITETURA.md` | como funciona por dentro: camadas, threads, invariantes |
 | `AUDITORIA_METRICAS.md` | as métricas conferidas campo a campo contra os `.proto` |
 | `bcapi-ref/proto/` | os `.proto` do bcapi, referência de tudo que se afirma sobre a API |
@@ -57,71 +57,59 @@ linha reta no último valor.
 
 ## Rodar em segundo plano (Windows)
 
-Duas formas, conforme o acesso que se tem na máquina:
+**Dois cliques no `rajant_monitor.exe`.** Ele sobe o exportador, o
+Prometheus e o Grafana **ocultos**, mostra numa janela o que subiu e onde
+abrir, e a janela fecha sozinha (qualquer tecla fecha antes):
 
-| | sem administrador | com administrador |
-|---|---|---|
-| instalar | dois cliques em **`instalar_inicializacao_usuario.bat`** | botão direito em **`instalar_inicializacao.bat`** → *Executar como administrador* |
-| sobe quando | o **seu usuário entra** no Windows | a **máquina liga**, mesmo sem ninguém logado |
-| logoff | encerra tudo | não afeta |
-| remover | `remover_inicializacao_usuario.bat` | `remover_inicializacao.bat` |
+```
+Rajant Monitor rodando em segundo plano (pid 4812):
+  Prometheus  C:\Users\SEU_USUARIO\prometheus-2.53\prometheus.exe
+  Grafana     C:\Users\SEU_USUARIO\grafana-11.2\bin\grafana-server.exe
+  Exportador  C:\Users\SEU_USUARIO\RajantMonitor\rajant_monitor.exe
+  Grafana:     http://localhost:3000
+  Relatórios:  http://localhost:8010
+  Para parar:  parar_tudo.bat  (ou rajant_monitor.exe --parar)
+```
 
-Nas duas, o que roda é `rajant_monitor.exe --servico`, o supervisor:
+Não pede administrador. Depois de reiniciar a máquina, é dar os dois cliques
+de novo. Dois cliques com ele já rodando não abrem um segundo — a janela só
+diz que já está no ar.
 
-- espera `espera_inicial_s` (20 s) para a rede subir;
-- sobe os três programas **ocultos** e confere a cada 5 s se seguem de pé;
+Quem fica rodando escondido é um supervisor (`rajant_monitor.exe --servico`)
+que:
+
+- confere a cada 5 s se os três seguem de pé;
 - reergue quem cair, com espera crescente (5, 10, 30, 60 s) para não ficar
   em laço com um programa que cai na partida;
 - se a porta já estiver atendida por outro processo (ex.: Grafana instalado
   como serviço do Windows), não sobe um segundo — só passa a cuidar dele se
   aquele cair.
 
+| comando | o que faz |
+|---|---|
+| dois cliques no `rajant_monitor.exe` | sobe tudo em segundo plano |
+| `parar_tudo.bat` | para supervisor, exportador, Prometheus e Grafana |
+| `rajant_monitor.exe --status` | se o supervisor está no ar e se cada porta responde |
+| `rajant_monitor.exe --exportador` | só o exportador e a página, nesta janela (para ver o log na tela) |
+
 ### Sem administrador
-
-O `.bat` grava a linha de partida em
-`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` — a chave
-do próprio usuário, a mesma que Teams e OneDrive usam para abrir com o
-Windows — e já sobe tudo na hora. No login, o Windows chama
-`rajant_monitor.exe --iniciar`: uma janela abre e fecha num instante, e o
-supervisor fica rodando escondido.
-
-Para isso funcionar sem administrador:
 
 - **A pasta do monitor tem de ser sua.** Ele grava `config.ini`, logs e
   cache ao lado do `.exe`. Use algo como `C:\Users\SEU_USUARIO\RajantMonitor`,
-  não `Program Files`. O instalador confere e avisa.
+  não `Program Files`. Se a pasta não aceitar gravação, a janela diz isso em
+  vez de ir para o fundo.
 - **Prometheus e Grafana na versão zip**, extraídos numa pasta sua (os dois
   gravam em `data\` dentro da própria pasta). O instalador `.msi` do Grafana
   pede administrador. Pondo as pastas `prometheus-*` e `grafana-*` dentro ou
-  ao lado da pasta do monitor, ele as acha sozinho; o `--status` avisa se uma
-  delas estiver numa pasta onde não dá para gravar.
-- **Não faça logoff.** Bloquear a tela (Win+L) não para nada; sair da conta
-  ou reiniciar sem entrar de novo deixa tudo parado até o próximo login.
+  ao lado da pasta do monitor, ele as acha sozinho; a janela avisa se uma
+  delas faltar ou estiver numa pasta onde não dá para gravar.
+- **Sair da conta (logoff) encerra tudo.** Bloquear a tela (Win+L) não para
+  nada.
 - **Firewall:** na primeira vez, o Windows pode perguntar se libera o acesso
   à rede. Sem administrador, cancele: tudo continua funcionando nesta
   máquina (o Prometheus lê o exportador por `localhost`). O que fica
   bloqueado é abrir o Grafana ou a página de relatórios **de outro
   computador** — para isso a TI precisa liberar as portas 3000 e 8010.
-
-Se a TI bloquear essa forma de inicialização, a reserva é um atalho para
-`iniciar_oculto.vbs` em `Win+R` → `shell:startup`.
-
-### Comandos
-
-| comando | o que faz |
-|---|---|
-| `parar_tudo.bat` | para supervisor, exportador, Prometheus e Grafana |
-| `rajant_monitor.exe --iniciar` | sobe tudo agora, oculto, e devolve o prompt |
-| `rajant_monitor.exe --status` | supervisor, portas, e **o que sobe sozinho** (tarefa, login ou nenhum) |
-| `iniciar_oculto.vbs` | o mesmo que `--iniciar`, sem janela nenhuma |
-
-### Com administrador
-
-A tarefa **Rajant Monitor** no Agendador de Tarefas dispara na
-inicialização do Windows, roda como SYSTEM (sem ninguém logado), sem limite
-de tempo de execução e com reinício automático se o próprio supervisor cair.
-Se só a TI tem administrador, ela pode rodar o `instalar_inicializacao.bat`
-uma vez; depois disso ninguém mais precisa.
 
 Onde estão os programas — vazio = procurar na pasta do monitor, na pasta de
 cima, na pasta do usuário, em `AppData\Local\Programs`, em `C:\`, `D:\` e
@@ -149,8 +137,7 @@ Logs, todos ao lado do `.exe`:
 | `logs\exportador_erros.log` | só o que escapar do log do exportador |
 
 `config.ini`, cache e logs ficam **sempre** na pasta do executável, de onde
-quer que ele seja chamado — a tarefa roda como SYSTEM e o login abre em
-`C:\Windows\System32`, e sem isso o `config.ini` nasceria lá.
+quer que ele seja chamado (atalho na Área de Trabalho, outra pasta).
 
 ## Grafana: dado que parou de chegar
 

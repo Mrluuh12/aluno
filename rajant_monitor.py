@@ -5092,30 +5092,30 @@ def iniciar_servidor_relatorios(cfg):
 # MAIN — inicia exporter + servidor de relatórios juntos
 # ══════════════════════════════════════════════════════════════
 def main():
-    # Modo serviço: antes de tudo, porque muda a pasta de trabalho (config,
-    # logs e cache ficam ao lado do .exe, mesmo iniciado pelo Agendador).
     import servico_rajant
     # Executável: config.ini, logs, cache e relatórios ficam AO LADO dele,
-    # de onde quer que tenha sido chamado (atalho, Agendador, outra pasta).
-    # Antes iam para a pasta corrente — e o Agendador, como SYSTEM, abre em
-    # C:\Windows\System32.
+    # de onde quer que tenha sido chamado (atalho, outra pasta). Antes iam
+    # para a pasta corrente.
     if getattr(sys, "frozen", False):
         os.chdir(servico_rajant.pasta_do_programa())
-    acoes = [a for a in sys.argv[1:] if a in servico_rajant.ACOES]
+    # Dois cliques (nenhum argumento): exportador, Prometheus e Grafana em
+    # segundo plano, e a janela fecha. Qualquer argumento é linha de
+    # comando, como sempre foi.
+    acoes = ([a for a in sys.argv[1:] if a in servico_rajant.ACOES]
+             or ([] if sys.argv[1:] else ["--iniciar"]))
     if acoes:
         sys.exit(servico_rajant.executar(acoes[0], carregar_config))
     ap = argparse.ArgumentParser(
         description="Rajant Monitor — exporter Prometheus + relatorios Excel/PPT",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="segundo plano (exportador + Prometheus + Grafana):\n"
-               "  --servico            sobe e vigia os tres, nesta janela\n"
-               "  --iniciar            o mesmo, oculto, e devolve o prompt\n"
-               "  --instalar-usuario   sobe tudo no login deste usuario (sem admin)\n"
-               "  --remover-usuario    tira do login\n"
-               "  --instalar-servico   tarefa que sobe tudo com o Windows (admin)\n"
-               "  --remover-servico    apaga a tarefa\n"
-               "  --status             o que esta rodando e o que sobe sozinho\n"
-               "  --parar              para tudo")
+        epilog="sem argumento (dois cliques): exportador + Prometheus + Grafana\n"
+               "em segundo plano, e a janela fecha.\n"
+               "  --status             o que esta rodando\n"
+               "  --parar              para tudo\n"
+               "  --servico            o supervisor dos tres, nesta janela")
+    ap.add_argument("--exportador", action="store_true",
+                    help="So o exportador e a pagina web, nesta janela (o que o "
+                         "segundo plano roda).")
     ap.add_argument("--seed"); ap.add_argument("--password")
     # Maiúsculas ou minúsculas: a rajant-api só conhece VIEW/CO/ADMIN e
     # `papel_bcapi` normaliza; a lista antiga (VIEW, admin, co) recusava "CO".

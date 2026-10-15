@@ -127,7 +127,7 @@ REM  Logos da identidade Anglo: sem eles o deck sai sem marca.
 if exist marca                     xcopy /E /I /Y marca dist\rajant_monitor\marca >> "%LOG%" 2>&1
 if exist Relatorio_Semanal_Rede.pptx copy /Y Relatorio_Semanal_Rede.pptx dist\rajant_monitor\ >> "%LOG%" 2>&1
 if exist config.ini                copy /Y config.ini dist\rajant_monitor\ >> "%LOG%" 2>&1
-REM  Inicializacao em segundo plano: instalar/remover, iniciar oculto, parar.
+REM  parar_tudo.bat e o prometheus.yml de exemplo.
 copy /Y build\windows\*.* dist\rajant_monitor\ >> "%LOG%" 2>&1
 echo   ok
 
@@ -152,13 +152,11 @@ echo  PRONTO: dist\rajant_monitor\rajant_monitor.exe
 echo.
 echo  config.ini, logs e cache ficam SEMPRE ao lado do executavel.
 echo.
-echo  Para subir sozinho ^(exportador + Prometheus + Grafana, em segundo
-echo  plano^), copie dist\rajant_monitor para uma pasta sua e rode:
-echo    sem administrador:  instalar_inicializacao_usuario.bat ^(no login^)
-echo    com administrador:  instalar_inicializacao.bat ^(com a maquina^)
+echo  Copie dist\rajant_monitor para uma pasta sua. Dois cliques no
+echo  rajant_monitor.exe sobem exportador, Prometheus e Grafana em segundo
+echo  plano; parar_tudo.bat para tudo.
 echo.
-echo  Sem argumento, o programa sobe o exportador e fica rodando - nao e
-echo  travamento. Para so testar:  rajant_monitor.exe --help
+echo  Para so testar:  rajant_monitor.exe --help
 echo ====================================================================
 echo.
 echo Build concluido em %DATE% %TIME% >> "%LOG%"
