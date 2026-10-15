@@ -127,6 +127,8 @@ REM  Logos da identidade Anglo: sem eles o deck sai sem marca.
 if exist marca                     xcopy /E /I /Y marca dist\rajant_monitor\marca >> "%LOG%" 2>&1
 if exist Relatorio_Semanal_Rede.pptx copy /Y Relatorio_Semanal_Rede.pptx dist\rajant_monitor\ >> "%LOG%" 2>&1
 if exist config.ini                copy /Y config.ini dist\rajant_monitor\ >> "%LOG%" 2>&1
+REM  Inicializacao em segundo plano: instalar/remover, iniciar oculto, parar.
+copy /Y build\windows\*.* dist\rajant_monitor\ >> "%LOG%" 2>&1
 echo   ok
 
 REM  Prova de fogo: o binario responde?
@@ -148,9 +150,11 @@ echo.
 echo ====================================================================
 echo  PRONTO: dist\rajant_monitor\rajant_monitor.exe
 echo.
-echo  ATENCAO: rode o exe SEMPRE a partir da pasta dele. O config.ini, o
-echo  banco surveys.db e o cache sao criados no diretorio ATUAL, nao ao
-echo  lado do executavel.
+echo  config.ini, logs e cache ficam SEMPRE ao lado do executavel.
+echo.
+echo  Para subir sozinho com o Windows ^(exportador + Prometheus + Grafana,
+echo  em segundo plano^): botao direito em instalar_inicializacao.bat ^>
+echo  Executar como administrador.
 echo.
 echo  Sem argumento, o programa SOBE O SERVICO e fica rodando - nao e
 echo  travamento. Para so testar:  rajant_monitor.exe --help

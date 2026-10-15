@@ -100,6 +100,12 @@ def mapa(pares):
                          for i, (v, t, c) in enumerate(pares)}}]
 
 
+# Maior buraco que a linha atravessa, em ms. O exportador tira do /metrics
+# a série do rádio que não respondeu; até 3 min (uma coleta perdida com
+# folga) a linha segue, acima disso aparece o buraco.
+LIGA_BURACO_MS = 180000
+
+
 def campo(unidade=None, dec=None, min_=None, max_=None, mapas=None,
           limiares=None, cor="palette-classic", preenchimento=10,
           largura=1, suavizar=True, pontos=False, sem_valor="—"):
@@ -108,7 +114,9 @@ def campo(unidade=None, dec=None, min_=None, max_=None, mapas=None,
         "lineInterpolation": "smooth" if suavizar else "linear",
         "lineWidth": largura, "fillOpacity": preenchimento,
         "showPoints": "auto" if pontos else "never", "pointSize": 5,
-        "spanNulls": False, "axisPlacement": "auto", "axisLabel": "",
+        # Liga só buraco curto (uma coleta perdida, ~60 s): rádio que parou
+        # de responder deixa o buraco, em vez de uma linha no último valor.
+        "spanNulls": LIGA_BURACO_MS, "axisPlacement": "auto", "axisLabel": "",
         "axisBorderShow": False, "axisColorMode": "text",
         "scaleDistribution": {"type": "linear"},
         "gradientMode": "opacity",

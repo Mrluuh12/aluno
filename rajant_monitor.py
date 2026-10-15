@@ -17,7 +17,7 @@ if not hasattr(ssl, 'wrap_socket'):
                                suppress_ragged_eofs=suppress_ragged_eofs)
     ssl.wrap_socket = _wrap
 
-import re, json, time, logging, argparse, threading, configparser, sys, math
+import re, os, json, time, logging, argparse, threading, configparser, sys, math
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from collections import deque
@@ -67,7 +67,10 @@ max_threads             = 30
 timeout_conexao         = 15
 tentativas_por_bc       = 3
 falhas_antes_offline    = 3
-manter_ultimo_valor_s   = 300
+# Segundos que as séries de um BC que parou de responder continuam no
+# /metrics com o último valor. 0 = saem na primeira coleta que falha, e o
+# Grafana mostra o buraco em vez de uma linha reta no último valor.
+segurar_serie_s         = 0
 redescoberta_ciclos     = 10
 falhas_para_remover     = 20
 # Descoberta pela malha: parte dos seeds e segue os peers de cada BC.
@@ -79,16 +82,15 @@ descoberta              = true
 # Cache de IPs em disco (rajant_ips_cache.json). false = não lê nem
 # escreve; a partida depende só dos seeds.
 usar_cache              = true
-# Só publica equipamento cujo nome case com um prefixo de
-# [relatorio] prefixos_frota (CA, PA, PF, TT, EH, ERM, ERB...).
-# Descarta o que a malha devolve sem nome reconhecível. O que for
-# descartado aparece no log e em rajant_bc_sem_tag — nunca some calado.
-somente_com_tag         = false
-# Equipamentos móveis funcionam como sondas de site survey: a resolução
-# espacial do mapa é velocidade × intervalo. A 25 km/h, 60 s dá ~420 m entre
-# amostras — mais que o raio de interpolação padrão (300 m), o que abre
-# buracos no heatmap. Coletar só os móveis mais rápido melhora o survey sem
-# multiplicar o volume da frota inteira. 0 = mesmo intervalo para todos.
+# Só publica equipamento com TAG no nome (CA-1035, ERM-22, ERB-02, RED065,
+# PCP-002...). IP sem nome, rádio de terceiro e rádio de teste ficam fora
+# do /metrics e do Grafana — inclusive como vizinho de outro rádio. O que
+# for descartado aparece no log e em rajant_bc_sem_tag, nunca some calado.
+filtrar_tag             = true
+# O formato da tag (expressão regular, sem diferenciar maiúsculas).
+padrao_tag              = ^[A-Z]{2,5}[- ]?\\d{2,}
+# Coleta mais frequente dos equipamentos móveis ([relatorio] padrao_movel).
+# 0 = mesmo intervalo para todos.
 intervalo_moveis_segundos = 20
 # Janela para cálculo de disponibilidade (segundos) — BCE usa 7 dias
 janela_disponibilidade_s = 86400
@@ -183,10 +185,19 @@ class CacheIPs:
 def setup_logging(arquivo, nivel):
     fmt  = "%(asctime)s [%(levelname)s] %(message)s"
     lvl  = getattr(logging, nivel.upper(), logging.INFO)
-    hdls = [logging.StreamHandler(sys.stdout)]
+    # Sob o supervisor (--servico) não há quem leia o console: tudo vai
+    # para o arquivo, e a saída padrão fica só para o que escapar do log.
+    hdls = [] if os.environ.get("RAJANT_SERVICO") else [logging.StreamHandler(sys.stdout)]
     if arquivo:
-        try: hdls.append(logging.FileHandler(arquivo, encoding="utf-8"))
-        except Exception: pass
+        # Rotativo: rodando o ano todo em segundo plano, um FileHandler
+        # simples enchia o disco sem ninguém ver. 10 MB × 5 arquivos.
+        from logging.handlers import RotatingFileHandler
+        try: hdls.append(RotatingFileHandler(arquivo, maxBytes=10 * 1024 * 1024,
+                                             backupCount=5, encoding="utf-8"))
+        except Exception as e:
+            print(f"AVISO: log em arquivo indisponivel ({arquivo}): {e}")
+    if not hdls:
+        hdls = [logging.StreamHandler(sys.stdout)]
     logging.basicConfig(level=lvl, format=fmt, datefmt="%Y-%m-%d %H:%M:%S",
                         handlers=hdls, force=True)
     return logging.getLogger("rajant")
@@ -544,12 +555,18 @@ class EstadoBC:
         self.manter_s      = manter_s
         self.falhas_consec = 0
         self.ts_ultimo_ok  = 0.0
+        # Hora REAL da última coleta boa, para o /metrics: `ts_ultimo_ok` é
+        # o relógio monotônico (bom para medir intervalo, sem sentido fora
+        # do processo). O painel faz time() - rajant_ultima_coleta_ts, e
+        # com o monotônico o resultado era um número sem significado.
+        self.epoch_ultimo_ok = 0.0
         self.ultima_ts     = 0.0
         self.ultima_dados  = None
 
     def ok(self, dados, ts):
         self.falhas_consec = 0
         self.ts_ultimo_ok  = ts
+        self.epoch_ultimo_ok = time.time()
         self.ultima_ts     = ts
         self.ultima_dados  = dados
 
@@ -1419,7 +1436,13 @@ def calcular_mesh_score(dados):
 # ══════════════════════════════════════════════════════════════
 # PUBLICAR
 # ══════════════════════════════════════════════════════════════
-def publicar(ip, dados, est):
+def publicar(ip, dados, est, nome_vizinho=None):
+    """Publica a coleta de UM BC e retira as séries que deixaram de existir.
+
+    `nome_vizinho(peer)` dá a tag do vizinho (ou None). Com ele, a série de
+    enlace sai com o nome do vizinho no label `peer`, e vizinho sem tag não
+    vira série. Sem ele (testes, uso antigo), `peer` é o IP, como antes.
+    """
     s   = dados["sistema"]
     im  = dados["instamesh"]
     # CRÍTICO: bc nunca pode ser vazio
@@ -1429,9 +1452,13 @@ def publicar(ip, dados, est):
     s["nome"] = bc
     lbc = {"bc": bc, "ip": ip}
     jd  = janela_bc(ip)
+    serie = SeriesDoBC(ip)
 
     # Registra evento de disponibilidade
     jd.registrar(True)
+
+    def put(metrica, valor, **labels):
+        serie.set(metrica, valor, **(labels or lbc))
 
     def pub(metrica, valor, **labels):
         """Publica só quando há medição de verdade.
@@ -1445,14 +1472,12 @@ def publicar(ip, dados, est):
         `except Exception` de _coletar_bc e o BC inteiro era marcado
         OFFLINE — com metade das séries já publicadas.
         """
-        if valor is None: return
-        metrica.labels(**(labels or lbc)).set(valor)
+        put(metrica, valor, **labels)
 
-    m_online.labels(**lbc).set(1)
-    m_bc_info.labels(bc=bc, ip=ip, modelo=s.get("modelo",""),
-                     firmware=s.get("firmware",""),
-                     grupos=s.get("grupos","")).set(1)
-    m_uptime.labels(**lbc).set(s["uptime_s"])
+    put(m_online, 1)
+    put(m_bc_info, 1, bc=bc, ip=ip, modelo=s.get("modelo",""),
+        firmware=s.get("firmware",""), grupos=s.get("grupos",""))
+    put(m_uptime, s["uptime_s"])
     if s.get("gps_fix"):
         pub(m_gps_lat,  s["gps_lat"])
         pub(m_gps_lon,  s["gps_lon"])
@@ -1464,44 +1489,38 @@ def publicar(ip, dados, est):
     pub(m_gps_alt,  s.get("gps_alt"))
     pub(m_gps_hdop, s.get("gps_hdop"))
     pub(m_gps_qual, s.get("gps_qual"))
-    m_gps_fix.labels(**lbc).set(s.get("gps_fix", 0))
-    m_boot.labels(**lbc).set(s["boot"])
-    m_reboot_needed.labels(**lbc).set(s["reboot"])
-    m_bridge.labels(**lbc).set(1 if s["bridge"] else 0)
-    m_apt_master.labels(**lbc).set(1 if s["apt_master"] else 0)
+    put(m_gps_fix, s.get("gps_fix", 0))
+    put(m_boot, s["boot"])
+    put(m_reboot_needed, s["reboot"])
+    put(m_bridge, 1 if s["bridge"] else 0)
+    put(m_apt_master, 1 if s["apt_master"] else 0)
     pub(m_best_rate, s.get("best_rate"))
     pub(m_alertas,   s.get("alertas"))
-    m_falhas.labels(**lbc).set(est.falhas_consec)
-    m_ultima_coleta.labels(**lbc).set(est.ts_ultimo_ok)
-    m_memoria.labels(**lbc).set(s["mem_kb"])
-
+    put(m_falhas, est.falhas_consec)
+    put(m_ultima_coleta, est.epoch_ultimo_ok or None)
+    put(m_memoria, s["mem_kb"])
     # Disponibilidade em janelas deslizantes (metodologia BCE)
-    m_avail_1h.labels(**lbc).set(jd.disponibilidade(3600))
-    m_avail_24h.labels(**lbc).set(jd.disponibilidade(86400))
-    m_avail_7d.labels(**lbc).set(jd.disponibilidade(604800))
-
+    put(m_avail_1h, jd.disponibilidade(3600))
+    put(m_avail_24h, jd.disponibilidade(86400))
+    put(m_avail_7d, jd.disponibilidade(604800))
     # Ping RTT (ICMP) — mede latência real até o BC
     rtt = ping_rtt(ip)
     if rtt is not None:
-        m_ping_rtt.labels(**lbc).set(rtt)
-        m_ping_ok.labels(**lbc).set(1)
+        put(m_ping_rtt, rtt)
+        put(m_ping_ok, 1)
     else:
-        m_ping_ok.labels(**lbc).set(0)
-
+        put(m_ping_ok, 0)
     # Estabilidade de links — quantos peers mudaram desde última coleta
     changes = calcular_link_changes(ip, dados["radios"])
-    m_link_changes.labels(**lbc).set(changes)
-
+    put(m_link_changes, changes)
     # Score de qualidade da malha (0-100)
     score = calcular_mesh_score(dados)
-    m_mesh_score.labels(**lbc).set(score)
-
+    put(m_mesh_score, score)
     t = validar(s["temp_c"], "temperatura_c", bc)
     if t is not None:
-        m_temp.labels(**lbc).set(t)
+        put(m_temp, t)
         if s["temp_cls"] is not None:
-            m_temp_classe.labels(**lbc).set(s["temp_cls"])
-
+            put(m_temp_classe, s["temp_cls"])
     # Bateria (State.Battery). Modelos sem bateria não trazem o bloco →
     # tudo None → nenhuma série publicada, em vez de uma fileira de zeros.
     bat = s.get("bateria") or {}
@@ -1511,109 +1530,199 @@ def publicar(ip, dados, est):
     pub(m_bat_desc_min, bat.get("desc_min"))
     pub(m_bat_chg_min,  bat.get("chg_min"))
     if bat.get("carregando") is not None:
-        m_bat_charge.labels(**lbc).set(1 if bat["carregando"] else 0)
-
+        put(m_bat_charge, 1 if bat["carregando"] else 0)
     # cpu_pct só existe a partir da 2a coleta (delta de idle/uptime)
     pub(m_cpu, validar(s.get("cpu_pct"), "cpu_pct", bc))
 
-    m_im_tx.labels(**lbc).set(im["pkt_tx"])
-    m_im_rx.labels(**lbc).set(im["pkt_rx"])
-    m_im_drop.labels(**lbc).set(im["pkt_drop"])
-    m_im_floods.labels(**lbc).set(im["floods"])
-    m_im_arp.labels(**lbc).set(im["arp"])
-    m_im_disc_src.labels(**lbc).set(im["disc_src"])
-    m_im_disc_pass.labels(**lbc).set(im["disc_pass"])
-    m_im_src_floods.labels(**lbc).set(im["src_floods"])
-    m_im_multicast.labels(**lbc).set(im["multicast"])
-    m_im_tx_ps.labels(**lbc).set(im.get("tx_ps",0))
-    m_im_rx_ps.labels(**lbc).set(im.get("rx_ps",0))
-    m_im_drop_ps.labels(**lbc).set(im.get("drop_ps",0))
-    m_im_perda.labels(**lbc).set(im.get("perda_pct",0))
-    m_im_floods_ps.labels(**lbc).set(im.get("floods_ps",0))
-    m_im_arp_ps.labels(**lbc).set(im.get("arp_ps",0))
-
+    put(m_im_tx, im["pkt_tx"])
+    put(m_im_rx, im["pkt_rx"])
+    put(m_im_drop, im["pkt_drop"])
+    put(m_im_floods, im["floods"])
+    put(m_im_arp, im["arp"])
+    put(m_im_disc_src, im["disc_src"])
+    put(m_im_disc_pass, im["disc_pass"])
+    put(m_im_src_floods, im["src_floods"])
+    put(m_im_multicast, im["multicast"])
+    put(m_im_tx_ps, im.get("tx_ps",0))
+    put(m_im_rx_ps, im.get("rx_ps",0))
+    put(m_im_drop_ps, im.get("drop_ps",0))
+    put(m_im_perda, im.get("perda_pct",0))
+    put(m_im_floods_ps, im.get("floods_ps",0))
+    put(m_im_arp_ps, im.get("arp_ps",0))
     for r in dados["radios"]:
         rn   = r["nome"]
         rlbs = {"bc":bc,"ip":ip,"radio":rn,"canal":str(r["canal"]),"freq":r["freq"]}
-        m_r_canal.labels(**rlbs).set(r["canal"])
-        m_r_txpower.labels(**rlbs).set(r["txpwr"])
-        m_r_rx_bytes.labels(**rlbs).set(r["rx_bytes"])
-        m_r_tx_bytes.labels(**rlbs).set(r["tx_bytes"])
-        m_r_rx_pkts.labels(**rlbs).set(r["rx_pkts"])
-        m_r_tx_pkts.labels(**rlbs).set(r["tx_pkts"])
-        m_r_ch_active.labels(**rlbs).set(r["ch_active"])
-        m_r_ch_busy.labels(**rlbs).set(r["ch_busy"])
-        m_r_ch_rx.labels(**rlbs).set(r["ch_rx"])
-        m_r_ch_tx.labels(**rlbs).set(r["ch_tx"])
-        m_r_busy.labels(**rlbs).set(r.get("busy_pct",0))
-        m_r_rx_pct.labels(**rlbs).set(r.get("rx_pct",0))
-        m_r_tx_pct.labels(**rlbs).set(r.get("tx_pct",0))
-        m_r_idle.labels(**rlbs).set(r.get("idle_pct",0))
+        put(m_r_canal, r["canal"], **rlbs)
+        put(m_r_txpower, r["txpwr"], **rlbs)
+        put(m_r_rx_bytes, r["rx_bytes"], **rlbs)
+        put(m_r_tx_bytes, r["tx_bytes"], **rlbs)
+        put(m_r_rx_pkts, r["rx_pkts"], **rlbs)
+        put(m_r_tx_pkts, r["tx_pkts"], **rlbs)
+        put(m_r_ch_active, r["ch_active"], **rlbs)
+        put(m_r_ch_busy, r["ch_busy"], **rlbs)
+        put(m_r_ch_rx, r["ch_rx"], **rlbs)
+        put(m_r_ch_tx, r["ch_tx"], **rlbs)
+        put(m_r_busy, r.get("busy_pct",0), **rlbs)
+        put(m_r_rx_pct, r.get("rx_pct",0), **rlbs)
+        put(m_r_tx_pct, r.get("tx_pct",0), **rlbs)
+        put(m_r_idle, r.get("idle_pct",0), **rlbs)
         # Sem delta ainda (1a coleta do rádio) fica sem série, nunca 0 —
         # zero seria lido como "medi e não há interferência".
         pub(m_r_interf, r.get("interf_pct"), **rlbs)
-        m_r_peers_ativos.labels(**rlbs).set(r["peers_ativos"])
-        m_r_peers_total.labels(**rlbs).set(r["peers_total"])
-        m_r_good_peers.labels(**rlbs).set(r["good_peers"])
-        m_r_clients.labels(**rlbs).set(r["total_cli"])
-        m_r_rx_mbps.labels(**rlbs).set(r.get("rx_mbps",0))
-        m_r_tx_mbps.labels(**rlbs).set(r.get("tx_mbps",0))
-        m_r_rx_pps.labels(**rlbs).set(r.get("rx_pps",0))
-        m_r_tx_pps.labels(**rlbs).set(r.get("tx_pps",0))
+        put(m_r_peers_ativos, r["peers_ativos"], **rlbs)
+        put(m_r_peers_total, r["peers_total"], **rlbs)
+        put(m_r_good_peers, r["good_peers"], **rlbs)
+        put(m_r_clients, r["total_cli"], **rlbs)
+        put(m_r_rx_mbps, r.get("rx_mbps",0), **rlbs)
+        put(m_r_tx_mbps, r.get("tx_mbps",0), **rlbs)
+        put(m_r_rx_pps, r.get("rx_pps",0), **rlbs)
+        put(m_r_tx_pps, r.get("tx_pps",0), **rlbs)
         nd = validar(r["ruido"], "ruido_dbm", bc)
         if nd is not None:
-            m_r_ruido.labels(**rlbs).set(nd)
+            put(m_r_ruido, nd, **rlbs)
             if r["ruido_cls"] is not None:
-                m_r_ruido_cls.labels(**rlbs).set(r["ruido_cls"])
+                put(m_r_ruido_cls, r["ruido_cls"], **rlbs)
         if r["first_hop"] > 0:
-            m_first_hop.labels(bc=bc,ip=ip,radio=rn).set(r["first_hop"])
+            put(m_first_hop, r["first_hop"], bc=bc, ip=ip, radio=rn)
 
         for p in r["peers"]:
-            plbs = {"bc":bc,"ip":ip,"radio":rn,"peer":p["ip"]}
+            # O vizinho entra pela TAG. Sem tag (IP solto, rádio de
+            # terceiro, vizinho só com MAC) não vira série: as contagens do
+            # rádio (peers_ativos, good_peers) já o contam.
+            if nome_vizinho is not None:
+                nome_p = nome_vizinho(p)
+                if not nome_p:
+                    continue
+            else:
+                nome_p = p["ip"]
+            plbs = {"bc":bc,"ip":ip,"radio":rn,"peer":nome_p}
             sn = validar(p["sinal"],"sinal_dbm",bc)
             sq = validar(p["snr"],  "snr_db",   bc)
             tx = validar(p["taxa"], "taxa_mbps", bc)
             cu = validar(p["custo"],"custo",     bc)
-            if sn is not None: m_p_sinal.labels(**plbs).set(sn)
-            if sq is not None: m_p_snr.labels(**plbs).set(sq)
-            if tx is not None: m_p_taxa.labels(**plbs).set(tx)
-            if cu is not None: m_p_custo.labels(**plbs).set(cu)
-            m_p_rssi.labels(**plbs).set(p["rssi"])
-            m_p_ativo.labels(**plbs).set(1 if p["ativo"] else 0)
-
+            if sn is not None: put(m_p_sinal, sn, **plbs)
+            if sq is not None: put(m_p_snr, sq, **plbs)
+            if tx is not None: put(m_p_taxa, tx, **plbs)
+            if cu is not None: put(m_p_custo, cu, **plbs)
+            put(m_p_rssi, p["rssi"], **plbs)
+            put(m_p_ativo, 1 if p["ativo"] else 0, **plbs)
         for ap in r["aps"]:
-            m_ap_clients.labels(bc=bc,ip=ip,radio=rn,
-                                 essid=ap["essid"],freq=ap["freq"]).set(ap["clients"])
+            put(m_ap_clients, ap["clients"], bc=bc, ip=ip, radio=rn,
+                essid=ap["essid"], freq=ap["freq"])
 
     for e in dados["ethernet"]:
         elbs = {"bc":bc,"ip":ip,"porta":e["nome"]}
-        m_e_link.labels(**elbs).set(1 if e["link"] else 0)
-        m_e_apt_state.labels(**elbs).set(e["apt_int"])
-        m_e_rx_bytes.labels(**elbs).set(e["rx_bytes"])
-        m_e_tx_bytes.labels(**elbs).set(e["tx_bytes"])
-        m_e_rx_pkts.labels(**elbs).set(e["rx_pkts"])
-        m_e_tx_pkts.labels(**elbs).set(e["tx_pkts"])
-        m_e_peers.labels(**elbs).set(e.get("peers_eth", 0))
-        m_e_rx_mbps.labels(**elbs).set(e.get("rx_mbps",0))
-        m_e_tx_mbps.labels(**elbs).set(e.get("tx_mbps",0))
+        put(m_e_link, 1 if e["link"] else 0, **elbs)
+        put(m_e_apt_state, e["apt_int"], **elbs)
+        put(m_e_rx_bytes, e["rx_bytes"], **elbs)
+        put(m_e_tx_bytes, e["tx_bytes"], **elbs)
+        put(m_e_rx_pkts, e["rx_pkts"], **elbs)
+        put(m_e_tx_pkts, e["tx_pkts"], **elbs)
+        put(m_e_peers, e.get("peers_eth", 0), **elbs)
+        put(m_e_rx_mbps, e.get("rx_mbps",0), **elbs)
+        put(m_e_tx_mbps, e.get("tx_mbps",0), **elbs)
+
+    # O que foi publicado antes e não veio agora (vizinho que se afastou,
+    # rádio desligado, porta que sumiu, nome que mudou) sai do /metrics.
+    serie.fechar()
+
+
+# Formato da tag de equipamento da mina: letras, hífen opcional, número
+# (CA-1035, ERM-22 PTP CAM, ERB-11 L2, RED065, PCP-002). Os 155 nomes da
+# REDE_CONHECIDA casam; IP e nome vazio, não.
+PADRAO_TAG_PADRAO = r"^[A-Z]{2,5}[- ]?\d{2,}"
+
+_RX_IP = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+# ══════════════════════════════════════════════════════════════
+# SÉRIES DE CADA BC
+# ══════════════════════════════════════════════════════════════
+# O prometheus_client guarda o último valor de cada série PARA SEMPRE: o
+# que não é retirado continua no /metrics, e o Prometheus o lê a cada
+# raspagem como se fosse leitura nova. Era a linha reta do Grafana — rádio
+# que parou de responder, vizinho que se afastou, e o gráfico seguindo no
+# último valor por horas.
+#
+# Cada BC lembra as séries que publicou na última coleta. A coleta nova
+# publica as suas e retira as que não vieram; a falha retira todas as de
+# medição. Série retirada some do /metrics, o Prometheus a marca como
+# encerrada, e o Grafana mostra o buraco — que é o que aconteceu.
+_series_ip = {}
+_series_lk = threading.Lock()
+
+
+class SeriesDoBC:
+    """As séries publicadas para UM IP numa coleta."""
+
+    def __init__(self, ip):
+        self.ip = ip
+        self.feitas = set()
+
+    def set(self, metrica, valor, **labels):
+        if valor is None:
+            return
+        vals = tuple(str(labels[n]) for n in metrica._labelnames)
+        metrica.labels(*vals).set(valor)
+        self.feitas.add((metrica, vals))
+
+    def fechar(self, manter=()):
+        """Retira as séries da coleta anterior que esta não publicou.
+
+        `manter`: métricas que sobrevivem mesmo assim (ver `marcar_offline`)."""
+        with _series_lk:
+            antes = _series_ip.get(self.ip, set())
+            for metrica, vals in antes - self.feitas:
+                if metrica in manter:
+                    self.feitas.add((metrica, vals))
+                    continue
+                try:
+                    metrica.remove(*vals)
+                except KeyError:
+                    pass
+            _series_ip[self.ip] = self.feitas
+
+
+def retirar_series(ip):
+    """Tira do /metrics tudo o que foi publicado para `ip`."""
+    with _series_lk:
+        for metrica, vals in _series_ip.pop(ip, set()):
+            try:
+                metrica.remove(*vals)
+            except KeyError:
+                pass
 
 
 def marcar_offline(ip, nome, est, agora):
+    """A coleta falhou. Sai tudo o que é medição; fica a identidade.
+
+    Ficam: `rajant_bc_info` (modelo, firmware), `rajant_bc_online` = 0, as
+    falhas seguidas, a última coleta boa e a disponibilidade — é o que diz
+    QUAL rádio caiu e desde quando. Sinal, peers, GPS, temperatura, tráfego
+    saem: não foram medidos agora, e repetir o último era a linha reta.
+
+    `[coleta] manter_ultimo_valor_s` > 0 segura tudo por esse tempo (para
+    quem prefere a linha contínua num rádio que perde uma coleta ou outra);
+    o padrão é 0, retirar na primeira falha.
+    """
     lbc = {"bc": nome or ip, "ip": ip}
     jd  = janela_bc(ip)
     jd.registrar(False)
     if est.ultima_dados and not est.expirou(agora):
+        # Dentro da tolerância: as séries ficam como estão.
         m_falhas.labels(**lbc).set(est.falhas_consec)
-        # Atualiza disponibilidade mesmo offline
-        m_avail_1h.labels(**lbc).set(jd.disponibilidade(3600))
-        m_avail_24h.labels(**lbc).set(jd.disponibilidade(86400))
-        m_avail_7d.labels(**lbc).set(jd.disponibilidade(604800))
-    else:
-        m_online.labels(**lbc).set(0)
-        m_falhas.labels(**lbc).set(est.falhas_consec)
-        m_avail_1h.labels(**lbc).set(jd.disponibilidade(3600))
-        m_avail_24h.labels(**lbc).set(jd.disponibilidade(86400))
-        m_avail_7d.labels(**lbc).set(jd.disponibilidade(604800))
+        for m, jan in ((m_avail_1h, 3600), (m_avail_24h, 86400),
+                       (m_avail_7d, 604800)):
+            m.labels(**lbc).set(jd.disponibilidade(jan))
+        return
+    serie = SeriesDoBC(ip)
+    serie.set(m_online, 0, **lbc)
+    serie.set(m_falhas, est.falhas_consec, **lbc)
+    if est.epoch_ultimo_ok:
+        serie.set(m_ultima_coleta, est.epoch_ultimo_ok, **lbc)
+    for m, jan in ((m_avail_1h, 3600), (m_avail_24h, 86400), (m_avail_7d, 604800)):
+        serie.set(m, jd.disponibilidade(jan), **lbc)
+    # rajant_bc_info sobrevive com os labels que tinha (modelo, firmware).
+    serie.fechar(manter={m_bc_info})
 
 # ══════════════════════════════════════════════════════════════
 # COLETOR
@@ -1623,18 +1732,25 @@ class RajantCollector:
                  max_threads, timeout, tentativas, falhas_limite,
                  manter_s, redesc_ciclos, falhas_remover, cache,
                  interval_moveis=0, padrao_movel="", descoberta=True,
-                 prefixos_tag=None):
+                 prefixos_tag=None, padrao_tag=None):
         self.seeds=seeds; self.role=role; self.password=password; self.port=port
         self.interval=interval; self.max_threads=max_threads; self.timeout=timeout
         self.tentativas=tentativas; self.falhas_limite=falhas_limite
         self.manter_s=manter_s; self.redesc_ciclos=redesc_ciclos
         self.falhas_remover=falhas_remover; self.cache=cache
         self.descoberta=descoberta
-        # None = aceita qualquer nome. Lista = só publica quem casa com um
-        # dos prefixos da frota.
+        # Filtro de tag: `padrao_tag` (regex) ou, no formato antigo, a lista
+        # de prefixos. Nenhum dos dois = aceita qualquer nome.
         self.prefixos_tag = list(prefixos_tag) if prefixos_tag else None
+        self.re_tag = (re.compile(padrao_tag, re.IGNORECASE)
+                       if isinstance(padrao_tag, str) and padrao_tag
+                       else padrao_tag)
         self.sem_tag = set()          # descartados, para o log e a métrica
         self.bcs=set(); self.nomes={}
+        # encapId -> nome: o encapId do vizinho é o sufixo do serial do
+        # rádio (State.Peer não traz nome). Montado com o serial de cada
+        # rádio coletado.
+        self.nome_encap = {}
         self.lock=threading.Lock(); self.sem=threading.Semaphore(max_threads)
 
         # ── Coleta acelerada dos equipamentos móveis ───────────────
@@ -1666,23 +1782,45 @@ class RajantCollector:
         if not nome or nome == ip: return True
         return bool(self.re_movel.search(nome))
 
-    def tem_tag(self, nome):
-        """O nome casa com algum prefixo da frota?
+    @property
+    def filtrando(self):
+        return bool(self.re_tag or self.prefixos_tag)
 
-        Sem prefixos configurados, aceita tudo — o filtro e opcional e nao
-        pode passar a descartar por omissao.
-        """
-        if not self.prefixos_tag:
-            return True
-        n = (nome or "").strip().upper()
-        if not n:
-            return False
-        return any(n.startswith(p.upper()) for p in self.prefixos_tag)
+    def tem_tag(self, nome):
+        """O nome é uma tag de equipamento?
+
+        Sem filtro configurado, aceita tudo — exceto nome vazio ou IP, que
+        nunca é tag. Com filtro, o nome tem de casar com `padrao_tag` (ou
+        começar por um dos prefixos, no formato antigo)."""
+        n = (nome or "").strip()
+        if not n or _RX_IP.match(n):
+            return not self.filtrando
+        if self.re_tag is not None:
+            return bool(self.re_tag.search(n))
+        if self.prefixos_tag:
+            return any(n.upper().startswith(p.upper()) for p in self.prefixos_tag)
+        return True
+
+    def nome_conhecido(self, ip):
+        """O nome de um IP pelo que já se sabe: coleta, cache, rede da mina."""
+        return ((self.nomes.get(ip) or "").strip()
+                or (self.cache.nome(ip) or "").strip()
+                or (REDE_CONHECIDA.get(ip) or "").strip() or None)
+
+    def nome_vizinho(self, p):
+        """A tag do vizinho de um enlace, ou None se não tiver."""
+        ip = p.get("ip") or ""
+        nome = None
+        if ip and not ip.startswith("mac:"):
+            nome = self.nome_conhecido(ip)
+        if not nome and p.get("encap"):
+            nome = self.nome_encap.get(p["encap"])
+        return nome if nome and self.tem_tag(nome) else None
 
     def _coletar_bc(self, ip):
         est  = estado(ip, self.falhas_limite, self.manter_s)
         agora= time.monotonic()
-        nome = self.nomes.get(ip, self.cache.nome(ip))
+        nome = self.nome_conhecido(ip)
         for tentativa in range(1, self.tentativas+1):
             try:
                 bc = exigir_rajant_api()(host=ip, port=self.port,
@@ -1703,16 +1841,22 @@ class RajantCollector:
                     if ip not in self.sem_tag:
                         self.sem_tag.add(ip)
                         log.info(f"  - {nome:<22} ({ip}) ignorado: "
-                                 f"nome sem prefixo de frota")
+                                 f"nome sem tag")
                     with self.lock:
                         self.bcs.discard(ip)
+                    # Se já foi publicado com outro nome, sai do /metrics.
+                    retirar_series(ip)
                     m_bc_sem_tag.set(len(self.sem_tag))
                     return set()
+                self.sem_tag.discard(ip)
 
                 est.ok(dados, ts)
                 self.cache.adicionar(ip, nome)
                 self.cache.registrar_sucesso(ip, nome)
-                publicar(ip, dados, est)
+                if dados["sistema"].get("serial_num"):
+                    self.nome_encap[dados["sistema"]["serial_num"]] = nome
+                publicar(ip, dados, est,
+                         nome_vizinho=self.nome_vizinho if self.filtrando else None)
                 s = dados["sistema"]
                 # CPU e bateria podem ser None (1a coleta / modelo sem
                 # bateria) — "n/d" deixa isso explícito no log.
@@ -1732,9 +1876,17 @@ class RajantCollector:
                 else:
                     est.falha()
                     self.cache.registrar_falha(ip, self.falhas_remover)
-                    marcar_offline(ip, nome, est, agora)
+                    # IP que nunca respondeu e não tem nome conhecido, ou
+                    # cujo nome não é tag, não entra no /metrics nem como
+                    # offline: viraria uma linha "10.188.99.217" no Grafana.
+                    if self.tem_tag(nome):
+                        marcar_offline(ip, nome, est, agora)
+                    else:
+                        retirar_series(ip)
                     if est.offline:
-                        log.warning(f"  X {nome:<22} ({ip}) OFFLINE ({est.falhas_consec}x): {e}")
+                        log.warning(f"  X {(nome or '?'):<22} ({ip}) OFFLINE "
+                                    f"({est.falhas_consec}x): "
+                                    f"{type(e).__name__}: {e}")
         return set()
 
     def _lote(self, fila, visitados):
@@ -1832,7 +1984,10 @@ class RajantCollector:
                     # que a descoberta deixou de fora.
                     if peers and self.descoberta:
                         with self.lock:
-                            novos = peers - self.bcs
+                            # O sem tag volta só na redescoberta (o nome pode
+                            # ter mudado); a cada ciclo seria uma consulta
+                            # inteira jogada fora por rádio.
+                            novos = peers - self.bcs - self.sem_tag
                             if novos:
                                 log.info(f"  + {len(novos)} peers novos")
                                 self.bcs.update(novos)
@@ -1856,6 +2011,8 @@ class RajantCollector:
             return (dados_de(ip).get("nome") or "").strip()
 
         for ip in list(self.bcs):
+            if not self.tem_tag(nome_de(ip) or self.nome_conhecido(ip)):
+                continue
             s = dados_de(ip)
             # Identidade do nó físico, em ordem de confiabilidade:
             #  1) o IP que o próprio BC reporta em system.ipv4 (único por nó)
@@ -1879,14 +2036,22 @@ class RajantCollector:
             try:   return tuple(int(x) for x in ip.split("."))
             except Exception: return (999, 999, 999, 999)
 
+        vistos = set()
         for chave, ips in grupos.items():
             ips_ord = sorted(ips, key=ip_ordem)
             primario = ips_ord[0]
             for ip in ips_ord:
-                rotulo = nome_de(ip) or ip
-                lb = {"bc": rotulo, "ip": ip}
-                m_bc_primario.labels(**lb).set(1 if ip == primario else 0)
-                m_bc_ifaces.labels(**lb).set(len(ips_ord))
+                rotulo = nome_de(ip) or self.nome_conhecido(ip) or ip
+                lb = (rotulo, ip)
+                vistos.add(lb)
+                m_bc_primario.labels(*lb).set(1 if ip == primario else 0)
+                m_bc_ifaces.labels(*lb).set(len(ips_ord))
+        # Interface que saiu (sem tag, renomeada, removida) sai do /metrics.
+        for lb in getattr(self, "_identidade_antes", set()) - vistos:
+            for m in (m_bc_primario, m_bc_ifaces):
+                try: m.remove(*lb)
+                except KeyError: pass
+        self._identidade_antes = vistos
         m_nos_fisicos.set(len(grupos))
         log.info(f"  Nos fisicos: {len(grupos)} | IPs monitorados: {len(self.bcs)}")
 
@@ -16760,9 +16925,24 @@ def iniciar_servidor_relatorios(cfg):
 # MAIN — inicia exporter + servidor de relatórios juntos
 # ══════════════════════════════════════════════════════════════
 def main():
+    # Modo serviço: antes de tudo, porque muda a pasta de trabalho (config,
+    # logs e cache ficam ao lado do .exe, mesmo iniciado pelo Agendador).
+    import servico_rajant
+    # Executável: config.ini, logs, cache e relatórios ficam AO LADO dele,
+    # de onde quer que tenha sido chamado (atalho, Agendador, outra pasta).
+    # Antes iam para a pasta corrente — e o Agendador, como SYSTEM, abre em
+    # C:\Windows\System32.
+    if getattr(sys, "frozen", False):
+        os.chdir(servico_rajant.pasta_do_programa())
+    acoes = [a for a in sys.argv[1:] if a in servico_rajant.ACOES]
+    if acoes:
+        sys.exit(servico_rajant.executar(acoes[0], carregar_config))
     ap = argparse.ArgumentParser(description="Rajant Monitor — exporter Prometheus + relatorios Excel")
     ap.add_argument("--seed"); ap.add_argument("--password")
-    ap.add_argument("--role", default=None, choices=["VIEW","admin","co"])
+    # Maiúsculas ou minúsculas: a rajant-api só conhece VIEW/CO/ADMIN e
+    # `papel_bcapi` normaliza; a lista antiga (VIEW, admin, co) recusava "CO".
+    ap.add_argument("--role", default=None, type=str.upper,
+                    choices=["VIEW", "CO", "ADMIN", "LOCAL"])
     ap.add_argument("--port", type=int)
     ap.add_argument("--interval", type=int)
     ap.add_argument("--metrics-port", type=int)
@@ -16865,7 +17045,7 @@ def main():
     timeout   = cfg.getint("coleta","timeout_conexao",      fallback=15)
     tentativas= cfg.getint("coleta","tentativas_por_bc",    fallback=3)
     falhas_lim= cfg.getint("coleta","falhas_antes_offline", fallback=3)
-    manter_s  = cfg.getint("coleta","manter_ultimo_valor_s",fallback=300)
+    manter_s  = cfg.getint("coleta","segurar_serie_s",      fallback=0)
     redesc    = cfg.getint("coleta","redescoberta_ciclos",  fallback=10)
     falhas_rem= cfg.getint("coleta","falhas_para_remover",  fallback=20)
     # Coleta acelerada dos móveis (site survey contínuo). O padrão de nome
@@ -17123,16 +17303,21 @@ def main():
 
     descoberta_on = cfg.getboolean("coleta", "descoberta", fallback=True)
     cache_on      = cfg.getboolean("coleta", "usar_cache",  fallback=True)
-    so_com_tag    = cfg.getboolean("coleta", "somente_com_tag", fallback=False)
-    prefs = None
-    if so_com_tag:
-        cfg_relatorio(cfg)
-        prefs = [pref for _, pref in prefixos_frota(cfg)]
-        if not prefs:
-            log.warning("[coleta] somente_com_tag ligado mas "
-                        "[relatorio] prefixos_frota esta vazio; "
-                        "filtro DESLIGADO para nao descartar tudo")
-            prefs = None
+    padrao_tag = None
+    if cfg.getboolean("coleta", "filtrar_tag", fallback=True):
+        padrao_tag = cfg.get("coleta", "padrao_tag",
+                             fallback=PADRAO_TAG_PADRAO).strip() or PADRAO_TAG_PADRAO
+        try:
+            re.compile(padrao_tag)
+        except re.error as e:
+            log.error(f"[coleta] padrao_tag invalido ({e}); usando o padrao "
+                      f"{PADRAO_TAG_PADRAO}")
+            padrao_tag = PADRAO_TAG_PADRAO
+    for velha, nova in (("manter_ultimo_valor_s", "segurar_serie_s"),
+                        ("somente_com_tag", "filtrar_tag")):
+        if cfg.has_option("coleta", velha):
+            log.info(f"[coleta] '{velha}' nao e mais usado (agora: '{nova}', "
+                     f"padrao {cfg.get('coleta', nova, fallback='o do programa')})")
 
     cache = CacheIPs(CACHE_FILE, ativo=cache_on)
     start_http_server(mport)
@@ -17153,8 +17338,10 @@ def main():
     log.info(f"  Cache:     "
              + (f"{CACHE_FILE} ({cache.total()} IPs)" if cache_on
                 else "desligado"))
-    if prefs:
-        log.info(f"  Filtro:    so nomes com prefixo {', '.join(prefs)}")
+    log.info(f"  Tag:       " + (f"so nomes no formato {padrao_tag}"
+                                 if padrao_tag else "SEM filtro (filtrar_tag = false)"))
+    log.info(f"  Series:    " + (f"seguram {manter_s}s apos falha" if manter_s > 0
+                                 else "saem na primeira falha"))
     log.info(f"  Metricas:  http://localhost:{mport}/metrics")
     if not args.sem_relatorios:
         log.info(f"  Relatorios: http://localhost:{cfg.getint('relatorio','porta_relatorio')}/")
@@ -17168,7 +17355,7 @@ def main():
         manter_s=manter_s, redesc_ciclos=redesc,
         falhas_remover=falhas_rem, cache=cache,
         interval_moveis=int_moveis, padrao_movel=padr_movel,
-        descoberta=descoberta_on, prefixos_tag=prefs,
+        descoberta=descoberta_on, padrao_tag=padrao_tag,
     )
     COLETOR_ATUAL["ref"] = coletor      # habilita a captura pela pagina web
     coletor.run()

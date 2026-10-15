@@ -1,0 +1,13 @@
+# Exemplo de prometheus.yml para o Rajant Monitor. Copie para a pasta do
+# Prometheus como prometheus.yml (ou ajuste o seu) e reinicie.
+global:
+  # O exportador coleta a malha a cada [coleta] intervalo_segundos (60 s).
+  # Raspar a cada 15 s deixa o Grafana ver a falha de um rádio em até 15 s
+  # depois da coleta que falhou.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: rajant
+    static_configs:
+      - targets: ["localhost:8000"]     # [servidor] porta_metrics

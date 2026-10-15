@@ -30,7 +30,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=["rajant_api"],
+    # servico_rajant: o modo --servico, importado dentro de main().
+    hiddenimports=["rajant_api", "servico_rajant"],
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6",

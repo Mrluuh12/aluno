@@ -619,6 +619,267 @@ wired {
 # ══════════════════════════════════════════════════════════════════
 # 12. Regressões de robustez já existentes
 # ══════════════════════════════════════════════════════════════════
+class TestSeriesNoMetrics(unittest.TestCase):
+    """O /metrics só tem o que foi medido AGORA (campo, 15/10/2026: "o
+    Grafana persiste a última leitura, fica uma linha reta") e só
+    equipamento com tag ("tem que ter apenas rádios com tag")."""
+
+    ST = STATE
+
+    def setUp(self):
+        self._ping = rm.ping_rtt
+        rm.ping_rtt = lambda ip: None
+        self.ip = "10.250.0." + str(abs(hash(self.id())) % 200 + 10)
+
+    def tearDown(self):
+        rm.ping_rtt = self._ping
+        rm.retirar_series(self.ip)
+
+    def _texto(self):
+        from prometheus_client import generate_latest, REGISTRY
+        return generate_latest(REGISTRY).decode()
+
+    def _linhas(self, metrica, ip=None):
+        ip = ip or self.ip
+        return [l for l in self._texto().splitlines()
+                if l.startswith(metrica + "{") and f'ip="{ip}"' in l]
+
+    def _dados(self, nome="CA-1006", peers=(("10.188.97.220", 1), ("10.0.0.77", 2))):
+        d = rm.parse_state(self.ST)
+        d["sistema"]["nome"] = nome
+        r = d["radios"][0]
+        base = dict(r["peers"][0])
+        r["peers"] = [dict(base, ip=ip_p, encap=enc) for ip_p, enc in peers]
+        return d
+
+    def _coletor(self):
+        c = rm.RajantCollector.__new__(rm.RajantCollector)
+        c.prefixos_tag = None; c.sem_tag = set()
+        c.re_tag = rm.re.compile(rm.PADRAO_TAG_PADRAO, rm.re.I)
+        c.nomes = {"10.188.97.220": "ERM-22 PTP CAM"}
+        c.nome_encap = {}
+        class Cache:
+            def nome(self, ip): return None
+        c.cache = Cache()
+        return c
+
+    def test_vizinho_que_sumiu_sai_do_metrics(self):
+        est = rm.EstadoBC(3, 0); est.ok({}, 1.0)
+        rm.publicar(self.ip, self._dados(peers=(("10.0.1.1", 1), ("10.0.1.2", 2))), est)
+        self.assertEqual(len(self._linhas("rajant_peer_sinal_dbm")), 2)
+        rm.publicar(self.ip, self._dados(peers=(("10.0.1.1", 1),)), est)
+        linhas = self._linhas("rajant_peer_sinal_dbm")
+        self.assertEqual(len(linhas), 1, linhas)
+        self.assertIn('peer="10.0.1.1"', linhas[0])
+
+    def test_falha_tira_a_medicao_e_deixa_online_zero(self):
+        est = rm.EstadoBC(3, 0); est.ok({}, 1.0)
+        rm.publicar(self.ip, self._dados(), est)
+        for m in ("rajant_peer_sinal_dbm", "rajant_radio_canal", "rajant_uptime_s"):
+            self.assertTrue(self._linhas(m), m)
+        est.falha()
+        rm.marcar_offline(self.ip, "CA-1006", est, 10**9)
+        self.assertEqual(self._linhas("rajant_peer_sinal_dbm"), [])
+        self.assertEqual(self._linhas("rajant_radio_canal"), [])
+        on = self._linhas("rajant_online")
+        self.assertEqual(len(on), 1); self.assertTrue(on[0].endswith(" 0.0"), on)
+        self.assertEqual(len(self._linhas("rajant_bc_info")), 1)
+        self.assertEqual(len(self._linhas("rajant_falhas_consecutivas")), 1)
+
+    def test_segurar_serie_mantem_dentro_da_janela(self):
+        d = self._dados()
+        est = rm.EstadoBC(3, 300); est.ok(d, time.monotonic())
+        rm.publicar(self.ip, d, est)
+        est.falha()
+        rm.marcar_offline(self.ip, "CA-1006", est, time.monotonic())
+        self.assertTrue(self._linhas("rajant_peer_sinal_dbm"))
+        rm.marcar_offline(self.ip, "CA-1006", est, time.monotonic() + 301)
+        self.assertEqual(self._linhas("rajant_peer_sinal_dbm"), [])
+
+    def test_vizinho_sem_tag_nao_vira_serie_e_com_tag_sai_pelo_nome(self):
+        c = self._coletor()
+        est = rm.EstadoBC(3, 0); est.ok({}, 1.0)
+        dados = self._dados(peers=(("10.188.97.220", 1), ("10.0.0.77", 2),
+                                   ("mac:AA:BB", 128433)))
+        c.nome_encap = {128433: "ERB-02"}
+        rm.publicar(self.ip, dados, est, nome_vizinho=c.nome_vizinho)
+        peers = sorted(re.search(r'peer="([^"]+)"', l).group(1)
+                       for l in self._linhas("rajant_peer_sinal_dbm"))
+        self.assertEqual(peers, ["ERB-02", "ERM-22 PTP CAM"])
+
+    def test_ultima_coleta_e_hora_real(self):
+        est = rm.EstadoBC(3, 0); est.ok({}, time.monotonic())
+        rm.publicar(self.ip, self._dados(), est)
+        v = float(self._linhas("rajant_ultima_coleta_ts")[0].split()[-1])
+        self.assertLess(abs(v - time.time()), 60)
+
+    def test_ip_sem_nome_que_falha_nao_entra_no_metrics(self):
+        c = self._coletor()
+        self.assertFalse(c.tem_tag(c.nome_conhecido("10.188.99.217")))
+        fonte = inspect.getsource(rm.RajantCollector._coletar_bc)
+        self.assertIn("if self.tem_tag(nome):\n                        marcar_offline", fonte)
+
+    def test_identidade_so_com_tag(self):
+        fonte = inspect.getsource(rm.RajantCollector._publicar_identidade)
+        self.assertIn("if not self.tem_tag(", fonte)
+
+
+class TestServicoSegundoPlano(unittest.TestCase):
+    """--servico: Prometheus, Grafana e exportador em segundo plano, e
+    reerguidos se caírem (campo, 15/10/2026: "quando a máquina reinicia,
+    temos que iniciar manualmente")."""
+
+    FALSO = (
+        "#!/usr/bin/env python3\n"
+        "import socket, sys, time\n"
+        "a = sys.argv[1:]\n"
+        "porta = (int(a[a.index('--porta') + 1]) if '--porta' in a else\n"
+        "         int(open(a[a.index('--homepath') + 1] + '/conf/porta').read()))\n"
+        "s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "s.bind(('127.0.0.1', porta)); s.listen(5)\n"
+        "print('no ar', a, flush=True)\n"
+        "while True:\n"
+        "    c, _ = s.accept(); c.close()\n")
+
+    @staticmethod
+    def _porta_livre():
+        import socket
+        s = socket.socket(); s.bind(("127.0.0.1", 0))
+        p = s.getsockname()[1]; s.close(); return p
+
+    def setUp(self):
+        import servico_rajant as sr, configparser, stat
+        self.sr = sr
+        self.tmp = Path(tempfile.mkdtemp())
+        self.pp, self.pg = self._porta_livre(), self._porta_livre()
+        prom = self.tmp / "prometheus" / "prometheus"
+        graf = self.tmp / "grafana" / "bin" / "grafana-server"
+        for f in (prom, graf):
+            f.parent.mkdir(parents=True)
+            f.write_text(self.FALSO); f.chmod(f.stat().st_mode | stat.S_IEXEC)
+        (self.tmp / "grafana" / "conf").mkdir()
+        (self.tmp / "grafana" / "conf" / "porta").write_text(str(self.pg))
+        self.cfg = configparser.ConfigParser()
+        self.cfg.read_dict({
+            "servicos": {"prometheus_exe": str(prom),
+                         "prometheus_args": f"--porta {self.pp}",
+                         "prometheus_porta": str(self.pp),
+                         "grafana_exe": str(graf),
+                         "grafana_porta": str(self.pg),
+                         "iniciar_exportador": "false"}})
+        sr.cfg_servicos(self.cfg)
+        self._cwd = os.getcwd()
+        self._esperas = sr.Servico.ESPERAS
+        sr.Servico.ESPERAS = (0.2,)
+        self.servicos = []
+
+    def tearDown(self):
+        for s in self.servicos:
+            s.parar()
+        self.sr.parar_tudo(self.tmp)
+        self.sr.Servico.ESPERAS = self._esperas
+        os.chdir(self._cwd)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _esperar_porta(self, porta, aberta=True, prazo=8.0):
+        fim = time.time() + prazo
+        while time.time() < fim:
+            if self.sr.porta_aberta(porta, espera=0.2) == aberta:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_sobe_os_dois_e_reergue_o_que_cai(self):
+        sv, avisos = self.sr.montar_servicos(self.cfg, self.tmp)
+        self.servicos = sv
+        self.assertEqual([s.nome for s in sv], ["Prometheus", "Grafana"])
+        self.assertEqual(avisos, [])
+        graf = sv[1]
+        self.assertEqual(graf.cmd[1:], ["--homepath", str((self.tmp / "grafana").resolve())])
+        for s in sv:
+            self.assertIn("iniciado", s.verificar())
+        self.assertTrue(self._esperar_porta(self.pp))
+        self.assertTrue(self._esperar_porta(self.pg))
+        # O Prometheus cai: a volta seguinte agenda, a outra reergue.
+        self.sr.matar(sv[0].pid)
+        self.assertTrue(self._esperar_porta(self.pp, aberta=False))
+        time.sleep(0.3)
+        self.assertIn("parou", sv[0].verificar())
+        time.sleep(0.3)
+        self.assertIn("iniciado", sv[0].verificar())
+        self.assertTrue(self._esperar_porta(self.pp))
+        # O log de cada um vai para logs/.
+        self.assertTrue((self.tmp / "logs" / "prometheus.log").exists())
+
+    def test_porta_ja_atendida_nao_inicia_outro(self):
+        # Grafana instalado como serviço do Windows: já está no ar.
+        import socket
+        ocupa = socket.socket(); ocupa.bind(("127.0.0.1", self.pg)); ocupa.listen(1)
+        try:
+            sv, _ = self.sr.montar_servicos(self.cfg, self.tmp)
+            self.servicos = sv
+            msg = sv[1].verificar()
+            self.assertIn("já está no ar", msg)
+            self.assertIsNone(sv[1].proc)
+            self.assertIsNone(sv[1].verificar())     # não repete o aviso
+        finally:
+            ocupa.close()
+        # Saiu do ar: o supervisor assume.
+        self.assertIn("assumindo", sv[1].verificar())
+        self.assertIsNotNone(sv[1].proc)
+
+    def test_rodar_grava_pid_e_parar_derruba_tudo(self):
+        self.sr.rodar(self.cfg, self.tmp, voltas=2, intervalo=0.5, espera_inicial=0)
+        self.assertTrue(self._esperar_porta(self.pp))
+        d = json.loads((self.tmp / "servico.pid").read_text())
+        self.assertEqual(set(d["filhos"]), {"Prometheus", "Grafana"})
+        self.assertTrue((self.tmp / "servico.log").exists())
+        self.sr.parar_tudo(self.tmp)
+        self.assertTrue(self._esperar_porta(self.pp, aberta=False))
+        self.assertTrue(self._esperar_porta(self.pg, aberta=False))
+        self.assertFalse((self.tmp / "servico.pid").exists())
+
+    def test_sem_programa_o_aviso_diz_onde_configurar(self):
+        self.cfg.set("servicos", "prometheus_exe", str(self.tmp / "nao_existe"))
+        sv, avisos = self.sr.montar_servicos(self.cfg, self.tmp)
+        self.assertEqual([s.nome for s in sv], ["Grafana"])
+        self.assertIn("prometheus_exe", avisos[0])
+
+    def test_acha_o_grafana_pela_estrutura_de_pastas(self):
+        self.cfg.set("servicos", "grafana_exe", "")
+        with mock.patch.object(self.sr, "raizes_de_instalacao",
+                               return_value=[str(self.tmp)]):
+            exe, raiz = self.sr.achar_grafana(self.cfg)
+        self.assertTrue(exe.endswith("grafana-server"))
+        self.assertEqual(Path(raiz), (self.tmp / "grafana").resolve())
+
+    def test_tarefa_agendada_sem_limite_de_tempo(self):
+        # schtasks /Create sem XML põe "parar após 3 dias".
+        from xml.dom.minidom import parseString
+        xml = self.sr.xml_da_tarefa([r"C:\rm\rajant_monitor.exe", "--servico"],
+                                    r"C:\rm")
+        doc = parseString(xml.replace('encoding="UTF-16"', 'encoding="UTF-8"'))
+        txt = lambda t: doc.getElementsByTagName(t)[0].firstChild.data
+        self.assertEqual(txt("ExecutionTimeLimit"), "PT0S")
+        self.assertEqual(txt("UserId"), "S-1-5-18")              # SYSTEM
+        self.assertEqual(len(doc.getElementsByTagName("BootTrigger")), 1)
+        self.assertEqual(txt("Arguments"), "--servico")
+        self.assertEqual(txt("WorkingDirectory"), r"C:\rm")
+
+    def test_exportador_sob_o_servico_nao_escreve_no_console(self):
+        import logging as _lg
+        with mock.patch.dict(os.environ, {"RAJANT_SERVICO": "1"}):
+            lg = rm.setup_logging(str(self.tmp / "x.log"), "INFO")
+        tipos = {type(h).__name__ for h in _lg.getLogger().handlers}
+        self.assertEqual(tipos, {"RotatingFileHandler"})
+        rm.setup_logging("", "INFO")
+
+    def test_main_despacha_antes_de_ler_o_config(self):
+        fonte = inspect.getsource(rm.main)
+        self.assertLess(fonte.index("servico_rajant.executar"),
+                        fonte.index("ap.parse_args()"))
+
+
 class TestRobustez(unittest.TestCase):
 
     def test_nmea_para_graus(self):
@@ -2172,9 +2433,10 @@ class TestDescobertaEFiltro(unittest.TestCase):
         d = rm.parse_state(self.ST)
         self.assertNotIn("0.0.0.0", d["peers_ips"])
 
-    def _col(self, prefs):
+    def _col(self, prefs, padrao=None):
         c = rm.RajantCollector.__new__(rm.RajantCollector)
         c.prefixos_tag = prefs; c.sem_tag = set()
+        c.re_tag = rm.re.compile(padrao, rm.re.I) if padrao else None
         return c
 
     def test_sem_prefixos_configurados_aceita_tudo(self):
@@ -2222,9 +2484,25 @@ class TestDescobertaEFiltro(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_config_traz_as_tres_chaves(self):
-        for chave in ("descoberta", "usar_cache", "somente_com_tag"):
+    def test_config_traz_as_chaves(self):
+        for chave in ("descoberta", "usar_cache", "filtrar_tag", "padrao_tag",
+                      "segurar_serie_s"):
             self.assertIn(chave, rm.DEFAULT_CONFIG, chave)
+        # As chaves antigas sairam do padrao: o config.ini ja instalado as
+        # tem escritas (false e 300), e com o nome antigo elas seguiriam
+        # valendo e o filtro e a retirada nunca ligariam.
+        for velha in ("somente_com_tag", "manter_ultimo_valor_s"):
+            self.assertNotIn(velha + " ", rm.DEFAULT_CONFIG)
+
+    def test_padrao_de_tag_aceita_a_rede_da_mina_e_recusa_ip(self):
+        c = self._col(None, rm.PADRAO_TAG_PADRAO)
+        nomes = [n for n in rm.REDE_CONHECIDA.values() if n]
+        self.assertGreater(len(nomes), 150)
+        for n in nomes:
+            self.assertTrue(c.tem_tag(n), n)
+        for n in ("10.188.99.217", "", None, "teste-lab", "Rajant BC",
+                  "eth0udp25", "wlan0wds33"):
+            self.assertFalse(c.tem_tag(n), n)
 
 
 class TestShimSslWrapSocket(unittest.TestCase):
@@ -2246,7 +2524,7 @@ class TestShimSslWrapSocket(unittest.TestCase):
         # conexao passa a falhar onde antes funcionava.
         import ssl as _ssl
         fonte = pathlib.Path("rajant_monitor.py").read_text()
-        trecho = fonte[:fonte.index("import re, json")]
+        trecho = fonte[:fonte.index("import re, os, json")]
         self.assertIn("cert_reqs=ssl.CERT_NONE", trecho)
         self.assertIn("check_hostname = False", trecho)
 
