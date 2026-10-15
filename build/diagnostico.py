@@ -17,9 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-MODULOS = ["prometheus_client", "matplotlib", "numpy", "scipy", "pptx",
-           "openpyxl", "lxml", "google.protobuf", "packaging", "pyparsing",
-           "PIL", "xlsxwriter", "PyInstaller", "rajant_api"]
+MODULOS = ["prometheus_client", "pptx", "openpyxl", "lxml",
+           "google.protobuf", "PIL", "PyInstaller", "rajant_api"]
 
 ARQUIVOS = [("rajant_monitor.py", True), ("build/rajant_monitor.spec", True),
             ("painel/visao-geral.html", True),

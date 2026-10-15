@@ -57,7 +57,7 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "datasource": {
@@ -154,9 +154,9 @@
       "type": "stat",
       "title": "IPs online",
       "gridPos": {
-        "x": 4,
+        "x": 3,
         "y": 1,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "datasource": {
@@ -252,7 +252,7 @@
       "type": "gauge",
       "title": "Cobertura da coleta",
       "gridPos": {
-        "x": 8,
+        "x": 6,
         "y": 1,
         "w": 4,
         "h": 4
@@ -360,9 +360,9 @@
       "type": "stat",
       "title": "Seeds OK",
       "gridPos": {
-        "x": 12,
+        "x": 10,
         "y": 1,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "datasource": {
@@ -463,7 +463,7 @@
       "type": "stat",
       "title": "BCs com falha de coleta",
       "gridPos": {
-        "x": 16,
+        "x": 13,
         "y": 1,
         "w": 4,
         "h": 4
@@ -569,7 +569,7 @@
       "type": "stat",
       "title": "ICMP sem resposta",
       "gridPos": {
-        "x": 20,
+        "x": 17,
         "y": 1,
         "w": 4,
         "h": 4
@@ -672,6 +672,105 @@
     },
     {
       "id": 8,
+      "type": "stat",
+      "title": "Ignorados sem tag",
+      "gridPos": {
+        "x": 21,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Rádios que responderam com nome fora do formato de tag ([coleta] padrao_tag) e não entram em painel nenhum. Os nomes estão no rajant_monitor.log (ignorado: nome sem tag).",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "rajant_bc_sem_tag",
+          "legendFormat": "sem tag",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 5,
+            "spanNulls": 180000,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisBorderShow": false,
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "gradientMode": "opacity",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "insertNulls": false,
+            "barAlignment": 0
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "—",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      }
+    },
+    {
+      "id": 9,
       "type": "row",
       "title": "Frescor do dado",
       "gridPos": {
@@ -684,7 +783,7 @@
       "panels": []
     },
     {
-      "id": 9,
+      "id": 10,
       "type": "timeseries",
       "title": "Idade da última coleta",
       "gridPos": {
@@ -697,7 +796,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Cresce em rampa = o BC parou de responder e os painéis estão exibindo o último valor conhecido.",
+      "description": "Cresce em rampa = o BC parou de responder. As medições dele saem dos painéis (buraco) até ele voltar.",
       "targets": [
         {
           "datasource": {
@@ -781,7 +880,7 @@
       }
     },
     {
-      "id": 10,
+      "id": 11,
       "type": "timeseries",
       "title": "Falhas consecutivas",
       "gridPos": {
@@ -885,7 +984,7 @@
       }
     },
     {
-      "id": 11,
+      "id": 12,
       "type": "state-timeline",
       "title": "Online (BCAPI)",
       "gridPos": {
@@ -1003,7 +1102,7 @@
       }
     },
     {
-      "id": 12,
+      "id": 13,
       "type": "state-timeline",
       "title": "Responde a ICMP",
       "gridPos": {
@@ -1121,7 +1220,7 @@
       }
     },
     {
-      "id": 13,
+      "id": 14,
       "type": "row",
       "title": "Topologia de endereçamento",
       "gridPos": {
@@ -1134,7 +1233,7 @@
       "panels": []
     },
     {
-      "id": 14,
+      "id": 15,
       "type": "bargauge",
       "title": "BCs com mais interfaces",
       "gridPos": {
@@ -1234,7 +1333,7 @@
       }
     },
     {
-      "id": 15,
+      "id": 16,
       "type": "table",
       "title": "IP primário por nó",
       "gridPos": {
@@ -1463,7 +1562,7 @@
       ]
     },
     {
-      "id": 16,
+      "id": 17,
       "type": "row",
       "title": "Seeds de descoberta",
       "gridPos": {
@@ -1476,7 +1575,7 @@
       "panels": []
     },
     {
-      "id": 17,
+      "id": 18,
       "type": "state-timeline",
       "title": "Status dos seeds",
       "gridPos": {
@@ -1594,7 +1693,7 @@
       }
     },
     {
-      "id": 18,
+      "id": 19,
       "type": "row",
       "title": "Notas",
       "gridPos": {
@@ -1607,7 +1706,7 @@
       "panels": []
     },
     {
-      "id": 19,
+      "id": 20,
       "type": "text",
       "title": "Como usar este dashboard",
       "gridPos": {

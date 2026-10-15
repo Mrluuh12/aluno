@@ -1,8 +1,8 @@
 # Dashboards Grafana — Rajant
 
 Seis dashboards alinhados ao `rajant_monitor.py` **depois** da auditoria das
-métricas contra os `.proto` do bcapi. Cobrem as **98 séries** que o exporter
-publica hoje, e nenhuma das 19 removidas.
+métricas contra os `.proto` do bcapi. Consultam 99 das 101 métricas que o
+exporter publica hoje, e nenhuma das 19 removidas.
 
 | # | arquivo | uid | painéis | do que trata |
 |---|---|---|---|---|
@@ -11,8 +11,7 @@ publica hoje, e nenhuma das 19 removidas.
 | 3 | `rajant-enlaces.json` | `rajant-enlaces` | 14 | SNR, sinal, taxa e custo InstaMesh por enlace |
 | 4 | `rajant-ethernet.json` | `rajant-ethernet` | 14 | APT state, link, throughput e peers por porta |
 | 5 | `rajant-saude.json` | `rajant-saude` | 27 | CPU, temperatura, memória, bateria, InstaMesh |
-| 6 | `rajant-coletor.json` | `rajant-coletor` | 14 | saúde do próprio exporter: frescor, falhas, seeds |
-| 7 | `rajant-survey.json` | `rajant-survey` | 13 | rota da frota colorida por SNR, buracos de cobertura |
+| 6 | `rajant-coletor.json` | `rajant-coletor` | 15 | saúde do próprio exporter: frescor, falhas, seeds |
 
 ## Importar
 
@@ -29,6 +28,14 @@ sudo cp grafana/provisioning-dashboards.yaml \
         /etc/grafana/provisioning/dashboards/rajant.yaml
 sudo systemctl restart grafana-server
 ```
+
+No Windows, a pasta de provisionamento é `<grafana>\conf\provisioning\dashboards\`;
+copie o `.yaml` para lá e troque `path` pela pasta onde ficaram os JSON (ex.:
+`C:/grafana/dashboards/rajant`).
+
+O dashboard *7 · Site Survey Contínuo* saiu junto com o survey. Quem o tiver
+importado pode apagá-lo pela interface; por provisionamento, apague o
+`rajant-survey.json` da pasta.
 
 No provisionamento, `DS_PROMETHEUS` resolve pela fonte de dados padrão. Se a
 sua não for a padrão, ajuste `DS_PROMETHEUS` no seletor do topo de cada
@@ -81,13 +88,30 @@ O motivo de cada remoção está em `../AUDITORIA_METRICAS.md`.
   `.proto` diz só `uint64`. As porcentagens derivadas são razões, então não
   dependem da unidade.
 
-## Site survey contínuo
+## Buraco, não linha reta
 
-O dashboard 7 é a visão ao vivo do mesmo dado que alimenta
-`--survey-do-prometheus`. A resolução espacial é **velocidade × intervalo de
-coleta** — a ~420 m com coleta de 60 s, ~140 m com 20 s. Serve para achar
-buraco de cobertura, não para posicionar antena. Detalhes, vieses e o que
-continua exigindo campanha manual em `../SITE_SURVEY.md`.
+Rádio que para de responder **sai** do `/metrics` na coleta seguinte (as
+medições; `rajant_online` vai a 0), e vizinho que some da tabela de peers
+também. O Prometheus encerra a série e o painel mostra o **buraco**. Antes o
+exporter repetia a última leitura e o gráfico virava uma linha reta.
+
+Os painéis de série ligam buracos de até **3 minutos** (`spanNulls`), para
+uma raspagem perdida não quebrar a linha; buraco maior aparece. O valor fica
+em `LIGA_BURACO_MS` no gerador.
+
+O buraco **não** é pintado de 0: 0 dBm ou 0 °C seriam leituras, e erradas. A
+queda está em `rajant_online` e em *Falhas consecutivas* (dashboard 6).
+
+## Só equipamento com tag
+
+O exporter só publica rádio com tag no nome (CA-1035, ERM-22 PTP CAM,
+RED065...), e o rótulo `peer` das séries de enlace é a **tag** do vizinho,
+não o IP. Por isso as variáveis e legendas mostram só equipamento da frota.
+
+Séries antigas, com IP no rótulo, continuam no histórico do Prometheus até
+saírem do intervalo de tempo escolhido no painel. O cartão *Ignorados sem
+tag* (dashboard 6) conta quem respondeu e foi deixado de fora; os nomes estão
+no log do exporter.
 
 ## Regenerar
 
@@ -100,7 +124,8 @@ python3 grafana/validar_dashboards.py   # confere contra o exporter
 
 O validador falha se algum painel consultar métrica removida ou inexistente,
 se houver painéis sobrepostos na grade ou IDs repetidos. Ele também lista as
-métricas publicadas que ficaram sem painel — hoje, nenhuma.
+métricas publicadas que ficaram sem painel — hoje, `rajant_gps_qualidade` e
+`rajant_radio_interf_pct`.
 
 Editar pela interface do Grafana funciona, mas o próximo `gerar_dashboards.py`
 sobrescreve. Para manter uma mudança, faça-a no gerador.

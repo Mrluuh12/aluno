@@ -1,7 +1,8 @@
 # Arquitetura
 
 Como o `rajant_monitor.py` funciona por dentro: o caminho que um dado
-percorre do rádio até o slide, cada peça, e por que ela está onde está.
+percorre do rádio até o gráfico e o slide, cada peça, e por que ela está onde
+está.
 
 Para *usar* o programa, leia o [README](README.md). Este documento é para
 quem vai **mexer** nele.
@@ -15,60 +16,60 @@ quem vai **mexer** nele.
 3. [O caminho do dado](#3-o-caminho-do-dado)
 4. [Transporte e parsing](#4-transporte-e-parsing)
 5. [Estado e confiabilidade](#5-estado-e-confiabilidade)
-6. [Descoberta e coleta](#6-descoberta-e-coleta)
-7. [As 101 métricas](#7-as-101-métricas)
-8. [Modelo de execução](#8-modelo-de-execução)
-9. [Armazenamento](#9-armazenamento)
-10. [Survey: captura](#10-survey-captura)
-11. [Survey: análise](#11-survey-análise)
-12. [Survey: o mapa de calor](#12-survey-o-mapa-de-calor)
-13. [KML e KMZ](#13-kml-e-kmz)
-14. [Relatório Excel](#14-relatório-excel)
-15. [Relatório PowerPoint](#15-relatório-powerpoint)
-16. [Identidade Anglo](#16-identidade-anglo)
-17. [Página web e endpoints](#17-página-web-e-endpoints)
-18. [Grafana e painel próprio](#18-grafana-e-painel-próprio)
-19. [Configuração completa](#19-configuração-completa)
-20. [Linha de comando](#20-linha-de-comando)
-21. [Testes](#21-testes)
-22. [Build e distribuição](#22-build-e-distribuição)
-23. [As invariantes](#23-as-invariantes)
-24. [Limites conhecidos](#24-limites-conhecidos)
-25. [Solução de problemas](#25-solução-de-problemas)
-26. [Mapa do arquivo](#26-mapa-do-arquivo)
-27. [Glossário](#27-glossário)
+6. [Séries no /metrics](#6-séries-no-metrics)
+7. [Descoberta, coleta e tag](#7-descoberta-coleta-e-tag)
+8. [As 101 métricas](#8-as-101-métricas)
+9. [Modelo de execução](#9-modelo-de-execução)
+10. [Modo serviço](#10-modo-serviço)
+11. [Relatório Excel](#11-relatório-excel)
+12. [Relatório PowerPoint](#12-relatório-powerpoint)
+13. [Identidade Anglo](#13-identidade-anglo)
+14. [Página web e endpoints](#14-página-web-e-endpoints)
+15. [Grafana e painel próprio](#15-grafana-e-painel-próprio)
+16. [Configuração completa](#16-configuração-completa)
+17. [Linha de comando](#17-linha-de-comando)
+18. [Testes](#18-testes)
+19. [Build e distribuição](#19-build-e-distribuição)
+20. [As invariantes](#20-as-invariantes)
+21. [Limites conhecidos](#21-limites-conhecidos)
+22. [Solução de problemas](#22-solução-de-problemas)
+23. [Mapa do arquivo](#23-mapa-do-arquivo)
+24. [Glossário](#24-glossário)
 
 ---
 
 ## 1. O que é
 
-Um processo que faz três coisas ao mesmo tempo, sobre a mesma coleta, numa
-malha Rajant BreadCrumb de ~150 nós em mina a céu aberto:
+Um processo que faz duas coisas sobre a mesma coleta, numa malha Rajant
+BreadCrumb de ~150 nós em mina a céu aberto:
 
 | papel | saída |
 |---|---|
 | **Exportador Prometheus** | 101 famílias de métrica em `/metrics` |
-| **Gerador de relatórios** | Excel (13 abas) e PowerPoint, semanal e de survey |
-| **Ferramenta de site survey** | captura ao vivo, KMZ para Google Earth, deck próprio |
+| **Gerador do relatório semanal** | Excel (13 abas) e PowerPoint |
+
+E um supervisor (`servico_rajant.py`) que sobe exportador, Prometheus e
+Grafana em segundo plano e os reergue se caírem.
+
+O site survey (captura ao vivo, leitura do MeshMapper, KMZ, deck próprio)
+foi descontinuado e saiu do código; está no histórico do git.
 
 ### Números do código
 
 | | |
 |---|---|
-| linhas | ~14400 |
-| funções no topo | 243 |
-| métodos | 105 |
-| classes | 7 |
+| linhas | ~5300 (`rajant_monitor.py`) + ~560 (`servico_rajant.py`) |
+| funções no topo | 101 |
+| classes | 6 |
 | famílias de métrica | 101 |
-| endpoints HTTP | 26 |
-| tabelas SQLite | 3 |
-| testes | 629, em 86 classes |
-| comentários | 10% das linhas |
+| endpoints HTTP | 5 |
+| testes | 177, em 31 classes |
+| comentários | ~13% das linhas |
 
-Os 10% de comentário não são enfeite: quase todos registram uma armadilha
-concreta. A convenção é rígida — **comentário explica *por que*, não *o
-quê***. Um comentário que descreve o código é ruído; um que registra o bug
-evitado é o que impede a próxima pessoa de "simplificar" de volta.
+Os comentários quase todos registram uma armadilha concreta. A convenção é
+rígida — **comentário explica *por que*, não *o quê***. Um comentário que
+registra o bug evitado é o que impede a próxima pessoa de "simplificar" de
+volta.
 
 ---
 
@@ -79,10 +80,8 @@ evitado é o que impede a próxima pessoa de "simplificar" de volta.
 A rede da mina é isolada: sem PyPI, sem Docker, sem pipeline de deploy. O
 que roda lá chega por pendrive ou cópia de arquivo. Um pacote com
 `__init__.py`, dependências internas e ordem de importação é mais uma coisa
-para dar errado no lugar onde ninguém pode depurar.
-
-O custo é real — navegar é pior e o acoplamento é fácil demais. O que
-segura isso são os 629 testes e as âncoras de seção (§26).
+para dar errado no lugar onde ninguém pode depurar. O supervisor é o único
+módulo à parte, porque não tem nada a ver com rádio.
 
 ### Dependências
 
@@ -91,42 +90,25 @@ segura isso são os 629 testes e as âncoras de seção (§26).
 | `rajant-api` | falar com os BCs | sim |
 | `protobuf 4.23.4` | a `rajant-api` depende | sim |
 | `prometheus_client` | expor `/metrics` | sim |
-| `python-pptx` | gerar os decks | só relatório |
+| `python-pptx` | gerar o deck semanal | só relatório |
 | `openpyxl` | gerar o Excel | só relatório |
-| `matplotlib` | PNGs e raster do calor | só survey |
-| `numpy` | grade do calor, agregações | só survey |
-| `scipy` | `cKDTree` na interpolação | só survey |
 | `lxml` | XML do PPTX | via python-pptx |
 
 **Nada de framework web.** O servidor é `http.server` da biblioteca padrão
-e o front é HTML/CSS/JS embutido no próprio arquivo. Rede isolada não baixa
+e a página é HTML/CSS/JS embutido no próprio arquivo. Rede isolada não baixa
 bundle nem CDN.
 
 ### A armadilha da rajant-api
 
-Ela declara três dependências e **só usa uma**:
+Ela declara três dependências e **só usa uma** (`protobuf`); `grpcio 1.56.2`
+não tem wheel para Python 3.12+. Por isso `pip install rajant-api --no-deps`
+e o protobuf à parte.
 
-```
-grpcio == 1.56.2        declarada, NUNCA importada
-grpcio-tools == 1.56.2  declarada, NUNCA importada
-protobuf == 4.23.4      esta sim
-```
-
-Isso não é curiosidade: `grpcio 1.56.2` não tem wheel para Python 3.12+, e
-instalar as dependências declaradas falha tentando compilar C++. Por isso:
-
-```bash
-pip install rajant-api --no-deps
-pip install "protobuf==4.23.4"
-```
-
-E ela faz `from ssl import wrap_socket`, função **removida no Python 3.12**
-(não na 3.13 — as duas dão o mesmo erro). O módulo instala um *shim*
-compatível antes de importá-la. Consequência prática: `import rajant_api`
-sozinho falha, `import rajant_monitor` funciona. O shim reproduz o
-comportamento antigo **inclusive sem validar certificado**, que é o que a
-`ssl.wrap_socket()` fazia e o que os BCs exigem, por usarem certificado
-autoassinado.
+E ela faz `from ssl import wrap_socket`, função **removida no Python 3.12**.
+O módulo instala um *shim* compatível antes de importá-la: `import
+rajant_api` sozinho falha, `import rajant_monitor` funciona. O shim reproduz
+o comportamento antigo **inclusive sem validar certificado**, que é o que os
+BCs exigem, por usarem certificado autoassinado.
 
 ---
 
@@ -134,127 +116,150 @@ autoassinado.
 
 ```mermaid
 flowchart TD
-    BC["BreadCrumb<br/>BC API sobre TLS"] -->|texto protobuf| P[parse_state]
+    BC["BreadCrumb<br/>BC API sobre TLS"] -->|"State (protobuf)"| L["ler_estado()<br/>mensagem inteira"]
+    L --> P[parse_state]
     P --> E["EstadoBC<br/>último bom + falhas"]
-    E --> M["publicar()<br/>101 Gauges"]
-    M --> PR[(Prometheus)]
+    E --> M["publicar()<br/>SeriesDoBC"]
+    M --> MX["/metrics"]
+    MX --> PR[(Prometheus)]
+    PR --> G[Grafana]
     PR --> OD["obter_dados()<br/>PromQL agregado"]
     OD --> XL["Excel<br/>13 abas"]
     OD --> PP["PPT semanal"]
-    BC -.->|consulta direta,<br/>durante o survey| CG[CapturaGPS]
-    CG --> DB[(surveys.db)]
-    DB --> KMZ["KMZ<br/>Google Earth"]
-    DB --> PS["PPT de survey"]
-    DB --> PNG["PNGs"]
 ```
 
-Há **dois caminhos de leitura do rádio**, e eles não se misturam:
-
-- O **coletor** roda em ciclo fixo, publica em métricas e alimenta os
-  relatórios pelo Prometheus. É a série histórica.
-- A **captura de survey** fala com os rádios *diretamente*, na hora, e grava
-  no SQLite. Amostrar o cache do exportador daria a resolução do ciclo do
-  exportador, não a que o survey pediu.
-
-Quando a consulta direta falha, a amostra cai para o último estado do
-exportador e é **marcada** (`fonte = 'cache'`). Ponto defasado e
-identificado é melhor que buraco no trajeto; ponto defasado disfarçado de
-medição é pior que os dois.
+Um caminho só de leitura do rádio: o **coletor**, em ciclo fixo. Os
+relatórios não falam com rádio nenhum; leem o Prometheus.
 
 ---
 
 ## 4. Transporte e parsing
 
-A `rajant-api` devolve o `State` em **texto de protobuf**, não em objeto.
-O parsing é por regex — com um detalhe que não é opcional.
+### A sessão com o rádio
+
+Por BC e por ciclo: `reachable()` → `autenticar()` → `ler_estado()` →
+`fechar_sessao()`. Três coisas da biblioteca foram contornadas, todas lidas
+no código da 0.1.1:
+
+**`get_state()` lê com um único `recv(65535)`.** Pelo TLS um `recv` traz no
+máximo um registro (~16 KB), e o State de rádio com muitos vizinhos passa
+disso. Ela então devolve `False` — e esse `False` atravessava `parse_state()`
+como um State vazio: sem nome, sem rádio, sem vizinho, **contado como
+leitura boa**. Com o filtro de tag ligado, o rádio grande saía do Grafana
+como "sem tag".
+
+`ler_estado()` faz o mesmo pedido (`state.Clear()`) pela sessão autenticada
+dela e lê com `bc_receber()`, que segue o enquadramento do código da
+biblioteca — cabeçalho `>ibbbb` (tamanho, compressão 2 = deflate cru,
+`wbits -15`) — e lê **até o tamanho que o cabeçalho declara**. Objeto que não
+é sessão da biblioteca (teste, outra versão) passa pelo `get_state()`, e
+`False`/vazio vira `ConnectionError`: State que não veio é **falha de
+coleta**, conta para o offline, e nunca vira State vazio.
+
+**`authenticate()` devolve `False` para tudo.** `autenticar()` faz os mesmos
+passos (o rádio manda um desafio; volta sha384 da senha + desafio) e levanta
+a exceção com o motivo: usuário que não existe na BCAPI (antes de ir à
+rede), senha recusada com a descrição do rádio e o aviso de espaço no começo
+ou no fim, e a etapa em que parou (conexão TLS, desafio, resultado). O papel
+vai em maiúsculo — a biblioteca faz `roles[role]` num dicionário que só tem
+`CO`, e com `co` o `KeyError` era engolido. Se o caminho daqui falhar por
+rede, tenta o `authenticate()` dela antes de desistir e registra no log.
+O login se identifica como `rajant_monitor` (`auth.userAgent`), que o rádio
+mostra em `State.adminSessions`.
+
+**A `Breadcrumb` não tem `close()`.** `fechar_sessao()` fecha o socket logo
+depois da leitura, em vez de deixar a sessão aberta no rádio até o coletor de
+lixo passar.
+
+O ping de alcance que o `get_state()` fazia antes de cada consulta saiu: a
+coleta já chamou `reachable()`.
 
 ### extrair_blocos() conta chaves
 
-Regex não equilibra `{}`, e os blocos do State aninham: um `peer` dentro de
-`radio` dentro de `wireless`. Extrair com regex ingênua pega o fechamento
-errado e mistura campos de níveis diferentes. `extrair_blocos()` percorre
+`parse_state()` recebe o State em **texto de protobuf** e extrai por regex —
+com um detalhe que não é opcional: regex não equilibra `{}`, e os blocos
+aninham (um `peer` dentro de `wireless`). `extrair_blocos()` percorre
 contando profundidade.
 
 > `parse_state()` é a fronteira. Dali para dentro tudo é dicionário Python;
 > nenhuma outra parte do programa sabe que existe protobuf.
 
-O dicionário devolvido tem ~90 chaves, entre elas `gps_lat`, `gps_fix`,
-`canal`, `freq`, `ch_busy`, `ch_rx`, `ch_tx`, `interf_pct`, `custo`,
-`first_hop`, `good_peers`, `apt_master`, `bateria`, `cpu_pct`, `firmware`.
-
-### Filtro de estado descoberto, não presumido
-
-`_get_state_filtrado()` pede só os ramos `gps`, `wireless` e `system` —
-puxar o State inteiro de 150 rádios a cada 10 s é desperdício de banda na
-malha que se está medindo.
-
-O nome do parâmetro mudou entre versões da biblioteca. Em vez de chutar, o
-código **inspeciona a assinatura** na primeira chamada:
-
-```python
-for cand in ("stateFilterPath", "state_filter_path", "filterPath",
-             "filter_path", "path", "paths", "messagePath"):
-    if cand in ps: _FILTRO_ESTADO["param"] = cand
-```
-
-Sem filtro disponível, cai para o State inteiro — mais pesado, porém
-correto. Descoberto uma vez por processo e guardado.
+A subárvore `configuration` repete nomes de mensagens do estado (`wired`,
+`wireless`, `battery`...) e é retirada antes da extração; dela só saem nome
+e grupos.
 
 ### Conversões que estavam erradas
-
-A auditoria (`AUDITORIA_METRICAS.md`) corrigiu três conversões que passavam
-despercebidas havia tempo:
 
 | campo | erro | correto |
 |---|---|---|
 | **GPS** | tratado como grau decimal | é **NMEA** (`ggmm.mmmm`) — `nmea_para_graus()` |
-| **SNR** | lido direto | derivado de sinal e ruído |
-| **temperatura** | escala errada | com classe (`class_temp`) |
+| **SNR** | `rssi - abs(ruido)`, sempre negativo | derivado de sinal e ruído |
+| **temperatura** | divisor fixo | centésimos ou grau, pela magnitude |
 
-### Ping: uma chamada, não N
+### Ping
 
-`ping_qualidade(ip, n=4)` faz **um** `ping -c 4` e extrai RTT médio e perda
-da mesma saída. N chamadas de `ping_rtt()` custariam N processos; com 150
-rádios por ciclo, isso decide se a coleta cabe no intervalo.
-
-A perda de pacotes só existe porque **a BC API não a fornece**.
+`ping_rtt(ip)` faz um ICMP por BC por ciclo, para `ping_rtt_ms` e `ping_ok`.
+Latência e perda só existem porque **a BC API não as fornece**.
 
 ---
 
 ## 5. Estado e confiabilidade
 
-Três classes guardam o que uma leitura isolada não sabe:
-
 ### EstadoBC
 
-Último dado bom, timestamp e falhas consecutivas. Um BC **não fica offline
-no primeiro timeout** — a malha tem perda, e sem isso o painel piscaria a
-cada varredura. `falhas_limite` define quantas falhas seguidas derrubam;
-`manter_s`, por quanto tempo o último dado bom ainda vale.
+Último dado bom, hora da última coleta boa (epoch) e falhas consecutivas. Um
+BC **não fica offline no primeiro timeout** — a malha tem perda, e sem isso
+o painel piscaria a cada varredura. `falhas_antes_offline` define quantas
+falhas seguidas derrubam.
 
 ### JanelaDisponibilidade
 
-Deque de `(timestamp, online)` com janelas deslizantes:
-
-| janela | segundos |
-|---|---|
-| 1 h | 3.600 |
-| 24 h | 86.400 |
-| 7 d | 604.800 |
-
-Metodologia BCE. As três são publicadas separadamente porque respondem
-perguntas diferentes: 1 h é operação, 24 h é turno, 7 d é o relatório.
+Deque de `(timestamp, online)` com janelas deslizantes de 1 h, 24 h e 7 d
+(metodologia BCE): operação, turno e relatório.
 
 ### CacheIPs
 
-IPs já descobertos, persistidos em disco. Existe para sobreviver a reinício
-com o seed fora do ar. Tem contrapartida — ressuscita endereço que saiu da
-rede, mantendo equipamento fantasma na métrica —, e por isso pode ser
-desligado (`[coleta] usar_cache = false`), o que faz sentido com lista fixa.
+IPs e nomes já vistos, persistidos em disco. Existe para sobreviver a
+reinício com o seed fora do ar. Ressuscita endereço que saiu da rede, e por
+isso pode ser desligado (`[coleta] usar_cache = false`).
 
 ---
 
-## 6. Descoberta e coleta
+## 6. Séries no /metrics
+
+O `prometheus_client` guarda o último valor de cada combinação de rótulos
+**para sempre**, até alguém chamar `.remove()`. Era a linha reta do Grafana:
+rádio que parou de responder e vizinho que saiu da tabela de peers seguiam
+no `/metrics` com a última leitura, e o Prometheus raspava o mesmo número
+indefinidamente.
+
+`SeriesDoBC` anota tudo o que `publicar()` gravou para um IP nesta coleta.
+No fim, `fechar()` remove o que existia na coleta anterior e não foi gravado
+agora:
+
+- vizinho que sumiu da tabela → saem as séries daquele enlace;
+- campo que veio `None` → a série sai (não fica o valor antigo);
+- BC que não respondeu → `marcar_offline()` grava só `rajant_online = 0`,
+  falhas, última coleta e disponibilidade; `rajant_bc_info` (modelo,
+  firmware) fica; as medições saem.
+
+O Prometheus encerra a série (staleness) e o Grafana desenha o buraco. Os
+painéis usam `spanNulls` de 3 min: uma raspagem perdida não quebra a linha,
+buraco maior aparece.
+
+`segurar_serie_s` > 0 mantém as séries de um BC que falhou por esse tempo
+(com a última leitura), para quem prefere a linha contínua num rádio que
+perde uma coleta ou outra. O padrão é 0.
+
+`retirar_series(ip)` tira tudo de um IP — usado quando ele passa a não ter
+tag (renomeado) ou nunca deu nome.
+
+`rajant_ultima_coleta_ts` é epoch da última coleta **boa**; era um relógio
+monotônico, que não diz hora nenhuma e não serve para `time() - x`.
+
+---
+
+## 7. Descoberta, coleta e tag
 
 O `RajantCollector` parte dos *seeds* e caminha pelos peers, em lotes. Cada
 ciclo dispara uma thread por BC, limitadas por semáforo (`max_threads`).
@@ -269,41 +274,44 @@ agrupa por identidade reportada, nesta ordem de confiabilidade:
 3. o IP consultado (nó ainda não identificado)
 
 O IP reportado vem **primeiro** porque nome repetido na rede (config
-duplicada) colapsaria nós distintos. Sem esse agrupamento, 150 BCs viram
-600 na contagem.
-
-**Guarda:** grupo com mais de `MAX_IFACES = 6` interfaces sugere colisão de
-nome, não nó com muitos rádios. Nesse caso desagrupa e cada IP conta.
+duplicada) colapsaria nós distintos. Grupo com mais de `MAX_IFACES = 6`
+interfaces sugere colisão de nome e é desagrupado. Interface que deixou de
+ser vista sai de `rajant_bc_primario`/`rajant_bc_interfaces`.
 
 ### Lista fechada é fechada
 
-Com `descoberta = false`, o ciclo **não pode** reintroduzir peers pela porta
-dos fundos:
-
-```python
-if peers and self.descoberta:
-    ...adiciona os novos
-```
-
-É uma linha, e sem ela a configuração seria decorativa. Seed que não
-responde **continua na lista**: um BC precisa seguir monitorado justamente
-quando cai.
+Com `descoberta = false`, o ciclo **não** reintroduz peers pela porta dos
+fundos. Seed que não responde **continua na lista**.
 
 ### Coleta acelerada dos móveis
 
-`intervalo_moveis_segundos` roda um ciclo curto só com os equipamentos
-móveis. Veículo muda de posição e de servidor o tempo todo; torre, não.
+`intervalo_moveis_segundos` roda um ciclo curto só com os equipamentos que
+casam com `[relatorio] padrao_movel`. Veículo muda de posição e de vizinho o
+tempo todo; torre, não.
 
-### Filtro por tag
+### Só equipamento com tag
 
-`somente_com_tag = true` descarta quem responde mas não tem nome com
-prefixo de frota (CA, PA, PF, TT, EH, ERM, ERB…). O descarte é **auditável**:
-vai para o log e para a métrica `rajant_bc_sem_tag`. Se `prefixos_frota`
-estiver vazio, o filtro se desliga sozinho em vez de descartar tudo.
+`filtrar_tag = true` (padrão) só publica nome que casa com `padrao_tag`
+(`^[A-Z]{2,5}[- ]?\d{2,}`, sem diferenciar maiúsculas): CA-1035, ERM-22 PTP
+CAM, RED065, PCP-002. As 155 entradas nomeadas de `REDE_CONHECIDA` casam; IP
+não casa.
+
+- **O nome** vem de `nome_conhecido(ip)`: o que o rádio informou nesta
+  execução, depois o cache, depois `REDE_CONHECIDA`. IP sem nome por nenhum
+  dos três não entra no `/metrics` nem como offline — era o `10.188.99.217`
+  do Grafana.
+- **O vizinho** é resolvido por `nome_vizinho(peer)`: pelo IP, ou, quando o
+  peer só traz MAC, pelo `encapId`, que é o sufixo do número de série do
+  vizinho (`nome_encap`, montado com o serial de cada BC coletado; conferido
+  em 35 vizinhos de uma captura de campo). Vizinho sem tag não vira série, e
+  o rótulo `peer` passa a ser a **tag**.
+- **O descarte é auditável**: log `ignorado: nome sem tag` e
+  `rajant_bc_sem_tag`. O sem tag volta a ser consultado só na redescoberta (o
+  nome pode ter mudado).
 
 ---
 
-## 7. As 101 métricas
+## 8. As 101 métricas
 
 Prefixo `rajant_`. Agrupadas como aparecem no código:
 
@@ -357,39 +365,25 @@ Prefixo `rajant_`. Agrupadas como aparecem no código:
 
 ### A interferência é derivada, não medida
 
-**A BC API não expõe varredura de espectro.** Isso foi verificado grepando
-todos os 13 arquivos `.proto`, e há teste que **falha se algum passar a
-expor**.
-
-`radio_interf_pct` é derivada dos contadores de *airtime* 802.11:
-
-```
-interferência ≈ busy − rx − tx
-```
-
-O tempo que o meio esteve ocupado e não fomos nós. Calculada **só sobre
-delta** entre leituras — os contadores são cumulativos desde o boot, e usar
-o valor absoluto daria a média da vida do rádio, não a do período.
-
-Isso não é analisador de espectro e não deve ser apresentado como tal.
+**A BC API não expõe varredura de espectro.** Verificado nos 13 arquivos
+`.proto`, e há teste que **falha se algum passar a expor**.
+`radio_interf_pct` vem dos contadores de *airtime* (`busy − rx − tx`),
+calculada **só sobre delta** entre leituras — os contadores são cumulativos
+desde o boot. Não é analisador de espectro.
 
 ---
 
-## 8. Modelo de execução
+## 9. Modelo de execução
 
 ```mermaid
 flowchart LR
     M[main] --> H["/metrics<br/>start_http_server"]
     M --> W["Servidor web<br/>thread"]
     M --> C["Laço do coletor<br/>thread principal"]
-    W -.-> S["CapturaGPS<br/>1 thread por survey"]
-    S --> TP["ThreadPoolExecutor<br/>max_threads"]
     C --> TH["1 thread por BC<br/>+ semáforo"]
 ```
 
-Tudo é *thread*, nada é `async`. A carga é I/O de rede com timeout, e
-`threading` com semáforo resolve sem contaminar o resto do código com
-`await`.
+Tudo é *thread*, nada é `async`. A carga é I/O de rede com timeout.
 
 **O teto de threads não é sobre o servidor.** 150 conexões simultâneas
 derrubam a malha antes de derrubar o processo. O gargalo protegido é o
@@ -397,602 +391,82 @@ rádio.
 
 ### Sequência de subida
 
-1. lê config, resolve seeds, monta prefixos de frota
-2. `CacheIPs` (ou desligado)
-3. `start_http_server(metrics_port)` — o `/metrics`
-4. servidor de relatórios em thread (salvo `--sem-relatorios`)
-5. banner no log com seeds, descoberta, cache, filtro, portas, intervalo
-6. `RajantCollector` instanciado e publicado em `COLETOR_ATUAL["ref"]` —
-   é isso que habilita a captura pela página web
+1. ações de serviço (`--servico`, `--status`...) saem antes do argparse;
+   no `.exe`, a pasta de trabalho vira a do executável
+2. lê config, resolve seeds, valida `padrao_tag`, avisa chave antiga
+3. `CacheIPs` (ou desligado)
+4. `start_http_server(metrics_port)` — o `/metrics`
+5. servidor de relatórios em thread (salvo `--sem-relatorios`)
+6. banner no log com seeds, descoberta, cache, tag, séries, portas
 7. laço: descoberta → ciclo → espera
 
 ---
 
-## 9. Armazenamento
+## 10. Modo serviço
 
-Três lugares, com propósitos distintos:
+`servico_rajant.py`, chamado por `rajant_monitor.exe --servico`.
 
-| onde | o quê | por quê |
-|---|---|---|
-| **Prometheus** | série temporal das métricas | histórico, alertas, Grafana |
-| **`surveys.db`** (SQLite) | surveys, amostras, medições manuais | o survey precisa da amostra crua, não do agregado |
-| **`cache_ips.json`** | IPs já vistos | sobreviver a reinício com seed fora |
+### A tarefa do Windows
 
-### Esquema completo
+`--instalar-servico` (pelo `instalar_inicializacao.bat`, como admin) cria a
+tarefa **Rajant Monitor** por **XML**, não pelas opções do `schtasks`: tarefa
+criada pela linha de comando vem com "parar se rodar mais de 3 dias", e o
+supervisor seria derrubado na quinta-feira. O XML põe:
 
-```sql
-CREATE TABLE survey (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome         TEXT NOT NULL,
-    inicio       REAL NOT NULL,
-    fim          REAL,
-    intervalo_s  INTEGER,
-    radios       TEXT,    -- JSON: nomes selecionados
-    alcance      REAL,    -- raio inicial das manchas, em metros
-    n_amostras   INTEGER, -- contadores fechados junto com o survey,
-    n_moveis     INTEGER, -- para o histórico não reprocessar as
-    n_fixos      INTEGER, -- amostras a cada abertura da página
-    intervalo_efetivo_s REAL,
-    resumo       TEXT,    -- JSON: indicadores agregados
-    calibracao   TEXT,    -- JSON: {banda: {A, n, rms, amostras, alcance_m}}
-    criado_em    REAL NOT NULL
-);
-
-CREATE TABLE amostra (
-    survey_id INTEGER NOT NULL REFERENCES survey(id) ON DELETE CASCADE,
-    radio     TEXT NOT NULL,
-    ts        REAL NOT NULL,
-    lat REAL, lon REAL, vel REAL,
-    snr REAL, sinal REAL, ruido REAL,
-    rtt REAL, perda REAL,
-    custo REAL, taxa REAL, vazao REAL,
-    peers INTEGER, sats INTEGER, hdop REAL,
-    banda TEXT,
-    fonte TEXT,      -- 'direto' | 'cache'
-    servidor TEXT,   -- BC que atendeu neste ponto
-    interf REAL,     -- % de antena ocupada por transmissor alheio
-    canal INTEGER
-);
-CREATE INDEX ix_amostra_survey ON amostra(survey_id);
-CREATE INDEX ix_amostra_radio  ON amostra(survey_id, radio);
-
-CREATE TABLE medicao_manual (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    survey_id INTEGER REFERENCES survey(id) ON DELETE CASCADE,
-    tipo TEXT NOT NULL,   -- 'iperf' | 'trace'
-    data TEXT, local TEXT, lat REAL, lon REAL, ...
-);
-```
-
-Campos que merecem explicação:
-
-- **`intervalo_efetivo_s`** — o intervalo *pedido* é intenção; o ciclo pode
-  estourá-lo. O que descreve a resolução do trajeto é o que de fato
-  aconteceu, e é esse que vai para o relatório.
-- **`servidor`** — qual BC atendeu naquele ponto. Sem ele não dá para dizer
-  *"esta área é servida pelo ERB-03"*, que é a frase que o survey existe
-  para produzir, nem para detectar handover e ping-pong.
-- **`fonte`** — `direto` ou `cache`. Rastreabilidade de procedência.
-- **`n_amostras`, `n_moveis`, `n_fixos`** — fechados junto com o survey.
-  Sem eles, a página do histórico reprocessaria todas as amostras a cada
-  abertura.
-
-**Migração** de banco antigo é feita com `ALTER TABLE` condicional na
-abertura: `CREATE TABLE IF NOT EXISTS` não acrescenta coluna a tabela que já
-existe. Foi assim que `fonte` e `intervalo_efetivo_s` entraram sem quebrar
-banco em produção.
-
-Gravação é **a cada ciclo**, não no fim: se o processo cair no meio de um
-survey de 8 h, o que já foi medido continua valendo.
-
----
-
-## 10. Survey: captura
-
-```mermaid
-flowchart TD
-    A["Página web:<br/>rádios, intervalo, duração"] --> B[CapturaGPS]
-    B --> C["SessaoRadio<br/>uma sessão persistente por rádio"]
-    C --> D["ciclo: consulta paralela<br/>ThreadPoolExecutor"]
-    D --> E["grava no SQLite<br/>a cada ciclo"]
-    E --> F{duração<br/>esgotou?}
-    F -->|não| D
-    F -->|sim| G["fecha: separa fixos de móveis,<br/>calibra propagação"]
-    G --> H[KMZ]
-    G --> I[PPT Anglo]
-    G --> J[PNGs]
-```
-
-### SessaoRadio
-
-Mantém a conexão autenticada aberta entre ciclos. Reautenticar a cada
-leitura, num intervalo curto, custa mais que a leitura. Rádio que falha
-`falhas_para_pular` vezes seguidas é **abandonado pelo resto do survey** —
-um rádio morto não pode segurar o ciclo dos outros.
-
-As sessões seguram socket no rádio, então são fechadas no `finally`: mesmo
-se o survey abortar no meio, o BC não fica com conexões penduradas.
-
-### Modo contínuo
-
-Pedindo intervalo **0**, o ciclo seguinte sai no instante em que o anterior
-termina — sem espera. A cadência passa a ser só o tempo de ida e volta ao
-rádio:
-
-| intervalo | a 40 km/h, distância entre amostras |
+| | |
 |---|---|
-| 60 s | ~660 m |
-| 20 s | ~220 m |
-| 1 s | ~11 m |
+| gatilho | `BootTrigger` — na inicialização, sem ninguém logado |
+| usuário | `S-1-5-18` (SYSTEM), privilégio mais alto |
+| limite de execução | `PT0S` — nenhum |
+| se falhar | reinicia a cada 1 min |
+| bateria | não para nem deixa de iniciar |
 
-É a diferença entre pontilhado e rastro. Não é grátis: cada amostra é uma
-ida e volta ao rádio **pela própria malha que se está medindo**.
+Como SYSTEM a pasta corrente é `C:\Windows\System32`; por isso o `main()`
+faz `chdir` para a pasta do `.exe` antes de tudo.
 
-O único mínimo é de 50 ms, e **não é freio de carga**: é proteção contra
-laço vazio. Se todos os rádios falharem instantaneamente, sem ele o
-processo giraria a 100% de CPU sem medir nada.
+### O supervisor
 
-### O ping tem cadência própria
+`rodar()`: instância única (pelo `servico.pid`), espera `espera_inicial_s`,
+monta os serviços e confere a cada 5 s.
 
-Posição e RF vêm do `get_state`, que é rápido. Latência e perda vêm do
-ICMP — e o **ping do Windows não aceita intervalo**: `ping -n 4` espera
-~1 s entre envios e custa ~3 s por rádio. Preso ao ciclo, impunha esse
-piso também à posição, que é o que desenha o rastro. Medido com rádio
-simulado: **3,15 s/ciclo → 0,30 s/ciclo**, ou 35 m → 3 m entre amostras a
-40 km/h.
+`Servico.verificar()`:
 
-Nos ciclos sem ping, `rtt` e `perda` saem `None` — invariante 1 (§23).
-Repetir a última leitura numa posição nova inventaria medição.
+- processo vivo → nada;
+- porta já atendida por outro processo → **externo**: não sobe outro
+  (Grafana instalado como serviço do Windows, Prometheus aberto à mão); se
+  aquele cair, passa a cuidar;
+- caiu → reergue, com espera 5, 10, 30, 60 s entre tentativas seguidas.
 
-> **A armadilha que isso revelou:** o modo contínuo existia no backend e o
-> campo da página tinha `min="5"`. Dava para configurar e **não dava para
-> usar** — e nada no código acusava. Hoje o campo aceita 0 e há teste que
-> falha se o `min` voltar.
+**Oculto, mas com console.** Os filhos sobem com `CREATE_NEW_CONSOLE` e
+`STARTUPINFO` em `SW_HIDE` — o que um `WshShell.Run cmd, 0` faz. Com
+`CREATE_NO_WINDOW` o filho fica sem console, e cada `ping` que o exportador
+dispara abriria uma janela.
 
-E a cadência por rádio ainda não bastou. Em campo, com **159 rádios**, o
-ciclo deu **46,3 s** — e como 46 s > `ping_a_cada_s`, todo rádio vivia
-vencido: o ping voltava a ser de todos. Daí o **orçamento** de
-`ping_max_por_ciclo` (padrão: o teto de threads), servindo os mais
-atrasados primeiro. O custo do ping para de crescer com a frota; cada
-rádio é pingado a cada *N/orçamento* ciclos.
+O exportador recebe `RAJANT_SERVICO=1` e deixa de escrever no console (o
+log em arquivo continua). A saída de Prometheus e Grafana vai para
+`logs\`, e recomeça ao passar de 20 MB.
 
-O que o orçamento **não** resolve: o `get_state` de 159 rádios em 12
-threads já custa ~4 s. Contínuo com a frota inteira é a ferramenta errada
-— **selecione só os veículos do trajeto**.
+`--parar` mata supervisor e filhos (`taskkill /T /F`, a árvore inteira);
+nunca o próprio processo nem o próprio grupo.
 
-O aviso da página trata "consultas/s" no contínuo como **teto**, não como
-taxa — o ciclo se alonga sozinho pelo teto de threads.
+### Onde estão os programas
 
-### Ponto parado não entra no trajeto
-
-Amostra com a mesma coordenada da anterior não vira ponto de trajeto (mas
-conta como amostra). Sem isso, veículo parado acumularia centenas de pontos
-sobrepostos.
-
-### Fixo × móvel sai do dado
-
-No fechamento, quem não se deslocou mais que ~30 m (`0.0003°`) vira "fixo".
-**Pelo dado, não pelo nome**: um ERM rebocado é rota, e é isso que importa.
+`[servicos] prometheus_exe` e `grafana_exe`; vazio = procurar em
+`raizes_de_instalacao()` (pasta do monitor, a de cima, `C:\`, `D:\`,
+`Program Files`). O Grafana roda com `--homepath` na raiz da instalação (a
+pasta acima de `bin\`); `grafana.exe` novo recebe `server`. O Prometheus roda
+na própria pasta, então `--config.file=prometheus.yml` é o de lá.
 
 ---
 
-## 11. Survey: análise
-
-As grandezas medidas e seus requisitos (Modular Mining):
-
-| campo | rótulo | unidade | escala | requisito | melhor |
-|---|---|---|---|---|---|
-| `sinal` | RSSI do enlace | dBm | −90 … −55 | > −75 | alto |
-| `snr` | SNR | dB | 5 … 45 | > 20 | alto |
-| `ruido` | Ruído | dBm | −110 … −80 | < −95 *(derivado)* | baixo |
-| `rtt` | Latência | ms | 0 … 200 | < 100 | baixo |
-| `perda` | Perda | % | 0 … 10 | < 2 | baixo |
-| `interf` | Interferência | % | 0 … 60 | < 20 | baixo |
-| `custo_caminho` | Custo do caminho | — | 0 … 40000 | ≤ 20000 *(Rajant)* | baixo |
-| `sinal_cob` | RSSI (melhor ERB/ERM do ponto) | dBm | −90 … −55 | > −75 | alto |
-
-`sinal_cob` é o **mesmo RSSI lido de outra fonte** — o melhor vizinho de
-infraestrutura visível no ponto, em vez do enlace que o InstaMesh usou.
-Responde *"existe sinal servível aqui?"*, que é outra pergunta de *"a
-aplicação funcionou aqui?"*.
-
-A eleição é feita **dentro da banda da amostra**. Um ponto enxerga ERBs
-nas duas malhas, e a amostra carrega a banda do enlace que atendeu: sem o
-recorte, o melhor de 2,4 GHz ia parar no mapa de 5,8 GHz. No recorte do
-arquivo do cliente isso valia 15 dB (−71 em 2,4 contra −86 em 5,8), que
-é a distância entre aprovado e reprovado. Sem vizinho na banda, o ponto
-fica **sem `sinal_cob`** — buraco no mapa, não a medida da outra banda.
-`cobertura_disponivel()` devolve `sem_vizinho_na_banda` para o relatório
-poder contar quantos foram.
-
-**`sinal_cob` é o RSSI do laudo** e `sinal` não abre camada própria:
-`CAMPOS_KMZ` começa em `sinal_cob` e não lista `sinal`. Duas abas RSSI no
-painel de camadas do Google Earth obrigavam a lembrar qual era qual, e o
-survey responde uma pergunta só — *quanto sinal há neste ponto da mina*.
-`sinal` continua em cada amostra, na aba Amostras do Excel, ao lado do
-`delta_cob`, que é onde a divergência entre as duas vira diagnóstico.
-
-Consequência operacional: `sinal_cob` nasce em `cobertura_disponivel()`,
-um passo **depois** de `ler_meshmapper()`. Os três caminhos de geração
-(`importar_meshmapper`, `survey_meshmapper.gerar` e a coleta ao vivo em
-`coleta_rajant.gravar_e_gerar`) o chamam antes de montar KMZ e PPT. Um
-caminho novo que esqueça a chamada produz mapa sem a camada principal.
-
-Interferência: 20% é onde o CSMA começa a atrasar o acesso ao meio de forma
-perceptível; acima de 50% a banda útil despenca **mesmo com RSSI ótimo** —
-é o caso que confunde a operação ("o sinal está cheio e a rede está lenta").
-
-### Funções de análise
-
-| função | o que produz |
-|---|---|
-| `survey_resumo` | agregados por grandeza: `pct_ok`, `p05`, mediana |
-| `margem_requisito` | quanto sobra (ou falta) para o limiar |
-| `espacamento_tipico` | distância mediana entre amostras consecutivas |
-| `agregar_em_grade` | mediana por célula — tira o viés do equipamento parado |
-| `zonas_problema` | manchas contíguas fora do requisito |
-| `texto_zona` | a frase acionável da zona |
-| `analisar_servidores` | cobertura por BC, handovers, ping-pong |
-| `calibrar_propagacao` | ajusta `RSSI = A − 10·n·log10(d)` por banda |
-| `contar_rede` | BCs por tipo, com e sem posição |
-| `distribuicao` | % das amostras por faixa da escala |
-
-### Zonas-problema
-
-**Fora do laudo de survey.** O KMZ e o PPT do site survey não trazem mais
-a seção: ela propunha coordenada para rádio novo, que é decisão de
-projeto de RF, e impressa ao lado do que foi medido uma passava pela
-outra. No lugar dela o deck termina em dois slides **em branco** —
-Diagnóstico e Conclusões e Ações — e o KMZ mantém, dentro de cada
-grandeza, a sub-pasta *Fora do requisito*: os pontos reprovados, sem
-proposta do que fazer com eles.
-
-`zonas_problema()` segue no módulo e no **relatório semanal**, que é
-outro produto e tem outro leitor. O que ela faz:
-
-O que transforma "23% fora do requisito" em ação. Uma zona é uma mancha
-contígua de células ruins; o texto sai por grandeza:
-
-- sinal/SNR baixo e mancha **grande** → sistêmico, sugere repetidora
-- mancha **pequena** → sugere ação pontual
-- interferência sistêmica → **não** sugere mais rádio (piora), sugere canal
-
-A grade é a **mediana do espaçamento entre amostras**, não um valor fixo:
-grade mais fina que a amostragem fragmenta a mesma sombra em várias zonas.
-Isso foi pego por teste próprio antes de chegar ao relatório.
-
-### Calibração de propagação
-
-Com as posições dos fixos e o RSSI medido, ajusta `A` e `n` por banda e
-guarda `rms` e nº de amostras. Serve para estimar alcance — e a estimativa
-**nunca** é desenhada junto com a medição sem distinção visual (§23).
-
-### Uma régua só, rastreável, com a fronteira certa
-
-`FAIXAS_KML` é a régua de cada grandeza, e **tudo** pinta por ela: a fita
-do trajeto, os pontos, o calor opcional, a legenda na tela do KMZ, o balão
-do documento, o slide de Metodologia, a barra de escala dos slides de
-grandeza e o gráfico de distribuição. Rótulos, cores e classes saem de
-`_faixas_rotuladas()`; a classificação, de `cor_da_leitura()`.
-
-**Origem dos valores** (em `FONTE_FAIXAS`, impressa no rodapé da legenda):
-
-| grandeza | faixas | fonte |
-|---|---|---|
-| RSSI | −90 · −80 · **−75** · −70 · −67 | MetaGeek/Oscium; −75 é o requisito Modular |
-| SNR | 20 · 30 | oficial Rajant: `goodRSSI`/`greatRSSI` do `data.json` do MeshMapper |
-| ruído | −105 · −95 | derivado: cor do SNR que −75 dBm teria sobre aquele ruído |
-| custo do caminho | 10000 · 20000 | oficial Rajant: `greatPath`/`goodPath`; sem rota (2147483647) no vermelho |
-
-**`custo` × `custo_caminho`.** `custo` é sempre o do **enlace** (no arquivo
-do MeshMapper, o `hopcost` do primeiro salto; na coleta ao vivo, o do
-melhor vizinho). `custo_caminho` é o `traceInfo.path.cost`, o total até
-`traceInfo.host`. Antes o `custo` do arquivo era o do caminho e o da coleta
-o do enlace — a mesma coluna do Excel dizia coisas diferentes. Na coleta
-ao vivo, os dois vêm do TRACE (ver "BCAPI direto"); sem ele,
-`custo_caminho` fica `None`.
-
-### BCAPI direto
-
-A rajant-api 0.1.1 (lida do PyPI) lê a resposta com UM `recv(65535)` —
-pelo TLS, no máximo um registro de ~16 KB —, pinga o rádio antes de cada
-`get_state()` e não tem TRACE. `bc_receber`/`bc_pedir`/`bc_state`/
-`bc_trace` usam a sessão autenticada dela (`connection`, `build_message`,
-`send_message`) com o mesmo enquadramento do código dela (`>ibbbb`,
-deflate cru), lendo até o tamanho do cabeçalho.
-
-`estado_da_sessao` tenta filtrado (`stateFilterPath` = `CAMINHOS_ESTADO`),
-depois inteiro, e depois o `get_state()` da biblioteca; o que funcionar
-fica valendo para o processo (`_BC_MODO`). No pior caso é o de antes.
-
-`bc_trace`: `runTask` (TRACE, destino) → `runTaskResult` → saída por
-`taskOutputRequest` em fragmentos → `Trace` (binário ou texto, gzip ou
-não). A ação é constante; nenhuma outra tarefa existe no código. A
-`Trace` compilada na biblioteca tem `hopCost` e `pathActiveSeconds`, que
-o `.proto` do repositório não tem — os mesmos campos do `traceInfo` do
-MeshMapper.
-
-Formato do filtro e da resposta do trace **não estão no .proto**; foram
-fechados com o `--testar-trace` num rádio da mina (10.188.99.4, papel
-VIEW, 26/09/2026):
-
-- filtro: `"gps"` (e `"/gps"`) devolvem só os ramos pedidos — 2307 bytes
-  contra 9318; `"State.gps"` e `"state.gps"` voltam vazios;
-- TRACE: aceito com VIEW; a saída responde FAILED e UNAVAILABLE por
-  ~0,8 s e então SUCCESS. Não é a mensagem `Trace`: é o **texto** do
-  `imtrace` do firmware, em gzip, com `TaskOutput` sem `compression` nem
-  `content`. `trace_de_texto` o interpreta (`peer=MAC/interface/encap`,
-  `cost`, `hop cost`, `channel`, `freq`, `signal`, `rssi`, `rate`); a
-  `Trace` binária continua aceita, para firmware que a use.
-
-O rádio simulado dos testes responde como aquele rádio: texto em gzip,
-pronto depois de FAILED/UNAVAILABLE, entregue em pedaços espaçados.
-
-**Nome dos vizinhos na coleta.** `State.Peer` não tem nome. A coleta
-entrava o IP no lugar, e `cobertura_disponivel` — que reconhece infra por
-`PADRAO_INFRA` no NOME — nunca achava ERB/ERM: o `sinal_cob` da coleta ao
-vivo era o melhor vizinho de qualquer tipo. `Coleta(malha=...)` recebe o
-resultado da descoberta (nome e serial por IP) e resolve cada vizinho por
-encap (= sufixo do serial) ou por IP, com `REDE_CONHECIDA` de reserva. O
-vizinho de saída do trace ganha nome do mesmo jeito; sem nome conhecido,
-fica a interface (`wlan0wds50`), como no MeshMapper.
-
-**`survey_resumo`**: `mediana` é a mediana (o `med` é a média, e o
-semanal a rotula assim); `pior5` segue o sentido da grandeza — os 5%
-menores em RSSI e SNR, os 5% maiores em ruído, latência, perda e custo.
-O `p05` antigo fica para quem o lê pelo nome.
-
-Cores: `FF0000`, `F26A00`, `3EAD30` são as chapadas dos `LineStyle` do
-`doc.kml` do MeshMapper; `DD9F17` e `B70404`, os tons dos alfinetes dele;
-`5C0000` é o único tom próprio (o vermelho Rajant escurecido).
-
-O MeshMapper não classifica o Signal em dBm — no balão dele o valor sai sem
-cor, conferido em 11.216 células. Daí a convenção MetaGeek para o RSSI.
-
-**A fronteira exata.** O rádio reporta inteiro (int32 no `State.proto`),
-então o valor exato de cada limite é uma leitura comum. Cada limite tem um
-lado:
-
-- o do **requisito** sai do operador em `REQUISITOS`/`limite_de`: em `>`
-  (RSSI > −75, SNR > 20) o valor exato é reprovado e fica na faixa de baixo;
-- os demais seguem a fonte: são mínimos atingidos na igualdade (−67 já é
-  "muito bom", SNR 30 já é "great"), exceto −90, que na MetaGeek já é
-  "unusable" (`_CONVENCAO_NA_FAIXA_DE_BAIXO`).
-
-`limites_na_faixa_de_baixo(campo)` junta os dois; `_faixa_idx`,
-`_png_calor(na_de_baixo=...)` e `distribuicao` usam o mesmo conjunto. Há
-teste percorrendo todos os inteiros de cada grandeza: **nenhuma faixa
-contém aprovado e reprovado**, e cada rótulo lista exatamente os inteiros
-que a faixa pinta.
-
-Antes, com a faixa sempre `[a, b)`, o −75 caía no laranja de "atende"
-enquanto o Sumário e a pasta Fora do requisito o contavam como reprovado.
-
-**Pendência:** SNR 20 exato. O requisito está escrito "> 20" e o
-MeshMapper pinta 20 como "good". Se a Modular for "≥ 20", troca-se o
-operador e cor e contagem mudam juntas — há teste para isso.
-
-### A pegada de cada repetidora
-
-`cobertura_disponivel()` responde *"existe sinal servível aqui?"* pegando o
-**melhor** ERB/ERM de cada ponto — e por isso mistura todos. Não dá para
-perguntar *"até onde a ERM-28 alcança?"*.
-
-`amostras_por_repetidora()` responde. Para cada ERB/ERM, junta os pontos em
-que ela foi ouvida, com a **posição do veículo** e o **RSSI daquele veículo
-para ela** — os dois da mesma leitura de State. Nada é estimado e nada é
-cruzado por distância.
-
-A economia não é óbvia: uma leitura de um veículo traz o sinal para **todas**
-as repetidoras que ele ouve — **18 na mediana**, medido no trajeto do
-CA-1006. Uma passagem de um caminhão alimenta 18 mapas de cobertura ao mesmo
-tempo.
-
-**Por que "melhor" e não "mais próxima".** Medido no mesmo trajeto de 325 m:
-o veículo ouve 18 infra por ponto, com **31 dB de espalhamento** entre a
-melhor e a pior (até 39 dB), e a melhor **mudou quatro vezes** nesses 325 m
-(ERM-28 → ERM-08 → ERM-15 → ERM-24). Numa cava a mais próxima costuma estar
-atrás de uma bancada enquanto uma distante tem visada limpa: colorir pela
-distância pinta vermelho onde a cobertura está boa, e o laudo recomenda
-rádio onde não precisa. Escolher pela medição também não custa nada a mais —
-o sinal para as 18 já vem na leitura; "mais próxima" exigiria saber onde
-cada repetidora está.
-
-Dois detalhes que o teste de mutação fixou:
-
-- **`min_pontos`** descarta a repetidora ouvida em meia dúzia de posições.
-  Poucos pontos viram bolha solta, que se lê como "medi esta área" onde o
-  certo é "passei perto uma vez".
-- A mesma repetidora em 2,4 e 5,8 GHz é **um** equipamento: fica o melhor do
-  ponto. Guardando por ponto num dicionário, o último a chegar venceria
-  sozinho — um teste de ordem única passava sem a regra.
-
-No KMZ vira uma pasta por repetidora, recolhida e desligada (dezoito rastros
-ligados juntos se empilham). Cada raster leva **sufixo no nome do arquivo**:
-sem ele todos seriam `calor_sinal.png` e um sobrescreveria o outro dentro do
-zip, sobrando um mapa só repetido em todas as pastas.
-
-> Duas repetidoras inteiramente abaixo do piso da escala (−90 dBm) geram
-> rasters **byte a byte idênticos**, porque a faixa toda satura na mesma cor.
-> Não é defeito: no mapa as duas são "não serve aqui". Os números que as
-> separam ficam na descrição da pasta e na aba Por Repetidora.
-
-### Captura parada: o laudo do rádio
-
-Uma captura do MeshMapper feita com o notebook ligado a uma **repetidora**
-tem a mesma estrutura da de um veículo — conferido campo a campo nos dois
-arquivos reais do cliente. O que muda é o significado:
-
-| | veículo | repetidora |
-|---|---|---|
-| o arquivo é | um trajeto: cada ponto é um lugar | uma janela de tempo num lugar só |
-| medido | 146 m de raio em 55 pontos | **0,5 m** de raio em 115 pontos |
-| produto | rastro de calor, PPT, Excel | censo de vizinhos, pino, enlaces |
-
-`captura_parada()` decide pelo **dado**, não pelo nome do rádio: um ERM
-rebocado é trajeto, e um caminhão estacionado a manhã inteira não é. O
-corte é `RAIO_PARADO_M = 15`, duas ordens de grandeza acima da oscilação
-do GPS parado e abaixo de qualquer percurso. `extensao_da_captura()` usa a
-**maior distância ao centro**, não o desvio padrão — ida e volta tem
-desvio pequeno e mesmo assim cobriu distância.
-
-| função | o que produz |
-|---|---|
-| `extensao_da_captura` | `{raio_m, lat, lon, n}` do centro das amostras |
-| `captura_parada` | se a captura saiu de um ponto fixo |
-| `censo_vizinhos` | uma linha por vizinho, agregando todas as leituras |
-| `resumo_do_censo` | os números de capa: infra × móveis, acima do requisito |
-| `sitios_parados` | as capturas paradas do lote, prontas para o mapa |
-| `gerar_kml_pontos_fixos` | KMZ com pino por rádio e enlace entre os capturados |
-
-**Por que `presenca` existe.** Na captura real da ERM-12, o CA-1022
-aparece a −58 dBm em 35% dos pontos e o CA-1027 a −93 dBm em 100%. Os
-dois são verdade e pedem decisões opostas: o primeiro passou perto e foi
-embora, o segundo é permanente e fraco. Mediana sozinha não distingue.
-
-**O que nenhuma captura de repetidora pode dar: a posição dos vizinhos.**
-Um BreadCrumb reporta de cada peer exatamente `channel, cost, encap,
-filtered, frequency, ipaddr, mac, name, rssi, serialNumber, signal` —
-conferido nos dois arquivos. Sem latitude nem longitude. As coordenadas do
-`_peer_info.csv` são as de **quem capturou**, repetidas para cada vizinho.
-
-Por isso `gerar_kml_pontos_fixos()` desenha **só** o que tem posição
-medida: o pino de cada rádio que fez uma captura, e a linha entre dois
-deles quando ambos foram capturados. O vizinho sem captura própria fica
-na tabela e no balão, e o KML **declara no cabeçalho** quantos ficaram de
-fora — esconder isso seria pior que não mostrar.
-
-Enlace assimétrico (A vê B a −70, B vê A a −84) fica com a **pior** das
-duas pontas: é ela que limita o enlace e decide se falta rádio ali.
-
----
-
-## 12. Survey: o mapa de calor
-
-**Histórico.** O que segue descreve o calor antigo, de núcleo por
-amostra, que ainda desenha a pasta "Por repetidora". A camada principal
-do KMZ hoje é o **calor por faixa** (`calor_por_faixas`): cada pixel toma
-a faixa com mais trecho medido num raio de 40 m, sobre o caminho de cada
-veículo entre duas leituras — ver LEIAME_SURVEY.md, "O mapa".
-
-O calor é um **raster georreferenciado** (`GroundOverlay`). Cada amostra
-pinta um núcleo de raio limitado à sua volta; fora dele, transparente.
-
-**Isso não é superfície de cobertura.** Cobertura interpola valor sobre
-terreno onde ninguém passou — afirma sinal em lugar não medido. Há teste
-exigindo que a maior parte do raster continue transparente. A diferença
-entre *"medi aqui e deu isto"* e *"acho que lá deve dar aquilo"* é o que
-separa um laudo de um chute.
-
-### Como é construído
-
-```python
-# para cada amostra, só a janela dela é tocada
-w = exp(-d²/(2σ²));  w[d > raio] = 0
-wmax  = max(wmax, w)                 # opacidade: o núcleo mais forte
-valor = da amostra MAIS PRÓXIMA      # empate na grade → a pior
-alfa  = sqrt(wmax) · 0,9
-```
-
-**O valor não é média.** Medido num arquivo real: as amostras cruas davam
-81% fora do requisito, o vizinho mais próximo 92% (área, não tempo) e a
-média ponderada 100% — ela apagava as poucas leituras boas ao promediá-las
-com as ruins. Com o vizinho mais próximo, **nenhum pixel mostra um valor
-que não foi medido**, e há teste que falha se algum mostrar.
-
-Varrer a grade inteira por ponto seria O(pontos × n²) e um survey de horas
-não terminaria.
-
-### Três decisões que custaram depuração
-
-Todas visíveis no Google Earth antes de serem entendidas:
-
-**1. Só entra quem andou.** Rádio parado dá dezenas de amostras no mesmo
-ponto: virava bola isolada e, como BC fixo enxerga o vizinho de perto, saía
-**verde**. Eram as "bolas desconectadas" — e o verde que não batia com a
-realidade da mina. Com a lista de fixos, exclui por ela; sem ela, separa
-pelo deslocamento.
-
-**2. Opacidade pelo núcleo mais forte, não pela soma.** Pela soma, a pilha
-de amostras de um equipamento parado ficava sólida *e* puxava a referência
-de opacidade para cima, apagando o rastro de quem andou.
-
-**3. Raio acompanha o espaçamento** (0,9×, entre 25 e 150 m) e σ = raio/1,5.
-Com σ = raio/2 o peso no meio do vão caía a ~0,25 e o rastro se partia mesmo
-com os círculos se tocando — o colar de contas.
-
-> **Limite físico, não de desenho:** com amostras a 200 m não existe faixa
-> estreita *e* contínua. Ou contas separadas, ou borrão largo afirmando
-> medição longe da estrada. O caminho é medir mais rápido.
-
----
-
-## 13. KML e KMZ
-
-### A ordem dos elementos importa
-
-`_placemark()` existe por um motivo específico: o schema do KML exige
-
-```
-name → description → TimeStamp → styleUrl → geometria
-```
-
-Emitindo `styleUrl` antes de `description`, o Google Earth **descarta o
-estilo em silêncio** e desenha tudo em branco. Foi um dia de depuração
-achando que o problema era cor.
-
-### Escape não é opcional
-
-Um `<` não escapado em `"Fora do requisito — < 20 %"` quebra o XML **do
-arquivo inteiro**. O bug passou pelos testes porque eles só cobriam campos
-com `>`; hoje há teste que faz parse do XML para as grandezas "menor é
-melhor" (rtt, perda, interferência, ruído).
-
-### Estrutura do arquivo
-
-```
-doc.kml
-  ├── Estilos: l<cor> (fita, opaca, 7 px) por faixa · lcontorno · q<cor> (pontos usados)
-  ├── [BreadCrumbs]        (opcional, kmz_com_equipamentos)
-  ├── Grandeza            (botão de rádio: uma aba por vez)
-  │   ├── Aba: RSSI        ← visível
-  │   │     ├── GroundOverlay "Mapa de calor"  (files/calor_<campo>.png)
-  │   │     ├── ERB/ERM    quadrados na cor da mediana
-  │   │     ├── Trajeto    (desligada) contornos, fitas, pontos isolados
-  │   │     ├── ScreenOverlay "Legenda"   (files/legenda_<campo>.png)
-  │   │     ├── Medições   (desligada, sem TimeStamp)
-  │   │     └── Fora do requisito (desligada)
-  │   ├── Aba: SNR         ← invisível
-  │   └── Aba: Ruído / Custo do caminho / …
-files/calor_<campo>.png · files/legenda_<campo>.png
-files/pt_dot.png · files/fx_square.png   (ícones: sem internet na mina)
-```
-
-Uma aba por grandeza, **só a primeira visível**: ligadas juntas, as fitas
-se sobrepõem e nada se lê.
-
-**Fita:** `_fita_por_amostra()` dá a cada amostra o caminho entre os pontos
-médios com as vizinhas; trechos consecutivos na mesma faixa viram uma
-polilinha. `_trechos_continuos()` parte o trajeto nos buracos de medição;
-`_amostras_do_rastro()` tira quem não se deslocou.
-
-**Estilos órfãos:** só são emitidos os estilos das cores efetivamente
-usadas, e há teste para estilo declarado e não referenciado (e vice-versa —
-`styleUrl` apontando para estilo inexistente cai no padrão branco).
-
-**Decimação:** um survey de 8 h com 150 rádios a 10 s dá ~430 mil pontos; o
-Google Earth engasga. `_decimar()` reduz uniformemente preservando a ordem
-temporal, e o passo real vai escrito na descrição.
-
----
-
-## 14. Relatório Excel
+## 11. Relatório Excel
 
 Treze abas, geradas com `openpyxl` a partir da mesma estrutura que alimenta
 o PPT:
 
 | aba | conteúdo |
 |---|---|
+| Resumo Executivo | KPIs do período contra as metas |
 | Disponibilidade | por BC, nas três janelas |
 | Série Diária | evolução no período |
 | Throughput | vazão por BC e agregada |
@@ -1004,7 +478,6 @@ o PPT:
 | Rankings | top tráfego, top vizinhos |
 | Categorias | por tipo de equipamento |
 | Eventos | quedas, com início/fim/duração |
-| Survey | amostras do survey do período |
 | Inventário | todos os BCs, com identificação |
 
 Os dois formatos leem **a mesma** estrutura de `obter_dados()`. Divergir
@@ -1012,26 +485,12 @@ aqui produziria um Excel e um PPT que discordam sobre a mesma semana.
 
 ---
 
-## 15. Relatório PowerPoint
+## 12. Relatório PowerPoint
 
-### Os dois decks
-
-| deck | origem | como gerar |
-|---|---|---|
-| **Semanal** | template PPTX do cliente, preenchido | aba Relatórios, `/gerar?fmt=pptx` |
-| **Site Survey** | construído do zero por código | `--ppt-survey ID`, `/survey/ppt` |
-
-Por padrão são **separados** (`survey_no_semanal = false`). O semanal não só
-deixa de anexar o survey: ele **remove os slides de survey que vêm no
-template**, senão ficariam em branco no arquivo. O botão do menu passa a
-dizer *"5. Site Survey (relatório separado)"*.
-
-### O semanal
-
+O semanal parte do template do cliente (`Relatorio_Semanal_Rede.pptx`).
 Preenchido por âncoras, não por índice: `_slide_por_titulo()` localiza pelo
-texto do título (robusto a reordenação), com índice como *fallback*. Tabelas
-por cabeçalho (`_tabela_por_cabecalho`), cartões por rótulo
-(`_txt_valor_do_cartao`).
+texto do título, com índice como *fallback*. Tabelas por cabeçalho
+(`_tabela_por_cabecalho`), cartões por rótulo (`_txt_valor_do_cartao`).
 
 Quatro slides são **gerados por código** e inseridos no lugar certo:
 
@@ -1043,55 +502,29 @@ Quatro slides são **gerados por código** e inseridos no lugar certo:
 Os gráficos são **nativos do PowerPoint** (`CategoryChartData`), não
 imagens: quem receber o deck pode editar.
 
-### A fronteira entre os dois
+### A seção de survey do template
 
-O que decide o que sai do semanal é o **título** do slide, não o texto dele.
-Casar `"site survey"` em qualquer lugar levava junto o que só cita survey em
-prosa — o subtítulo de *Links Críticos* diz "candidatos a realinhamento /
-site survey", e o slide sumia.
+O template ainda traz a seção *5. Site Survey*. `remover_slides_survey()`
+tira esses slides, senão ficariam em branco, e o botão do menu vira *"5. Site
+Survey (descontinuado)"* sem link.
 
-E `_titulo_do_slide()` pega a caixa de texto mais alta **que não é botão**:
-o ◂ MENU fica em 0,28" e o título em 0,32", ou seja, o botão é mais alto e
-viraria "o título" de todo slide.
-
-Mesmo raciocínio para *Espectro por Canal*: chamava-se "5. Site Survey — …"
-e ia embora com a seção 5, mas os números vêm dos contadores do **exporter**.
-É saúde da malha — virou seção 4.
-
-### O deck de survey
-
-Capa → Índice → Sumário → Zonas-Problema → uma página por grandeza e banda.
-Cada página de grandeza tem:
-
-- moldura à esquerda (mapa) — **onde**
-- gráfico de distribuição à direita — **quanto**
-- dois cartões: "Dentro do requisito" e "Pior 5%"
-- **barra da escala de cores**, com o requisito marcado no ponto exato
-
-A escala usa `cor_continua`, a **mesma** função que pinta o KMZ. Legenda
-desenhada com gradiente próprio divergiria do mapa na primeira mudança de
-paleta — e legenda que discorda do mapa é pior que legenda nenhuma.
-
-### Molduras em vez de imagens
-
-`imagens_no_ppt = false` (padrão) faz o deck sair com **molduras vazias**,
-cada uma dizendo qual KMZ abrir e qual camada ligar para tirar o print no
-Google Earth. É o caminho de quem quer satélite real no slide, que o PNG não
-tem enquanto a rede da mina bloquear os tiles.
+O que decide é o **título**, não o texto do slide: o subtítulo de *Links
+Críticos* diz "candidatos a realinhamento / site survey", e casar o texto
+levava o slide junto. `_titulo_do_slide()` pega a caixa de texto mais alta
+**que não é botão** — o ◂ MENU fica em 0,28" e o título em 0,32". Remove de
+trás para frente (pelo índice crescente, bagunçaria os seguintes) e solta a
+parte (`drop_rel`), senão o arquivo carregaria o slide órfão.
 
 ### Navegação
 
-O índice é clicável e cada slide tem o botão de volta. Detalhe que custou:
-**um botão do template carrega DOIS hyperlinks** — um na forma e outro
+**Um botão do template carrega DOIS hyperlinks** — um na forma e outro
 dentro do *run*. Clicando no texto, o PowerPoint usa o do run, que o
 python-pptx não expõe. `_limpar_link_de_texto()` remove o `hlinkClick` do
-`rPr` antes de retargetar a forma.
+`rPr`.
 
 ---
 
-## 16. Identidade Anglo
-
-Os dois decks saem na identidade Anglo American:
+## 13. Identidade Anglo
 
 ```python
 azul   = 031795   # institucional: título, régua, fundo da capa
@@ -1104,257 +537,201 @@ cartao = F4F6FA
 fonte  = Calibri
 ```
 
-Extraída do arquivo do cliente, não inventada. Os logos ficam em `marca/`;
-sem a pasta o deck sai **sem logo**, em vez de estourar.
-
-O deck de survey nasce assim. O semanal **não** — ele vem de um template em
-azul-escuro com conteúdo digitado à mão. Trocá-lo criaria dois templates
-para manter em sincronia e jogaria fora o que já está escrito.
-
-### A repintura
+Extraída do arquivo do cliente. Os logos ficam em `marca/`; sem a pasta o
+deck sai **sem logo**, em vez de estourar.
 
 `aplicar_identidade_anglo()` repinta o deck **no fim da geração**, depois de
 preenchido. Assim a passagem pega também o verde/âmbar/vermelho que o
-relatório acabou de escrever e os slides técnicos gerados por código — uma
-tabela de cores, dois produtores.
+relatório acabou de escrever e os slides técnicos gerados por código.
 
 Isso só é seguro porque o template não deixa nada para herdar: **874 runs de
 texto e todos com cor explícita**, master e layout sem forma nenhuma, fonte
-já Calibri. Verificado no arquivo do cliente.
-
-Dois detalhes que custaram teste:
+já Calibri.
 
 **Branco depende do que ficou atrás.** Na capa o fundo vira azul e o título
 segue branco; sobre um cartão que clareou, o mesmo branco tem de virar
-escuro ou o texto some. A decisão é por **luminância do fundo novo**. E os
-tons de status sobre fundo escuro voltam a ser os do próprio template, que
-já tinham sido escolhidos para isso.
+escuro. A decisão é por **luminância do fundo novo**.
 
 **Borda de célula não passa pelo python-pptx.** Ela mora em
 `lnL/lnR/lnT/lnB` dentro do `tcPr`. Sem tratá-la no XML sobravam **1248
 traços** azul-escuros riscando o fundo branco.
 
-A régua só entra se não cruzar nada: o slide de "Próxima Semana" começa em
-1,20" e não em 1,35" como os demais, e o template é editado pelo cliente.
-
 ---
 
-## 17. Página web e endpoints
+## 14. Página web e endpoints
 
-Duas portas: `metrics_port` (`/metrics`, para o Prometheus) e
-`porta_relatorio` (a página, quatro abas: **Relatórios**, **Survey**,
-**Histórico**, **Medições**).
+Duas portas: `porta_metrics` (`/metrics`, para o Prometheus) e
+`porta_relatorio` (a página).
 
-Os 26 endpoints:
-
-| grupo | endpoints |
+| endpoint | o que faz |
 |---|---|
-| relatório | `/gerar` · `/api/q` · `/diagnostico` |
-| inventário | `/bcs` · `/radios` |
-| captura | `/captura/iniciar` · `/parar` · `/status` · `/ativas` · `/imagens` · `/kml` · `/kmz` |
-| survey | `/surveys` · `/survey` · `/survey/ppt` · `/survey/kmz-todos` · `/survey/comparar` · `/survey/excluir` |
-| medições | `/medicoes/listar` · `/adicionar` · `/excluir` · `/importar` · `/modelo` |
-| perfis | `/perfis/salvar` · `/abrir` · `/excluir` |
+| `/` | período (7 / 30 dias ou datas), Excel ou PPT, link do painel, diagnóstico por IP |
+| `/gerar?ini=&fim=&fmt=xlsx\|pptx[&demo=1]` | gera e baixa; até 366 dias |
+| `/painel` | o painel HTML próprio, lido do disco a cada pedido |
+| `/api/q?q=[&t=range&janela=&passo=]` | proxy PromQL para o painel (sem CORS); janela ≤ 90 d, passo 15 s–1 h |
+| `/diagnostico?ip=` | lê o State de um BC e mostra portas ethernet e o trecho bruto |
 
-**Perfis** são seleções salvas de equipamento (frota completa, cava
-principal, só repetidoras), para não remontar a seleção a cada survey.
-
-**Medições manuais** (iperf e trace) entram por formulário ou CSV — a BC API
-não dá throughput fim-a-fim nem caminho, e esses números fazem parte do
-laudo. Há `/medicoes/modelo` que devolve o CSV modelo.
+Só `GET` (outro método: 501). Rota desconhecida: 404.
 
 ---
 
-## 18. Grafana e painel próprio
+## 15. Grafana e painel próprio
 
-### Sete dashboards
+### Seis dashboards
 
 | arquivo | título | painéis |
 |---|---|---|
-| `rajant-visao-geral.json` | 1 · Visão Geral da Malha | 22 |
-| `rajant-rf.json` | 2 · Rádio e Espectro | 28 |
-| `rajant-enlaces.json` | 3 · Enlaces da Malha | 19 |
-| `rajant-ethernet.json` | 4 · Portas Ethernet | 20 |
-| `rajant-saude.json` | 5 · Saúde dos BreadCrumbs | 34 |
-| `rajant-coletor.json` | 6 · Operação do Coletor | 19 |
-| `rajant-survey.json` | 7 · Site Survey Contínuo | 22 |
+| `rajant-visao-geral.json` | 1 · Visão Geral da Malha | 17 |
+| `rajant-rf.json` | 2 · Rádio e Espectro | 22 |
+| `rajant-enlaces.json` | 3 · Enlaces da Malha | 14 |
+| `rajant-ethernet.json` | 4 · Portas Ethernet | 14 |
+| `rajant-saude.json` | 5 · Saúde dos BreadCrumbs | 27 |
+| `rajant-coletor.json` | 6 · Operação do Coletor | 15 |
 
 São **gerados** por `gerar_dashboards.py` e conferidos por
-`validar_dashboards.py` — 164 painéis escritos à mão divergiriam das
-métricas na primeira mudança. O validador checa que toda métrica referenciada
-existe no exportador.
-
-`provisioning-dashboards.yaml` põe os sete no Grafana sem clique.
+`validar_dashboards.py` — o validador checa que toda métrica referenciada
+existe no exportador. `provisioning-dashboards.yaml` põe os seis no Grafana
+sem clique.
 
 ### Painel HTML próprio
 
-`painel/visao-geral.html` — dashboard sem dependência externa, para quando
-não há Grafana. Zero CDN, zero build: abre como arquivo.
+`painel/visao-geral.html` — dashboard sem dependência externa, servido em
+`/painel`. Zero CDN, zero build.
 
 ---
 
-## 19. Configuração completa
+## 16. Configuração completa
 
-`config.ini` é criado no primeiro uso com os padrões comentados.
+`config.ini` é criado no primeiro uso com os padrões comentados; as seções
+`[relatorio]` e `[servicos]` entram sozinhas quando faltam.
 
-### `[relatorio]` — 28 chaves
+### `[rede]`
+
+| chave | o que faz |
+|---|---|
+| `seeds` | IPs de partida (vírgula) |
+| `password` / `role` | credenciais da BCAPI; `role` em qualquer caixa |
+| `porta_bcapi` | 2300 |
+
+### `[coleta]`
+
+| chave | padrão | o que faz |
+|---|---|---|
+| `intervalo_segundos` | 60 | ciclo |
+| `max_threads` | 30 | consultas simultâneas |
+| `timeout_conexao` | 15 | por BC |
+| `tentativas_por_bc` | 3 | antes de contar falha |
+| `falhas_antes_offline` | 3 | falhas seguidas para `online = 0` |
+| `segurar_serie_s` | 0 | segundos que as séries de um BC que falhou ficam |
+| `redescoberta_ciclos` | 10 | a cada quantos ciclos redescobre |
+| `falhas_para_remover` | 20 | tira do cache após N falhas |
+| `descoberta` | true | `false` = só os seeds |
+| `usar_cache` | true | `false` = não lê nem escreve o cache |
+| `filtrar_tag` | true | só equipamento com tag |
+| `padrao_tag` | `^[A-Z]{2,5}[- ]?\d{2,}` | o formato da tag |
+| `intervalo_moveis_segundos` | 20 | ciclo curto dos móveis; 0 = desliga |
+
+Chaves antigas ignoradas, com aviso no log: `manter_ultimo_valor_s`,
+`somente_com_tag`.
+
+### `[relatorio]` — 16 chaves
 
 | chave | o que faz |
 |---|---|
 | `prometheus_url` | de onde vêm os dados dos relatórios |
 | `porta_relatorio` | porta da página web |
 | `meta_geral` / `meta_mesh` / `meta_backbone` | metas de disponibilidade |
-| `limite_cpu` / `limite_temp` / `limite_latencia` / `limite_ruido` | limiares de alerta |
+| `limite_cpu` / `limite_temp` / `limite_latencia` / `limite_ruido` | limiares |
 | `padrao_erb` / `padrao_erm` / `padrao_backbone` / `padrao_movel` | regex de classificação |
-| `prefixos_frota` | prefixos válidos por tipo (CA, PA, PF, TT, EH, ERM, ERB…) |
-| `perfil_*` | seleções salvas de equipamento |
 | `template_ppt` | o template do semanal |
-| `survey_kmz` | fundo georreferenciado |
-| `fundo_local` + `fundo_bbox` | alternativa ao KMZ; a bbox é **obrigatória** |
 | `painel_html` | caminho do painel próprio |
-| `survey_no_semanal` | `true` volta ao deck único |
 | `identidade_anglo` | `false` mantém o visual original do template |
-| `kmz_com_equipamentos` | `true` devolve os alfinetes dos BCs |
-| `imagens_no_ppt` | `false` = molduras vazias para colar print |
-| `zonas_grade_m` | lado da célula na agregação |
 
-### `[survey]` — 8 chaves
+### `[servicos]`
 
 | chave | padrão | o que faz |
 |---|---|---|
-| `max_threads` | 12 | teto de consultas simultâneas |
-| `timeout_s` | 6 | timeout por rádio |
-| `min_intervalo_s` | 5 | piso do intervalo pedido pela página |
-| `piso_continuo_s` | 0 | espera mínima no contínuo (0 = sem pausa) |
-| `ping_a_cada_s` | 15 | cadência do ping, independente do ciclo |
-| `ping_max_por_ciclo` | (teto de threads) | máximo de pings por ciclo |
-| `falhas_para_pular` | 3 | desiste do rádio após N falhas |
-| `usar_cache_fallback` | true | amostra do exportador quando a direta falha |
+| `prometheus_exe` / `grafana_exe` | (procurar) | caminhos |
+| `prometheus_args` | `--config.file=prometheus.yml` | |
+| `prometheus_porta` / `grafana_porta` | 9090 / 3000 | para saber se está de pé |
+| `iniciar_prometheus` / `iniciar_grafana` / `iniciar_exportador` | true | `false` = o supervisor não mexe |
+| `espera_inicial_s` | 20 | ao ligar a máquina |
 
-### `[coleta]`
+### `[servidor]` e `[log]`
 
-| chave | o que faz |
-|---|---|
-| `intervalo_moveis_segundos` | ciclo curto só dos móveis |
-| `descoberta` | `false` = só os IPs de `[rede] seeds` |
-| `usar_cache` | `false` = não lê nem escreve o cache em disco |
-| `somente_com_tag` | `true` = só publica nome com prefixo de frota |
+`porta_metrics` (8000); `arquivo` e `nivel` do log (gira em 10 MB × 5).
 
 ---
 
-## 20. Linha de comando
-
-### Operação
+## 17. Linha de comando
 
 | flag | o que faz |
 |---|---|
-| `--port` / `--metrics-port` / `--porta-relatorio` | portas |
-| `--interval` | intervalo do ciclo |
-| `--seed` | IPs iniciais |
-| `--role` / `--password` | credenciais da BC API |
+| (nenhuma) | exportador + página web |
+| `--servico` / `--status` / `--parar` | supervisor (§10) |
+| `--instalar-servico` / `--remover-servico` | a tarefa do Windows |
+| `--seed` / `--role` / `--password` / `--port` | rede e credenciais |
+| `--interval` / `--metrics-port` / `--porta-relatorio` | ciclo e portas |
 | `--sem-relatorios` | sobe só o exporter |
 | `--debug` | log verboso |
-
-### Diagnóstico
-
-| flag | o que faz |
-|---|---|
-| `--dump-state IP` | salva o State bruto e sai — diagnóstico de parsing |
-| `--diagnostico-eth` | foca na porta ethernet: blocos, campos e valores |
-| `--testar-fundo` | diz qual fundo os mapas vão usar **e por quê** |
-
-### Relatórios e survey
-
-| flag | o que faz |
-|---|---|
-| `--gerar-relatorio` | gera e sai |
+| `--dump-state IP` | salva o State bruto e sai |
+| `--diagnostico-eth IP` | foca na porta ethernet: blocos, campos e valores |
+| `--gerar-relatorio INI FIM` | gera o Excel e sai |
 | `--demo` | dados sintéticos (carimbados como tal) |
-| `--ppt-survey ID` | o deck exclusivo de survey |
-| `--kml-do-survey ID` | KMZ de um survey do histórico |
-| `--kmz-todos` | um KMZ por grandeza e banda, num ZIP |
-| `--kml-campo` | grandeza que colore os pontos |
-| `--bandas` | bandas do survey |
-| `--survey-csv` | heatmaps a partir de CSV georreferenciado |
-| `--survey-do-prometheus` | monta o CSV a partir das métricas já coletadas |
-| `--survey-radio` / `--survey-passo` / `--survey-vel-min` / `--survey-grade-m` | recortes da extração |
-| `--survey-fundo` / `--fundo-bbox` / `--survey-kmz` / `--kmz-fundo` | fundo dos mapas |
-| `--cobertura-ptx` / `--cobertura-ganho` / `--cobertura-expoente` / `--raio-interp` | modelo de propagação |
-| `--montar-template-survey` | acrescenta os slides-modelo ao template |
 
 ---
 
-## 21. Testes
+## 18. Testes
 
-`teste_parser.py`: **375 testes em 53 classes**, rodando **sem rádio e sem a
-`rajant_api`** (há um stub no topo). Roda em qualquer máquina, inclusive CI
-sem acesso à malha.
-
-Grupos de cobertura:
+`teste_parser.py`: **177 testes em 31 classes**, rodando **sem rádio e sem a
+`rajant_api`** (há um stub no topo). Com a biblioteca instalada, roda também
+os testes do protocolo real contra um rádio simulado; sem ela, esses são
+pulados.
 
 | área | classes |
 |---|---|
-| parser | `TestBlocoConfiguration`, `TestCamposInexistentes`, `TestInstaMesh`, `TestAPT`, `TestClientesAP`, `TestPeers`, `TestGPS`, `TestSistema`, `TestRadio` |
-| publicação | `TestPublicar`, `TestCPUDerivada`, `TestRobustez` |
-| coleta | `TestIntervaloMoveis`, `TestDescobertaEFiltro`, `TestSelecaoPorTag`, `TestSessaoRadio`, `TestFiltroDeEstado`, `TestCapturaDireta` |
-| survey | `TestPersistenciaSurvey`, `TestResumoSurvey`, `TestCalibracao`, `TestZonasProblema`, `TestServidorPorAmostra`, `TestMargemEGrade`, `TestInterferencia`, `TestComparacao` |
-| KML/KMZ | `TestKmlSurvey` (37), `TestTodosOsKmz`, `TestZipImagens`, `TestFundoEBbox` |
-| PPT | `TestSlidesSurvey`, `TestSurveyNoPPT`, `TestDeckSurveyAnglo`, `TestIdentidadeAnglo`, `TestIdentidadeNoSemanal`, `TestMolduraParaColar`, `TestNavegacaoEAnalise`, `TestMapaDaRede` |
-| separação dos decks | `TestSeparacaoDosRelatorios`, `TestTituloDoSlide`, `TestRemocaoDaSecaoDeSurvey`, `TestSlidesTecnicosNoSemanal` |
-| web | `TestEndpointsSurvey`, `TestParametrosSurveyWeb`, `TestPainelHTML` |
-| ambiente | `TestShimSslWrapSocket`, `TestConfigSurvey`, `TestMarcaDemo` |
+| parser | `TestBlocoConfiguration`, `TestCamposInexistentes`, `TestInstaMesh`, `TestAPT`, `TestClientesAP`, `TestPeers`, `TestGPS`, `TestSistema`, `TestRadio`, `TestCamposDescartados`, `TestGpsTimeParaSegundos` |
+| publicação e séries | `TestPublicar`, `TestCPUDerivada`, `TestRobustez`, `TestSeriesNoMetrics`, `TestInterferencia` |
+| coleta e tag | `TestIntervaloMoveis`, `TestDescobertaEFiltro`, `TestIdentidadeDoVizinho`, `TestLeituraDoEstado` |
+| protocolo | `TestLoginBCAPI` (rádio falso que fala o login e o State reais, em pedaços como pelo TLS), `TestShimSslWrapSocket` |
+| modo serviço | `TestServicoSegundoPlano` (Prometheus e Grafana falsos, porta já atendida, pid, tarefa XML) |
+| relatório | `TestSemanalSemSurvey`, `TestTituloDoSlide`, `TestRemocaoDaSecaoDeSurvey`, `TestSlidesTecnicosNoSemanal`, `TestIdentidadeAnglo`, `TestIdentidadeNoSemanal` |
+| web | `TestPaginaSoRelatorios` (servidor de verdade numa porta livre), `TestPainelHTML` |
 
-### O que a suíte cobre além do óbvio
+### Teste que passa com o bug reintroduzido não é teste
 
-- parsing contra amostras reais de State
-- conversões (SNR, GPS NMEA, temperatura) contra os `.proto`
-- **ausência** de varredura de espectro nos `.proto` — falha se aparecer
-- XML do KML: ordem dos elementos, escape, estilos sem órfão
-- raster do calor: transparência fora do rastro, **cor na posição do BC
-  fixo** especificamente
-- repintura Anglo: contraste texto/fundo em **todos** os runs, links intactos
-- separação dos dois relatórios, **nos dois sentidos** de cada chave
-
-### Duas práticas
-
-**Testes que fixam decisão revertida são reescritos, não apagados.** Houve
-um `test_sem_heatmap_no_kmz` exigindo a *ausência* de heatmap, de quando o
-polígono de cobertura foi removido a pedido. Quando o calor voltou — com
-outro significado — o teste virou dois, cobrindo os dois lados.
-
-**Teste que passa com o bug reintroduzido não é teste.** O teste da "bola
-verde" passou por duas versões antes de prestar: olhar a média do quadro não
-servia, porque o rastro do móvel tem área muito maior e afogava a bola. Só
-pegou conferindo a transparência **na posição** do BC parado. Vale rodar a
-mutação antes de confiar num teste novo.
+Vale rodar a mutação antes de confiar num teste novo. Os desta rodada
+foram conferidos assim: sem `fechar()`, offline sem remoção, vizinho sem
+filtro de tag, `ultima_coleta` monotônica, `get_state()` no lugar de
+`ler_estado()` — cada um derruba pelo menos um teste. E
+`test_a_biblioteca_sozinha_perde_o_state_grande` prova, com o mesmo rádio
+falso, que a leitura da biblioteca devolve `False` onde `ler_estado()` lê
+tudo.
 
 ---
 
-## 22. Build e distribuição
+## 19. Build e distribuição
 
 `build/gerar_exe.bat` gera `rajant_monitor.exe` no Windows, em cinco passos
-com log completo em `build/log_build.txt`.
+com log completo em `build/log_build.txt`, e copia para `dist\rajant_monitor\`
+o que é editável sem recompilar: `painel/`, `marca/`, o template, o
+`config.ini` e os arquivos de `build\windows\` (instalar/remover a
+inicialização, parar tudo, iniciar oculto, `prometheus_exemplo.yml`).
 
 Decisões que custaram:
 
 **`python -m PyInstaller`, não `pyinstaller`.** Quando o pip cai em "user
-installation", os executáveis vão para `…\AppData\Roaming\Python\PythonXX\
-Scripts`, que normalmente **não está no PATH**. O comando some e o build
-morre com "is not recognized", mesmo com o pyinstaller instalado.
+installation", os executáveis vão para uma pasta `Scripts` fora do PATH.
 
 **`--no-deps` em linha separada.** Juntar com o passo anterior faria o
-`--no-deps` valer para o comando inteiro, e o matplotlib entraria sem
-`packaging`, `pyparsing` e `pillow`. O erro só apareceria depois, ao gerar a
-primeira imagem.
+`--no-deps` valer para o comando inteiro.
 
-**A conferência importa `rajant_monitor`, não `rajant_api`.** Conferir com
-`import rajant_api` acusa uma falha que não afeta o programa (§2).
+**A conferência importa `rajant_monitor`, não `rajant_api`** (§2).
 
-**`--onedir`, não `--onefile`.** E o `.bat` copia para fora do exe o que é
-editável sem recompilar: `painel/`, `marca/`, o template e o `config.ini`.
+**`servico_rajant` em `hiddenimports`.** Ele é importado dentro do
+`main()`; sem a declaração o PyInstaller não o leva.
 
-**A janela não fecha sozinha, nem no erro.** Quatro `exit /b 1` sem `pause`
-faziam a janela sumir com a mensagem. E o passo do PyInstaller demora de 3 a
-10 minutos em silêncio — o script avisa que isso é normal.
+**A janela do build não fecha sozinha, nem no erro.**
 
 > **Sem compilação cruzada:** `.exe` de Windows só sai de máquina Windows.
 
@@ -1363,10 +740,7 @@ resultado dos imports para diagnóstico remoto.
 
 ---
 
-## 23. As invariantes
-
-Quatro regras atravessam o código. Cada uma existe porque a violação já
-causou um problema real.
+## 20. As invariantes
 
 ### 1. Nunca publicar 0 no lugar de "não medi"
 
@@ -1374,122 +748,82 @@ Zero é indistinguível de "medido e deu zero". Campo sem medição vira `None`
 e a série é **omitida**. Era o que fazia contador de erro de ethernet e CPU
 parecerem saudáveis num painel inteiro.
 
-A invariante vaza pelas bordas, e vazou DUAS vezes pela mesma porta.
-
-Primeiro na lista de vizinhos do MeshMapper. A limpeza existia para o enlace servidor e não
-para os peers: 0 dBm — potência recebida de 1 mW, impossível num rádio de
-malha — passava direto e **ganhava** a eleição de `cobertura_disponivel()`,
-que escolhe por `max(sinal)`. No arquivo real do CA-1006 isso pintava três
-pontos do trajeto de verde máximo, com "87 dB disponíveis e não usados" no
-laudo.
-
-Depois na coleta **ao vivo**, e pior: `_i()` do parser devolve 0 quando o
-campo não existe, então um vizinho sem `signal` chegava como 0 dBm e
-**ganhava a eleição do melhor sinal**. O laudo saiu com *"RSSI mediana
-0,16 dBm, 100% dentro do requisito"* — aprovado por uma medida que nunca
-existiu.
-
-Hoje `limpar_enlace()` é o único lugar onde a regra vive, e os dois
-caminhos — arquivo e rádio — passam por ele.
-
 ### 2. Nada se afirma sobre a BC API sem conferir o `.proto`
 
 A auditoria removeu **19 séries** que não tinham campo correspondente e
-corrigiu conversões erradas havia tempo. Há teste que falha se um `.proto`
-passar a expor varredura de espectro.
+corrigiu conversões erradas havia tempo. O que se afirma sobre a biblioteca
+vem do código dela (0.1.1), não da documentação.
 
-### 3. Mapa errado é pior que mapa sem fundo
+### 3. Dado que parou de chegar não pode parecer dado
 
-A imagem de fundo é posicionada pelo retângulo **dela**, não pelo dos dados.
-Sem georreferência, é recusada. Mapa esticado mente sobre distância.
+Série que não foi medida nesta coleta sai do `/metrics`. O último valor
+repetido é tão falso quanto um 0: desenha uma linha reta onde não houve
+leitura (§6). E State que não veio é falha, nunca State vazio (§4).
 
-### 4. Medição e estimativa nunca se misturam sem distinção visual
+### 4. Só leitura na malha
 
-Sobrepor as duas na mesma imagem foi o que produziu a impressão de área
-inteiramente aprovada onde havia buraco. Os mapas do survey têm **três
-camadas que nunca se confundem**: medido, estimado, e o contorno.
+O exportador só faz login e pede `State`. Nenhuma tarefa é enviada aos
+rádios.
 
 ---
 
-## 24. Limites conhecidos
-
-Não são bugs, e vão continuar assim até alguém decidir o contrário:
+## 21. Limites conhecidos
 
 - **A BC API não expõe varredura de espectro.** A interferência é derivada
-  de contadores de airtime. Não é analisador de espectro.
-- **`sinal` é o RSSI do melhor enlace ativo**, não a média dos vizinhos.
-  Descreve a qualidade da cobertura no ponto e por isso é **otimista por
-  construção**: numa malha densa quase sempre há um vizinho bom. Se o mapa
-  parecer verde demais, é aqui que se investiga.
-- **Perda de pacotes vem de ping ICMP**, não da API.
-- **Throughput fim-a-fim e traceroute são medição manual.** A API não os dá.
-- **Sem tiles de satélite na rede da mina.** O fundo vem de um provedor só
-  (`FUNDO_SERVICO`, ArcGIS World Imagery). Bloqueado ele, o PNG sai sem
-  satélite — `--testar-fundo` diz isso e o diagnóstico sugere liberar o host.
-  É por isso que o KMZ existe: o fundo entra no Google Earth, na máquina de
-  quem abre.
-- **Rastro fino e contínuo exige captura rápida.** Limite físico (§12).
-- **`--onedir`:** o `config.ini`, o `surveys.db` e o cache são criados no
-  diretório **atual**. Rodar o `.exe` de outra pasta espalha arquivo.
+  de contadores de airtime.
+- **Perda e latência vêm de ping ICMP**, não da API.
+- **Throughput fim-a-fim e traceroute não vêm da API.**
+- **Séries antigas** (com IP no rótulo, de antes do filtro de tag) ficam no
+  histórico do Prometheus até saírem do intervalo do painel.
 
 ---
 
-## 25. Solução de problemas
+## 22. Solução de problemas
 
 | sintoma | causa provável | onde olhar |
 |---|---|---|
 | `ImportError: cannot import name 'wrap_socket'` | importou `rajant_api` direto | importe `rajant_monitor` (§2) |
 | `No module named 'google'` | falta o protobuf | `pip install "protobuf==4.23.4"` |
-| `'pyinstaller' is not recognized` | Scripts fora do PATH | `python -m PyInstaller` (§22) |
-| métrica sumida | campo sem medição | é o esperado — invariante 1 (§23) |
-| 150 BCs viram 600 | agrupamento de nó físico | `_publicar_identidade` (§6) |
-| rota toda branca no Google Earth | ordem dos elementos no KML | `_placemark` (§13) |
-| KMZ vazio / XML quebrado | `<` não escapado | `_esc` (§13) |
-| mapa "todo verde" | rádio parado no calor, ou `sinal` = melhor enlace | §12 e §24 |
-| bolas desconectadas | espaçamento maior que o raio | intervalo 0 na página (§10) |
-| contínuo ainda espaçado | ping preso ao ciclo | `ping_a_cada_s` (§10) |
-| ciclo de dezenas de s | frota inteira selecionada | selecione só o trajeto (§10) |
-| PPT sem os slides de survey | é o padrão | `survey_no_semanal = true` (§15) |
-| deck sem logo | falta a pasta `marca/` | §16 |
-| PNG sem satélite | provedor bloqueado | `--testar-fundo` (§24) |
-| botão do menu não navega | hyperlink no run | `_limpar_link_de_texto` (§15) |
+| `'pyinstaller' is not recognized` | Scripts fora do PATH | `python -m PyInstaller` (§19) |
+| métrica sumida | campo sem medição, ou BC sem responder | é o esperado — invariantes 1 e 3 |
+| linha reta no Grafana | `segurar_serie_s` alto | §6 |
+| rádio não aparece | nome sem tag | log `ignorado: nome sem tag`, `rajant_bc_sem_tag` (§7) |
+| "autenticacao falhou" em todos | papel inexistente ou senha | a mensagem diz qual (§4) |
+| nada sobe depois de reiniciar | tarefa não criada, ou caminhos | `--status`, `servico.log` (§10) |
+| Grafana não sobe pelo supervisor | já é serviço do Windows | `iniciar_grafana = false` |
+| `config.ini` em `System32` | versão antiga do exe | o atual faz `chdir` para a pasta dele |
+| 150 BCs viram 600 | agrupamento de nó físico | `_publicar_identidade` (§7) |
+| deck sem logo | falta a pasta `marca/` | §13 |
+| botão do menu não navega | hyperlink no run | `_limpar_link_de_texto` (§12) |
 
 ---
 
-## 26. Mapa do arquivo
+## 23. Mapa do arquivo
 
-As posições mudam a cada alteração; **use os nomes, não as linhas**. A ordem
-é esta:
+As posições mudam a cada alteração; **use os nomes, não as linhas**:
 
 ```
-config, cache, logging, métricas          →  CacheIPs
+config, cache, logging, métricas          →  DEFAULT_CONFIG, CacheIPs
 disponibilidade e estado                  →  JanelaDisponibilidade, EstadoBC
 helpers e parser                          →  extrair_blocos, parse_state
-ping, publicação                          →  ping_qualidade, publicar
+ping, séries, publicação                  →  ping_rtt, SeriesDoBC, publicar
 coletor                                   →  RajantCollector
-relatório Excel                           →  Prometheus, obter_dados
+relatório Excel                           →  Prometheus, obter_dados, montar_relatorio
 preenchimento do PPT                      →  gerar_ppt, _slides_tecnicos
-heatmaps de CSV, leitura de KMZ           →  ler_kmz
-KMZ e KML do survey                       →  gerar_kml_survey, _calor_da_rota
-KML de captura parada                     →  gerar_kml_pontos_fixos
-leitura do MeshMapper                     →  ler_meshmapper, _mm_enlace
-análise da vizinhança                     →  censo_vizinhos, sitios_parados
- pegada por repetidora                    →  amostras_por_repetidora
-persistência dos surveys                  →  survey_criar, amostras_gravar
-medições manuais, seleção por tag
-fundo de satélite, mapas do survey
-captura ao vivo                           →  SessaoRadio, CapturaGPS
-identidade Anglo                          →  ANGLO, slide_anglo, ppt_survey_anglo
-identidade Anglo no semanal               →  aplicar_identidade_anglo
-servidor web                              →  criar_handler
+a malha conhecida                         →  REDE_CONHECIDA
+sessão na BCAPI                           →  bc_receber, ler_estado, autenticar
+identidade Anglo no semanal               →  ANGLO, aplicar_identidade_anglo
+servidor web                              →  PAGINA_HTML, criar_handler
+main                                      →  main
 ```
 
-Essa ordem é, na prática, o desenho dos módulos caso o arquivo venha a ser
-dividido um dia.
+`servico_rajant.py`: localização (`achar_prometheus`, `achar_grafana`),
+processos (`_abrir_oculto`, `matar`), `Servico`, `rodar`, tarefa
+(`xml_da_tarefa`, `instalar_tarefa`), `executar`.
 
 ---
 
-## 27. Glossário
+## 24. Glossário
 
 | termo | o que é |
 |---|---|
@@ -1497,18 +831,14 @@ dividido um dia.
 | **BC API** | a API dos BreadCrumbs, sobre TLS, com State em protobuf |
 | **InstaMesh** | o protocolo de roteamento da Rajant |
 | **peer** | vizinho de rádio de um BC |
+| **encapId** | identificador do vizinho no InstaMesh; sufixo do número de série |
 | **custo** | métrica do InstaMesh para escolher rota (menor = melhor) |
 | **APT** | Auto-Provisioned Trunking, na porta ethernet |
 | **seed** | IP inicial de onde a descoberta parte |
+| **tag** | o nome do equipamento no formato da frota (CA-1035, ERM-22) |
 | **ERB / ERM** | estação repetidora fixa / móvel |
 | **CA / PA / PF / TT / EH** | prefixos de frota (caminhão, pá, perfuratriz, trator, escavadeira) |
-| **survey** | levantamento de campo: percorrer medindo |
 | **RSSI** | intensidade do sinal recebido, em dBm |
 | **SNR** | relação sinal/ruído, em dB |
-| **noise floor** | ruído de fundo do canal, em dBm |
 | **airtime** | tempo de antena ocupado; base da interferência derivada |
-| **handover** | troca do BC que atende um móvel |
-| **ping-pong** | handover que oscila entre dois BCs |
-| **zona-problema** | mancha contígua de células fora do requisito |
-| **GroundOverlay** | imagem georreferenciada no KML |
-| **LatLonBox** | o retângulo geográfico que posiciona um GroundOverlay |
+| **staleness** | o Prometheus encerra a série que deixou de aparecer no `/metrics` |

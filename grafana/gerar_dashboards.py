@@ -1332,11 +1332,11 @@ def dash_coletor():
 
     L.secao("Estado do coletor")
     L.fila(
-        (4, cartao("IPs no cache",
+        (3, cartao("IPs no cache",
                    alvos(('rajant_cache_total', "cache")),
                    campo(dec=0, cor="fixed", preenchimento=0),
                    "Cache em disco de IPs descobertos.", grafico="none")),
-        (4, cartao("IPs online",
+        (3, cartao("IPs online",
                    alvos(('rajant_cache_online', "online")),
                    campo(dec=0, cor="fixed"))),
         (4, medidor("Cobertura da coleta",
@@ -1345,7 +1345,7 @@ def dash_coletor():
                     campo("percent", 1, 0, 100, cor="thresholds",
                           limiares=deg([(CRIT, None), (ATEN, 90), (OK, 98)])),
                     "Fração do cache que respondeu no último ciclo.")),
-        (4, cartao("Seeds OK",
+        (3, cartao("Seeds OK",
                    alvos(('sum(rajant_seed_status)', "seeds")),
                    campo(dec=0, cor="thresholds",
                          limiares=deg([(CRIT, None), (OK, 1)])),
@@ -1360,6 +1360,13 @@ def dash_coletor():
                           "sem ping")),
                    campo(dec=0, cor="thresholds",
                          limiares=deg([(OK, None), (ATEN, 1), (CRIT, 5)])))),
+        (3, cartao("Ignorados sem tag",
+                   alvos(('rajant_bc_sem_tag', "sem tag")),
+                   campo(dec=0, cor="fixed", preenchimento=0),
+                   "Rádios que responderam com nome fora do formato de tag "
+                   "([coleta] padrao_tag) e não entram em painel nenhum. "
+                   "Os nomes estão no rajant_monitor.log (ignorado: nome "
+                   "sem tag).", grafico="none")),
         h=ALT_KPI)
 
     L.secao("Frescor do dado")
@@ -1368,8 +1375,8 @@ def dash_coletor():
                    alvos((f'time() - rajant_ultima_coleta_ts{{{F_BC}}}',
                           "{{bc}}")),
                    campo("s", 0, preenchimento=8),
-                   "Cresce em rampa = o BC parou de responder e os painéis "
-                   "estão exibindo o último valor conhecido.",
+                   "Cresce em rampa = o BC parou de responder. As medições "
+                   "dele saem dos painéis (buraco) até ele voltar.",
                    calcs=["max"])),
         (12, serie("Falhas consecutivas",
                    alvos((f'rajant_falhas_consecutivas{{{F_BC}}}', "{{bc}}")),
@@ -1449,275 +1456,6 @@ def dash_coletor():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 7. SITE SURVEY CONTÍNUO
-# ══════════════════════════════════════════════════════════════════
-NOTA_SURVEY = """
-### A frota móvel é um enxame de sondas
-
-Cada equipamento móvel reporta **posição + qualidade de RF** a cada ciclo de
-coleta. Isso é um site survey contínuo, sem campanha dedicada — e só ficou
-possível depois que a auditoria contra os `.proto` do bcapi consertou três
-coisas que estavam mortas:
-
-| campo | antes | agora |
-|---|---|---|
-| SNR | `rssi - abs(ruido)` → sempre negativo | `signal - noise`, em dB |
-| velocidade | lia `speed`, inexistente → sempre 0 | `gpsSpeedKph`, já em km/h |
-| rumo | calculado e **nunca publicado** | `gpsTrackDegreesTrue` |
-
-### ⚠️ Limite de resolução espacial
-
-A distância entre amostras é **velocidade × intervalo de coleta**:
-
-| intervalo | a 25 km/h | a 40 km/h |
-|---|---|---|
-| 60 s | ~420 m | ~670 m |
-| 20 s (`intervalo_moveis_segundos`) | ~140 m | ~220 m |
-| 300 s | ~2,1 km | ~3,3 km |
-
-O raio de interpolação padrão do heatmap é **300 m**. Com coleta de 60 s o
-espaçamento já é maior que isso, e o mapa sai com buracos que a interpolação
-preenche por conta própria.
-
-**Serve para achar buraco de cobertura. Não substitui survey fino de
-posicionamento de antena.**
-
-### Vieses a ter em mente
-
-- **Equipamento parado** despeja centenas de amostras na mesma coordenada. O
-  gerador do CSV descarta amostras abaixo de `--survey-vel-min` (1 km/h).
-- **SNR é por enlace, não por lugar.** O que se mapeia é o *melhor enlace
-  disponível* naquele ponto, que é o proxy certo para "qualidade da cobertura
-  aqui".
-- **Só a frota móvel tem GPS.** BCs fixos não contribuem amostras.
-
-### Gerar os mapas
-
-```bash
-python3 rajant_monitor.py --survey-do-prometheus \\
-        --survey-periodo 2026-07-01 2026-07-31 \\
-        --survey-passo 20 --survey-vel-min 1 \\
-        --survey-kmz mina.kmz
-```
-
-Sai em `survey_imgs/`: rota, heatmaps de SNR/RSSI/ruído/perda/latência,
-histogramas e o mapa de cobertura — o mesmo pipeline da campanha manual.
-"""
-
-
-def dash_survey():
-    _id[0] = 0
-    F = f'{F_BC}'
-    L = Layout()
-
-    L.secao("Cobertura observada pela frota")
-    L.fila(
-        (4, cartao("Equipamentos com fix",
-                   alvos((f'sum(rajant_gps_fix{{{F}}})', "com fix")),
-                   campo(dec=0, cor="thresholds",
-                         limiares=deg([(CRIT, None), (OK, 1)])),
-                   "Só quem tem fix contribui amostra de survey.")),
-        (4, cartao("Em movimento agora",
-                   alvos((f'count(rajant_gps_vel_kmh{{{F}}} > 1) or vector(0)',
-                          "movendo")),
-                   campo(dec=0, cor="fixed"),
-                   "Amostra de equipamento parado enviesa o mapa e é "
-                   "descartada na geração do CSV.")),
-        (4, medidor("SNR mínimo em rota",
-                    alvos((f'min(rajant_peer_snr_db{{{F}}})', "snr")),
-                    campo("none", 1, 0, 60, cor="thresholds",
-                          limiares=deg([(CRIT, None), (ATEN, 15), (OK, 30)])),
-                    "O pior enlace da frota móvel agora.")),
-        (4, cartao("Sem peer (buraco)",
-                   alvos((f'count(sum by (bc) '
-                          f'(rajant_radio_peers_ativos{{{F}}}) == 0) '
-                          f'or vector(0)', "buracos")),
-                   campo(dec=0, cor="thresholds",
-                         limiares=deg([(OK, None), (ATEN, 1), (CRIT, 3)])),
-                   "Equipamento com GPS mas sem nenhum peer ativo = "
-                   "candidato a buraco de cobertura.")),
-        (4, cartao("Velocidade média",
-                   alvos((f'avg(rajant_gps_vel_kmh{{{F}}} > 1)', "km/h")),
-                   campo("velocitykmh", 1, cor="fixed"))),
-        (4, cartao("Satélites (mínimo)",
-                   alvos((f'min(rajant_gps_satelites{{{F}}})', "sats")),
-                   campo(dec=0, cor="thresholds",
-                         limiares=deg([(CRIT, None), (ATEN, 5), (OK, 7)])),
-                   "Poucos satélites = posição imprecisa, amostra ruim.")),
-        h=ALT_KPI)
-
-    L.secao("Rota e cobertura")
-    L.fila(
-        (24, lambda x, y, w, h: _painel(
-            "geomap", "Rota da frota móvel — cor pelo SNR do melhor enlace",
-            x, y, w, h,
-            [alvo(f'rajant_gps_lat{{{F}}}', "{{bc}}", "A", False, "table"),
-             alvo(f'rajant_gps_lon{{{F}}}', "{{bc}}", "B", False, "table"),
-             alvo(f'max by (bc) (rajant_peer_snr_db{{{F}}})', "{{bc}}", "C",
-                  False, "table")],
-            campo("none", 1, 0, 60, cor="continuous-RdYlGr"),
-            {"view": {"id": "fit", "lat": 0, "lon": 0, "zoom": 4},
-             "controls": {"showZoom": True, "showAttribution": True,
-                          "mouseWheelZoom": True, "showScale": True,
-                          "showMeasure": True, "showDebug": False},
-             "basemap": {"type": "default", "name": "Basemap", "config": {}},
-             "tooltip": {"mode": "details"},
-             # Camada `route` desenha o traçado LIGADO, na ordem temporal —
-             # é o que mostra por onde o equipamento passou. A camada de
-             # marcadores sozinha vira nuvem de pontos sem sentido de
-             # percurso. Os pontos ficam por cima, para dar a leitura fina.
-             "layers": [
-                 {"type": "route", "name": "Percurso", "tooltip": True,
-                  "location": {"mode": "coords", "latitude": "latitude",
-                               "longitude": "longitude"},
-                  "config": {"style": {
-                      "size": {"fixed": 3, "max": 8, "min": 1},
-                      "color": {"field": "SNR (dB)", "fixed": OK},
-                      "opacity": 0.9, "lineWidth": 3,
-                      "rotation": {"fixed": 0, "max": 360, "min": -360,
-                                   "mode": "mod"},
-                      "symbol": {"mode": "fixed",
-                                 "fixed": "img/icons/marker/circle.svg"},
-                      "textConfig": {"fontSize": 10, "offsetX": 0,
-                                     "offsetY": 0, "textAlign": "center",
-                                     "textBaseline": "middle"}},
-                      "arrow": 1, "showLegend": True}},
-                 {"type": "markers", "name": "Amostras", "tooltip": True,
-                  "location": {"mode": "coords", "latitude": "latitude",
-                               "longitude": "longitude"},
-                  "config": {"style": {
-                      "size": {"fixed": 4, "max": 10, "min": 2},
-                      "color": {"field": "SNR (dB)", "fixed": OK},
-                      "opacity": 0.75, "rotation": {"fixed": 0},
-                      "symbol": {"mode": "fixed",
-                                 "fixed": "img/icons/marker/circle.svg"},
-                      "symbolAlign": {"horizontal": "center",
-                                      "vertical": "center"},
-                      "textConfig": {"fontSize": 10, "offsetX": 0,
-                                     "offsetY": 0, "textAlign": "center",
-                                     "textBaseline": "middle"}},
-                      "showLegend": False}}]},
-            "Traçado ligado na ordem temporal, com setas de sentido. Cada "
-            "ponto é uma coleta; a densidade da trilha é velocidade × "
-            "intervalo — veja a nota no fim do dashboard antes de tratar "
-            "isso como survey fino. Vermelho = SNR baixo naquele trecho, "
-            "candidato a reforço de cobertura.",
-            juntar("bc", 3,
-                   {"Value #A": "latitude", "Value #B": "longitude",
-                    "Value #C": "SNR (dB)", "ip 1": "IP"},
-                   manter=["ip"]))),
-        h=14)
-
-    L.secao("Movimento")
-    L.fila(
-        (12, serie("Velocidade",
-                   alvos((f'rajant_gps_vel_kmh{{{F}}}', "{{bc}}")),
-                   campo("velocitykmh", 1, preenchimento=10),
-                   "gpsVel.gpsSpeedKph — já vem em km/h. Antes da auditoria "
-                   "esta série era 0 constante.",
-                   calcs=["mean", "max"])),
-        (12, serie("Rumo verdadeiro",
-                   alvos((f'rajant_gps_rumo_graus{{{F}}}', "{{bc}}")),
-                   campo("degree", 0, 0, 360, preenchimento=0, largura=2),
-                   "gpsVel.gpsTrackDegreesTrue. Mesmo ponto com rumos "
-                   "diferentes e SNR diferente indica sombreamento pela "
-                   "própria carroceria ou orientação de antena.",
-                   calcs=["last"])),
-        h=ALT_SERIE)
-
-    L.secao("Células de cobertura e handover")
-    L.fila(
-        (14, linha_tempo("Qual BreadCrumb está servindo cada equipamento",
-                         alvos((f'label_replace('
-                                f'topk by (bc) (1, rajant_peer_snr_db{{{F}}}),'
-                                f' "servidor", "$1", "peer", "(.*)")',
-                                "{{bc}} → {{servidor}}")),
-                         campo(dec=0, cor="palette-classic"),
-                         "O `peer` do melhor enlace é o BC que cobre o ponto. "
-                         "Cada troca de faixa é um handover — trocas seguidas "
-                         "no mesmo trecho indicam fronteira de célula instável.",
-                         mostrar_valor="never")),
-        (10, tabela("Enlace ativo por equipamento",
-                    [alvo(f'topk by (bc) (1, rajant_peer_snr_db{{{F}}})', "",
-                          "A", True, "table")],
-                    campo(dec=1, cor="thresholds",
-                          limiares=deg([(CRIT, None), (ATEN, 15), (OK, 30)])),
-                    "Quem serve quem, agora. É o mapa de células em forma de "
-                    "tabela — a coluna `servidor` do CSV do survey sai daqui.",
-                    transf=[{"id": "organize", "options": {
-                        "excludeByName": limpar(1),
-                        "renameByName": {"bc": "Equipamento",
-                                         "peer": "Servido por",
-                                         "radio": "rádio",
-                                         "ip": "IP",
-                                         "Value": "SNR (dB)"}}}],
-                    ordenar=("SNR (dB)", False),
-                    larguras={"IP": 120, "rádio": 80, "SNR (dB)": 100})),
-        h=ALT_SERIE + 1)
-
-    L.secao("Qualidade em rota")
-    L.fila(
-        (12, serie("SNR do melhor enlace por equipamento",
-                   alvos((f'max by (bc) (rajant_peer_snr_db{{{F}}})',
-                          "{{bc}}")),
-                   campo("none", 1, preenchimento=10, cor="thresholds",
-                         limiares=deg([(CRIT, None), (ATEN, 15), (OK, 30)])),
-                   "É o que o heatmap de survey mapeia: a qualidade da "
-                   "melhor cobertura disponível naquele ponto.",
-                   calcs=["mean", "min"])),
-        (12, serie("Peers ativos em rota",
-                   alvos((f'sum by (bc) (rajant_radio_peers_ativos{{{F}}})',
-                          "{{bc}}")),
-                   campo(dec=0, preenchimento=15, cor="thresholds",
-                         limiares=deg([(CRIT, None), (ATEN, 1), (OK, 2)])),
-                   "Cair a zero com o equipamento em movimento é a "
-                   "assinatura de buraco de cobertura.",
-                   calcs=["min"])),
-        h=ALT_SERIE)
-
-    L.secao("Candidatos a buraco de cobertura")
-    L.inteiro(
-        tabela("Equipamentos móveis com pior cobertura agora",
-               [alvo(f'max by (bc) (rajant_peer_snr_db{{{F}}})', "", "A",
-                     True, "table"),
-                alvo(f'sum by (bc) (rajant_radio_peers_ativos{{{F}}})', "",
-                     "B", True, "table"),
-                alvo(f'rajant_gps_vel_kmh{{{F}}}', "", "C", True, "table"),
-                alvo(f'rajant_gps_lat{{{F}}}', "", "D", True, "table"),
-                alvo(f'rajant_gps_lon{{{F}}}', "", "E", True, "table"),
-                alvo(f'rajant_gps_satelites{{{F}}}', "", "F", True, "table")],
-               campo(dec=4),
-               "Ordenado pelo pior SNR. Copie lat/lon para o Google Earth "
-               "junto com o KMZ da mina para localizar o ponto.",
-               transf=juntar("bc", 6,
-                             {"bc": "Equipamento",
-                              "Value #A": "SNR (dB)",
-                              "Value #B": "peers ativos",
-                              "Value #C": "vel (km/h)",
-                              "Value #D": "latitude",
-                              "Value #E": "longitude",
-                              "Value #F": "satélites"},
-                             manter=["ip"],
-                             extras={"ip 1": True}),
-               ordenar=("SNR (dB)", False),
-               larguras={"Equipamento": 180, "SNR (dB)": 100,
-                         "peers ativos": 110, "vel (km/h)": 100}),
-        h=ALT_TABELA + 1)
-
-    L.secao("Como usar e o que não esperar")
-    L.inteiro(texto("Site survey contínuo — método e limites", NOTA_SURVEY),
-              h=20)
-
-    return dashboard(
-        "rajant-survey", "Rajant · 7 · Site Survey Contínuo", L,
-        [var_ds(), var_query("bc", "Equipamento",
-                             "label_values(rajant_gps_lat, bc)")],
-        "Cobertura observada pela frota móvel em movimento. Base do "
-        "--survey-do-prometheus.",
-        janela="now-24h")
-
-
-# ══════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     dashes = {
         "rajant-visao-geral.json": dash_visao_geral,
@@ -1726,7 +1464,6 @@ if __name__ == "__main__":
         "rajant-ethernet.json":    dash_ethernet,
         "rajant-saude.json":       dash_saude,
         "rajant-coletor.json":     dash_coletor,
-        "rajant-survey.json":      dash_survey,
     }
     for nome, fn in dashes.items():
         d = fn()

@@ -115,9 +115,8 @@ correta. Sem nenhum dos dois → `None`, não 0.
 
 O State devolve a posição que o módulo tem **no momento da consulta**. Se o GPS
 atualiza a 1 Hz e se pergunta a 5 Hz, quatro das cinco respostas repetem a mesma
-posição. Sem `gpsTime` isso é invisível e vira ponto duplicado no mapa; com ele,
-dá para não gravar amostra cuja posição não mudou — e para **medir** o intervalo
-de atualização do módulo em vez de supor.
+posição. Sem `gpsTime` isso é invisível; com ele, dá para saber se a posição é
+nova e **medir** o intervalo de atualização do módulo em vez de supor.
 
 > O `Gps.proto` declara `optional float gpsTime = 1;` e **não diz a unidade**.
 > `gps_time_para_segundos()` discrimina entre hora NMEA `hhmmss.ss` e época Unix,
@@ -129,22 +128,24 @@ de atualização do módulo em vez de supor.
 
 `State.Peer` **não tem** `name` nem `serialNumber`. Os campos são, no
 `State.proto`: `mac, enabled, cost, rate, rssi, signal, age, stats, encapId,
-ipv4Address`. O MeshMapper mostra nome e série porque resolve por fora — e a
-chave é o `encapId`, que é a **parte numérica do número de série**:
+ipv4Address` — e `ipv4Address` é opcional. Ferramentas como o MeshMapper
+mostram nome e série porque resolvem por fora, e a chave é o `encapId`, que é
+a **parte numérica do número de série**:
 
 | serial | encapId | nome |
 |---|---|---|
 | `ES1-2450CS-113187` | `113187` | ERB-11 L1 |
 | `FE1-2255B-107805` | `107805` | ERB-02 |
 
-Verificado nos **40 de 40** vizinhos da captura real da ERM-12; há teste que
-refaz a conferência sobre `exemplos/meshmapper_repetidora.json`.
+Verificado nos 35 vizinhos com número de série de uma captura real da
+ERM-12; os pares estão no teste (`TestIdentidadeDoVizinho`).
 
-O outro lado da chave é `State.Manufacturer.serial` (uint32), agora lido como
-`serial_num`. Atenção: `manufacturer` é o campo **190**, um ramo à parte de
-`gps`/`wireless`/`system` — `CAMINHOS_ESTADO` não o pede, então numa coleta
-filtrada ele vem vazio. Como serial e modelo não mudam, o certo é ler uma vez
-por rádio e guardar.
+O outro lado da chave é `State.Manufacturer.serial` (uint32), lido como
+`serial_num` (`manufacturer` é o campo **190**, um ramo à parte de
+`gps`/`wireless`/`system`; o exportador lê o State inteiro, então ele vem). A
+cada coleta boa o exportador guarda `serial_num → nome`; vizinho que chega só
+com MAC é nomeado pelo `encapId`. É isso que deixa o filtro de tag valer
+também para os enlaces (abaixo, §6).
 
 `channel` e `frequency` que o MeshMapper mostra por vizinho vêm do **rádio pai**
 (`State.Wireless.channel`), não do peer.
@@ -245,6 +246,13 @@ Rajant já é medido acima do piso de ruído.
 
 `txpower` só existe em `State.Wireless` (rádio local), já publicado em
 `rajant_radio_txpower_dbm`. A potência do outro lado do enlace não trafega.
+
+**Rótulo `peer`:** é a **tag** do vizinho (ex.: `ERM-22 PTP CAM`), resolvida
+pelo IP do peer ou pelo `encapId`. Vizinho sem tag — IP sem nome, rádio que
+não é da frota — não vira série. Antes o rótulo era o IP, e o Grafana
+mostrava `10.188.99.217` como se fosse equipamento. Vizinho que saiu da tabela
+de peers tem as séries **retiradas** do `/metrics` na coleta seguinte, em vez
+de ficar repetindo a última leitura.
 
 ---
 

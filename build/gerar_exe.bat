@@ -43,7 +43,7 @@ echo.
 echo [2/5] Instalando dependencias... ^(alguns minutos^)
 echo       saida detalhada indo para o log
 python -m pip install --upgrade pip >> "%LOG%" 2>&1
-python -m pip install pyinstaller prometheus_client matplotlib numpy scipy python-pptx openpyxl lxml >> "%LOG%" 2>&1
+python -m pip install pyinstaller prometheus_client python-pptx openpyxl lxml >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo   ERRO ao instalar as dependencias.
     goto :erro
@@ -58,8 +58,8 @@ REM  grpcio 1.56.2 nao tem wheel para Python 3.12+: instalar as
 REM  dependencias declaradas falharia tentando compilar C++.
 REM
 REM  NAO junte estas linhas com as do passo 2: o --no-deps vale para o
-REM  COMANDO INTEIRO, e o matplotlib entraria sem packaging, pyparsing
-REM  e pillow. O erro so apareceria depois, ao gerar a primeira imagem.
+REM  COMANDO INTEIRO, e o python-pptx entraria sem pillow e XlsxWriter.
+REM  O erro so apareceria depois, ao gerar o primeiro PPT.
 set "PASSO=instalar a rajant-api"
 echo.
 echo [3/5] Instalando a rajant-api e o protobuf...
@@ -156,7 +156,7 @@ echo  Para subir sozinho com o Windows ^(exportador + Prometheus + Grafana,
 echo  em segundo plano^): botao direito em instalar_inicializacao.bat ^>
 echo  Executar como administrador.
 echo.
-echo  Sem argumento, o programa SOBE O SERVICO e fica rodando - nao e
+echo  Sem argumento, o programa sobe o exportador e fica rodando - nao e
 echo  travamento. Para so testar:  rajant_monitor.exe --help
 echo ====================================================================
 echo.

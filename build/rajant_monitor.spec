@@ -5,21 +5,22 @@
 # Escolhas que não são óbvias, todas verificadas construindo e RODANDO o
 # binário (não só compilando):
 #
-#  * onedir, não onefile. Em onefile os ~200 MB de scipy/matplotlib são
-#    extraídos para o temp a cada inicialização, o que atrasa a subida do
-#    serviço; e antivírus corporativo costuma implicar com o extrator.
+#  * onedir, não onefile. Em onefile tudo é extraído para o temp a cada
+#    inicialização, o que atrasa a subida do serviço; e antivírus
+#    corporativo costuma implicar com o extrator.
 #  * collect_data('pptx'): python-pptx carrega templates/*.xml e .emf do
 #    disco. Sem isso, Presentation() estoura só na hora de gerar o PPT —
 #    ou seja, semanas depois, na frente do cliente.
-#  * collect_data('matplotlib'): matplotlibrc e as fontes.
 #  * rajant_api em hiddenimports: é importada dentro de try/except, então
 #    a análise estática do PyInstaller não a enxerga.
-#  * excludes de GUI: tkinter/Qt entram de carona por matplotlib e somam
-#    centenas de MB sem nenhum uso — o programa não tem interface gráfica.
+#  * excludes: matplotlib/numpy/scipy eram do site survey, que saiu; se
+#    estiverem instalados na máquina do build, entrariam de carona (openpyxl
+#    tenta importar numpy) e somariam ~200 MB sem uso. tkinter/Qt idem — o
+#    programa não tem interface gráfica.
 
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = collect_data_files("pptx") + collect_data_files("matplotlib")
+datas = collect_data_files("pptx")
 
 # O painel HTML fica FORA do executável de propósito: é editável sem
 # recompilar, que é a razão de ele existir. Copie a pasta painel/ para o
@@ -34,7 +35,8 @@ a = Analysis(
     hiddenimports=["rajant_api", "servico_rajant"],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6",
+    excludes=["matplotlib", "numpy", "scipy",
+              "tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6",
               "IPython", "jupyter", "notebook", "pytest", "sphinx"],
     noarchive=False,
 )

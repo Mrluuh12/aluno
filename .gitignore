@@ -4,21 +4,15 @@
 # Relatórios gerados.
 # Saída do programa: criada no diretório ATUAL, ao lado de onde ele roda.
 *.bundle
-*.kmz
 *.pyc
 *.xlsx
 *.zip
 Relatorio_Semanal_Rede_*.pptx
-Site_Survey_*.pptx
 __pycache__/
 build/log_build.txt
 config.ini
 dist/
-fundo_cache/
-kmz_extraido/
 rajant_monitor.log
-site_survey_erro.txt
-surveys.db
 servico.log*
 servico.pid
 logs/
