@@ -5108,10 +5108,13 @@ def main():
         description="Rajant Monitor — exporter Prometheus + relatorios Excel/PPT",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="segundo plano (exportador + Prometheus + Grafana):\n"
-               "  --servico            sobe e vigia os tres (o que a tarefa do Windows roda)\n"
-               "  --instalar-servico   cria a tarefa que sobe tudo com o Windows (admin)\n"
+               "  --servico            sobe e vigia os tres, nesta janela\n"
+               "  --iniciar            o mesmo, oculto, e devolve o prompt\n"
+               "  --instalar-usuario   sobe tudo no login deste usuario (sem admin)\n"
+               "  --remover-usuario    tira do login\n"
+               "  --instalar-servico   tarefa que sobe tudo com o Windows (admin)\n"
                "  --remover-servico    apaga a tarefa\n"
-               "  --status             o que esta rodando\n"
+               "  --status             o que esta rodando e o que sobe sozinho\n"
                "  --parar              para tudo")
     ap.add_argument("--seed"); ap.add_argument("--password")
     # Maiúsculas ou minúsculas: a rajant-api só conhece VIEW/CO/ADMIN e

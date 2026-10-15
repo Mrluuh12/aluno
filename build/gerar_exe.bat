@@ -152,9 +152,10 @@ echo  PRONTO: dist\rajant_monitor\rajant_monitor.exe
 echo.
 echo  config.ini, logs e cache ficam SEMPRE ao lado do executavel.
 echo.
-echo  Para subir sozinho com o Windows ^(exportador + Prometheus + Grafana,
-echo  em segundo plano^): botao direito em instalar_inicializacao.bat ^>
-echo  Executar como administrador.
+echo  Para subir sozinho ^(exportador + Prometheus + Grafana, em segundo
+echo  plano^), copie dist\rajant_monitor para uma pasta sua e rode:
+echo    sem administrador:  instalar_inicializacao_usuario.bat ^(no login^)
+echo    com administrador:  instalar_inicializacao.bat ^(com a maquina^)
 echo.
 echo  Sem argumento, o programa sobe o exportador e fica rodando - nao e
 echo  travamento. Para so testar:  rajant_monitor.exe --help

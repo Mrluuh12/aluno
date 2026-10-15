@@ -878,6 +878,119 @@ class TestServicoSegundoPlano(unittest.TestCase):
         self.assertLess(fonte.index("servico_rajant.executar"),
                         fonte.index("ap.parse_args()"))
 
+    # ── sem administrador (campo, 15/10/2026: "não tenho acesso ao
+    # administrador na máquina") ──────────────────────────────────────
+    def test_logon_grava_o_comando_entre_aspas(self):
+        # Pasta com espaço: sem aspas o Windows tentaria abrir "C:\Rajant".
+        exe = r"C:\Rajant Monitor\rajant_monitor.exe"
+        with mock.patch.object(self.sr, "comando_do_exportador",
+                               return_value=[exe]):
+            linha = self.sr.linha_de_inicio()
+        self.assertEqual(linha, f'"{exe}" --iniciar')
+
+    def test_instalar_usuario_grava_no_logon_e_ja_inicia(self):
+        gravado = []
+        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
+             mock.patch.object(self.sr, "_run_gravar", gravado.append), \
+             mock.patch.object(self.sr, "iniciar", return_value=0) as ini, \
+             mock.patch.object(self.sr, "linha_de_inicio",
+                               return_value='"C:\\rm\\rajant_monitor.exe" --iniciar'):
+            self.assertEqual(self.sr.instalar_usuario(self.tmp), 0)
+        self.assertEqual(gravado, ['"C:\\rm\\rajant_monitor.exe" --iniciar'])
+        ini.assert_called_once()
+
+    def test_instalar_usuario_recusa_pasta_sem_gravacao(self):
+        # Program Files sem administrador: o monitor nao conseguiria gravar
+        # config.ini nem log, e morreria calado num console escondido.
+        import io, contextlib
+        saida = io.StringIO()
+        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
+             mock.patch.object(self.sr, "pasta_gravavel", return_value=False), \
+             mock.patch.object(self.sr, "_run_gravar") as grava, \
+             contextlib.redirect_stdout(saida):
+            self.assertEqual(self.sr.instalar_usuario(self.tmp), 1)
+        grava.assert_not_called()
+        self.assertIn("não aceita gravação", saida.getvalue())
+
+    def test_remover_usuario_para_e_apaga(self):
+        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
+             mock.patch.object(self.sr, "_run_apagar", return_value=True) as apaga, \
+             mock.patch.object(self.sr, "parar_tudo") as para:
+            self.sr.remover_usuario(self.tmp)
+        apaga.assert_called_once(); para.assert_called_once()
+
+    def test_iniciar_abre_o_supervisor_oculto_e_volta(self):
+        with mock.patch.object(self.sr.subprocess, "Popen") as po:
+            po.return_value.pid = 4321
+            self.assertEqual(self.sr.iniciar(self.tmp), 0)
+        args, kw = po.call_args
+        self.assertEqual(args[0][-1], "--servico")
+        self.assertEqual(kw["cwd"], str(self.tmp))
+        self.assertIs(kw["stdout"], self.sr.subprocess.DEVNULL)
+
+    def test_iniciar_nao_duplica_o_supervisor(self):
+        (self.tmp / "servico.pid").write_text(json.dumps({"supervisor": os.getpid()}))
+        with mock.patch.object(self.sr.subprocess, "Popen") as po:
+            self.assertEqual(self.sr.iniciar(self.tmp), 0)
+        po.assert_not_called()
+
+    def test_pid_gravado_antes_da_espera_inicial(self):
+        # Nos 20 s de espera ao ligar, um segundo --iniciar abriria outro
+        # supervisor e o --parar nao acharia nada.
+        import threading
+        t = threading.Thread(target=self.sr.rodar, daemon=True,
+                             args=(self.cfg, self.tmp),
+                             kwargs=dict(voltas=1, intervalo=0.1, espera_inicial=1))
+        t.start()
+        fim = time.time() + 0.8
+        while time.time() < fim and not (self.tmp / "servico.pid").exists():
+            time.sleep(0.05)
+        d = json.loads((self.tmp / "servico.pid").read_text())
+        self.assertEqual(d["supervisor"], os.getpid())
+        t.join(10)
+
+    def test_aviso_quando_o_grafana_esta_em_pasta_sem_gravacao(self):
+        with mock.patch.object(self.sr, "pasta_gravavel",
+                               side_effect=lambda p: "grafana" not in str(p)):
+            _, avisos = self.sr.montar_servicos(self.cfg, self.tmp)
+        self.assertEqual(len(avisos), 1)
+        self.assertIn("Grafana", avisos[0])
+        self.assertIn("zip", avisos[0])
+
+    def test_pasta_gravavel(self):
+        self.assertTrue(self.sr.pasta_gravavel(self.tmp / "nova"))
+        self.assertFalse(list(self.tmp.glob("nova/.teste_gravacao_*")))
+        # Caminho que não pode existir (um arquivo no meio): falha de
+        # gravação vira False, não exceção — vale até rodando como root.
+        (self.tmp / "arquivo").write_text("x")
+        self.assertFalse(self.sr.pasta_gravavel(self.tmp / "arquivo" / "sub"))
+
+    def test_status_diz_o_que_sobe_sozinho(self):
+        import io, contextlib
+        for ini, esperado in ((["logon de mina"], "Inicialização: logon de mina"),
+                              ([], "NENHUMA")):
+            saida = io.StringIO()
+            with mock.patch.object(self.sr, "inicializacao", return_value=ini), \
+                 contextlib.redirect_stdout(saida):
+                self.sr.status(self.cfg, self.tmp)
+            self.assertIn(esperado, saida.getvalue())
+
+    def test_logon_apontando_para_pasta_antiga_e_avisado(self):
+        with mock.patch.object(self.sr, "EH_WINDOWS", True), \
+             mock.patch.object(self.sr, "_tarefa_existe", return_value=False), \
+             mock.patch.object(self.sr, "_run_ler",
+                               return_value='"D:\\velho\\rajant_monitor.exe" --iniciar'), \
+             mock.patch.object(self.sr, "linha_de_inicio",
+                               return_value='"C:\\novo\\rajant_monitor.exe" --iniciar'):
+            ini = self.sr.inicializacao()
+        self.assertEqual(len(ini), 1)
+        self.assertIn("outro lugar", ini[0])
+
+    def test_acoes_novas_sao_despachadas(self):
+        for a in ("--iniciar", "--instalar-usuario", "--remover-usuario"):
+            self.assertIn(a, self.sr.ACOES)
+            self.assertIn(f'acao == "{a}"', inspect.getsource(self.sr.executar))
+
 
 class TestRobustez(unittest.TestCase):
 

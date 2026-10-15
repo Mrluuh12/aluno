@@ -13,6 +13,9 @@ if errorlevel 1 (
     echo.
     echo  Precisa de administrador: botao direito ^> Executar como administrador.
     echo.
+    echo  Sem administrador nesta maquina? Use instalar_inicializacao_usuario.bat
+    echo  ^(sobe no login do seu usuario, sem pedir administrador^).
+    echo.
     pause
     exit /b 1
 )

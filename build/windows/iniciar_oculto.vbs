@@ -1,10 +1,9 @@
-' Sobe o Rajant Monitor em segundo plano, sem janela, no login do usuario.
+' Sobe o Rajant Monitor agora, em segundo plano, sem janela.
 '
-' Alternativa a tarefa agendada (instalar_inicializacao.bat), para quando
-' nao ha acesso de administrador: crie um atalho para este arquivo em
+' Para subir sozinho no login sem administrador, o caminho normal e o
+' instalar_inicializacao_usuario.bat. Este arquivo e a reserva para quando
+' a TI bloquear aquela forma: crie um atalho para ele em
 '     Win+R  ->  shell:startup
-' A diferenca: a tarefa agendada sobe com o Windows, mesmo sem login; este
-' arquivo so sobe quando alguem entra na maquina.
 Set fso = CreateObject("Scripting.FileSystemObject")
 pasta = fso.GetParentFolderName(WScript.ScriptFullName)
 Set sh = CreateObject("WScript.Shell")

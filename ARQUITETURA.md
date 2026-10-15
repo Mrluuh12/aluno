@@ -58,12 +58,12 @@ foi descontinuado e saiu do código; está no histórico do git.
 
 | | |
 |---|---|
-| linhas | ~5300 (`rajant_monitor.py`) + ~560 (`servico_rajant.py`) |
+| linhas | ~5300 (`rajant_monitor.py`) + ~740 (`servico_rajant.py`) |
 | funções no topo | 101 |
 | classes | 6 |
 | famílias de métrica | 101 |
 | endpoints HTTP | 5 |
-| testes | 177, em 31 classes |
+| testes | 189, em 31 classes |
 | comentários | ~13% das linhas |
 
 Os comentários quase todos registram uma armadilha concreta. A convenção é
@@ -424,10 +424,38 @@ supervisor seria derrubado na quinta-feira. O XML põe:
 Como SYSTEM a pasta corrente é `C:\Windows\System32`; por isso o `main()`
 faz `chdir` para a pasta do `.exe` antes de tudo.
 
+### Sem administrador: o login do usuário
+
+`--instalar-usuario` (pelo `instalar_inicializacao_usuario.bat`) grava o
+valor **Rajant Monitor** em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+(`winreg`, sem ferramenta externa): o Windows roda o comando no login daquele
+usuário, e a chave é dele — não pede administrador. O valor é
+`linha_de_inicio()`, o `.exe` entre aspas (a pasta pode ter espaço) com
+`--iniciar`.
+
+`--iniciar` abre `--servico` com o mesmo `_abrir_oculto()` dos filhos e
+volta na hora: a janela do `.exe` de console pisca e fecha, o supervisor fica
+num console escondido. Se o `servico.pid` aponta para um supervisor vivo, não
+abre outro.
+
+Antes de gravar, `pasta_gravavel()` confere a pasta do `.exe` **criando um
+arquivo de verdade**: `os.access` no Windows só olha o atributo
+somente-leitura, e `Program Files` sem administrador passa nele e falha na
+hora de gravar — o supervisor morreria calado num console escondido. A mesma
+conferência vira aviso para as pastas `data\` do Prometheus e do Grafana, que
+os dois gravam dentro da própria instalação.
+
+Limites, que não têm contorno sem administrador: só roda depois do login, e
+o logoff encerra tudo. `--status` diz o que está configurado (tarefa, login
+ou nenhum) e avisa se o valor do login aponta para outra pasta — o monitor
+copiado para outro lugar, com o login ainda abrindo a versão antiga.
+
 ### O supervisor
 
-`rodar()`: instância única (pelo `servico.pid`), espera `espera_inicial_s`,
-monta os serviços e confere a cada 5 s.
+`rodar()`: instância única (pelo `servico.pid`), grava o pid **antes** da
+espera inicial (nesses 20 s um segundo `--iniciar` abriria outro supervisor,
+e o `--parar` não acharia nada), espera `espera_inicial_s`, monta os
+serviços e confere a cada 5 s.
 
 `Servico.verificar()`:
 
@@ -668,8 +696,9 @@ Chaves antigas ignoradas, com aviso no log: `manter_ultimo_valor_s`,
 | flag | o que faz |
 |---|---|
 | (nenhuma) | exportador + página web |
-| `--servico` / `--status` / `--parar` | supervisor (§10) |
-| `--instalar-servico` / `--remover-servico` | a tarefa do Windows |
+| `--servico` / `--iniciar` / `--status` / `--parar` | supervisor (§10) |
+| `--instalar-usuario` / `--remover-usuario` | sobe no login, sem administrador |
+| `--instalar-servico` / `--remover-servico` | a tarefa do Windows (administrador) |
 | `--seed` / `--role` / `--password` / `--port` | rede e credenciais |
 | `--interval` / `--metrics-port` / `--porta-relatorio` | ciclo e portas |
 | `--sem-relatorios` | sobe só o exporter |
@@ -683,7 +712,7 @@ Chaves antigas ignoradas, com aviso no log: `manter_ultimo_valor_s`,
 
 ## 18. Testes
 
-`teste_parser.py`: **177 testes em 31 classes**, rodando **sem rádio e sem a
+`teste_parser.py`: **189 testes em 31 classes**, rodando **sem rádio e sem a
 `rajant_api`** (há um stub no topo). Com a biblioteca instalada, roda também
 os testes do protocolo real contra um rádio simulado; sem ela, esses são
 pulados.
@@ -789,7 +818,10 @@ rádios.
 | linha reta no Grafana | `segurar_serie_s` alto | §6 |
 | rádio não aparece | nome sem tag | log `ignorado: nome sem tag`, `rajant_bc_sem_tag` (§7) |
 | "autenticacao falhou" em todos | papel inexistente ou senha | a mensagem diz qual (§4) |
-| nada sobe depois de reiniciar | tarefa não criada, ou caminhos | `--status`, `servico.log` (§10) |
+| nada sobe depois de reiniciar | inicialização não criada, ou caminhos | `--status`, `servico.log` (§10) |
+| sem administrador na máquina | — | `instalar_inicializacao_usuario.bat`: sobe no login (§10) |
+| sobe no login mas não grava log | pasta sem permissão (Program Files) | copie para uma pasta do usuário (§10) |
+| Grafana não sobe sem admin | instalado pelo `.msi` | versão zip numa pasta do usuário |
 | Grafana não sobe pelo supervisor | já é serviço do Windows | `iniciar_grafana = false` |
 | `config.ini` em `System32` | versão antiga do exe | o atual faz `chdir` para a pasta dele |
 | 150 BCs viram 600 | agrupamento de nó físico | `_publicar_identidade` (§7) |

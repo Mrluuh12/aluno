@@ -3,9 +3,12 @@ Modo serviço do rajant_monitor: sobe Prometheus, Grafana e o exportador em
 segundo plano, sem janela, e os reergue se caírem.
 
     rajant_monitor.exe --servico            roda o supervisor (fica no ar)
+    rajant_monitor.exe --iniciar            sobe o supervisor oculto e volta
     rajant_monitor.exe --parar              derruba o supervisor e os três
     rajant_monitor.exe --status             o que está no ar, e em que porta
-    rajant_monitor.exe --instalar-servico   tarefa agendada: sobe com o Windows
+    rajant_monitor.exe --instalar-usuario   sobe no logon deste usuário (sem admin)
+    rajant_monitor.exe --remover-usuario    tira do logon
+    rajant_monitor.exe --instalar-servico   tarefa agendada: sobe com o Windows (admin)
     rajant_monitor.exe --remover-servico    tira a tarefa agendada
 
 A configuração fica em [servicos] do config.ini. Caminho vazio = procura
@@ -121,6 +124,15 @@ def raizes_de_instalacao():
     base = pasta_do_programa()
     r = [str(base), str(base.parent)]
     if EH_WINDOWS:
+        # Sem administrador, Prometheus e Grafana ficam na pasta do usuário
+        # (zip extraído em Downloads, na Área de Trabalho, em Documentos) ou
+        # em AppData\Local\Programs, onde instalador "só para mim" põe.
+        perfil = os.environ.get("USERPROFILE")
+        local = os.environ.get("LOCALAPPDATA")
+        if perfil:
+            r.append(perfil)
+        if local:
+            r.append(os.path.join(local, "Programs"))
         for drive in ("C:\\", "D:\\"):
             r += [drive, os.path.join(drive, "Program Files"),
                   os.path.join(drive, "Program Files (x86)")]
@@ -210,6 +222,21 @@ def matar(pid):
     except OSError:
         try: os.kill(int(pid), signal.SIGTERM)
         except OSError: pass
+
+
+def pasta_gravavel(pasta):
+    """Dá para criar arquivo aqui? `os.access` não serve no Windows: ele
+    olha só o atributo somente-leitura, não a permissão da pasta — e
+    Program Files sem administrador passa no `os.access` e falha na hora
+    de gravar."""
+    try:
+        Path(pasta).mkdir(parents=True, exist_ok=True)
+        teste = Path(pasta) / f".teste_gravacao_{os.getpid()}"
+        teste.write_bytes(b"")
+        teste.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _abrir_oculto():
@@ -329,6 +356,11 @@ def montar_servicos(cfg, base=None):
             sv.append(Servico("Prometheus", [exe] + args, str(Path(exe).parent),
                               cfg.get("servicos", "prometheus_porta", fallback="9090"),
                               logs / "prometheus.log"))
+            # Ele grava as séries em data\ dentro da própria pasta.
+            if not pasta_gravavel(Path(exe).parent / "data"):
+                avisos.append(f"Prometheus em pasta sem permissão de gravação "
+                              f"({Path(exe).parent}): ele grava em data\\ e não "
+                              f"vai subir. Extraia o zip numa pasta sua")
         else:
             avisos.append("Prometheus não encontrado: informe o caminho em "
                           "[servicos] prometheus_exe do config.ini")
@@ -338,6 +370,11 @@ def montar_servicos(cfg, base=None):
             sv.append(Servico("Grafana", comando_grafana(exe, raiz), raiz,
                               cfg.get("servicos", "grafana_porta", fallback="3000"),
                               logs / "grafana.log"))
+            if not pasta_gravavel(Path(raiz) / "data"):
+                avisos.append(f"Grafana em pasta sem permissão de gravação "
+                              f"({raiz}): se ele não for serviço do Windows, "
+                              f"não vai subir. Use o zip (standalone) numa "
+                              f"pasta sua")
         else:
             avisos.append("Grafana não encontrado: informe o caminho em "
                           "[servicos] grafana_exe do config.ini")
@@ -387,6 +424,10 @@ def rodar(cfg, base=None, voltas=None, intervalo=5.0, espera_inicial=None):
     if ant and ant != os.getpid() and pid_vivo(ant):
         log.info(f"já há um supervisor no ar (pid {ant}); saindo")
         return 1
+    # Já, e não só depois da espera inicial: nesses 20 s um segundo
+    # --iniciar não veria ninguém e abriria outro supervisor, e o --parar
+    # não acharia o que parar.
+    _gravar_pid([], base)
     servicos, avisos = montar_servicos(cfg, base)
     log.info("=" * 60)
     log.info(f"supervisor no ar (pid {os.getpid()}) em {base}")
@@ -459,6 +500,10 @@ def status(cfg, base=None):
     servicos, avisos = montar_servicos(cfg, base)
     for a in avisos:
         print(f"  aviso: {a}")
+    ini = inicializacao()
+    if ini is not None:
+        print("Inicialização: " + ("; ".join(ini) if ini else
+              "NENHUMA — depois de reiniciar, nada sobe sozinho"))
     return 0
 
 
@@ -524,7 +569,9 @@ def instalar_tarefa(base=None):
     print((r.stdout or "") + (r.stderr or ""))
     if r.returncode != 0:
         print("Não foi possível criar a tarefa. Rode como administrador "
-              "(botão direito > Executar como administrador).")
+              "(botão direito > Executar como administrador).\n"
+              "Sem administrador nesta máquina: instalar_inicializacao_usuario.bat "
+              "(sobe no logon do seu usuário).")
         return r.returncode
     subprocess.run(["schtasks", "/Run", "/TN", NOME_TAREFA], capture_output=True)
     print(f"Tarefa '{NOME_TAREFA}' criada e iniciada. Ela sobe sozinha a cada "
@@ -542,8 +589,130 @@ def remover_tarefa(base=None):
     return r.returncode
 
 
-ACOES = {"--servico", "--parar", "--status", "--instalar-servico",
-         "--remover-servico"}
+# ── inicialização sem administrador ──────────────────────────
+# HKCU\...\Run: o Windows roda o comando no logon DESTE usuário. Não pede
+# administrador — é a chave que Teams e OneDrive usam para abrir com o
+# Windows. Limite: só roda depois do login, e o logoff encerra tudo.
+CHAVE_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def linha_de_inicio():
+    """O comando gravado no Run. Entre aspas: a pasta pode ter espaço."""
+    return subprocess.list2cmdline(comando_do_exportador() + ["--iniciar"])
+
+
+def _run_ler():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CHAVE_RUN) as k:
+            return winreg.QueryValueEx(k, NOME_TAREFA)[0]
+    except OSError:
+        return None
+
+
+def _run_gravar(valor):
+    import winreg
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, CHAVE_RUN, 0,
+                            winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, NOME_TAREFA, 0, winreg.REG_SZ, valor)
+
+
+def _run_apagar():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CHAVE_RUN, 0,
+                            winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, NOME_TAREFA)
+        return True
+    except OSError:
+        return False
+
+
+def _tarefa_existe():
+    r = subprocess.run(["schtasks", "/Query", "/TN", NOME_TAREFA],
+                       capture_output=True, creationflags=0x08000000)
+    return r.returncode == 0
+
+
+def inicializacao():
+    """O que faz o monitor subir sozinho, em texto. None fora do Windows."""
+    if not EH_WINDOWS:
+        return None
+    achados = []
+    try:
+        if _tarefa_existe():
+            achados.append(f"tarefa '{NOME_TAREFA}' (sobe com a máquina)")
+    except OSError:
+        pass
+    valor = _run_ler()
+    if valor:
+        txt = f"logon de {os.environ.get('USERNAME', 'este usuário')}"
+        if valor != linha_de_inicio():
+            # Pasta movida ou copiada: o logon abriria a versão antiga.
+            txt += f" — ATENÇÃO, aponta para outro lugar: {valor}"
+        achados.append(txt)
+    return achados
+
+
+def iniciar(base=None):
+    """Sobe o supervisor oculto e volta na hora. É o que o logon chama: a
+    janela deste processo abre e fecha, e o supervisor fica num console
+    escondido."""
+    base = Path(base or pasta_do_programa())
+    ant = _ler_pid(base).get("supervisor")
+    if ant and pid_vivo(ant):
+        print(f"O supervisor já está no ar (pid {ant}).")
+        return 0
+    flags, si = _abrir_oculto()
+    p = subprocess.Popen(comando_do_exportador() + ["--servico"], cwd=str(base),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=flags,
+                         startupinfo=si, start_new_session=not EH_WINDOWS)
+    print(f"Supervisor iniciado em segundo plano (pid {p.pid}). "
+          f"Registro: {base / ARQ_LOG}")
+    return 0
+
+
+def instalar_usuario(base=None):
+    base = Path(base or pasta_do_programa())
+    if not EH_WINDOWS:
+        print("A inicialização no logon é do Windows. No Linux, use um "
+              "serviço do systemd --user chamando:  rajant_monitor.py --servico")
+        return 1
+    if not pasta_gravavel(base):
+        print(f"Esta pasta não aceita gravação pelo seu usuário: {base}\n"
+              f"O monitor grava config.ini, logs e cache ao lado do .exe. Copie "
+              f"a pasta inteira para um lugar seu, por exemplo "
+              f"{Path(os.environ.get('USERPROFILE', 'C:/Users/voce')) / 'RajantMonitor'}, "
+              f"e rode de lá.")
+        return 1
+    linha = linha_de_inicio()
+    try:
+        _run_gravar(linha)
+    except OSError as e:
+        print(f"Não foi possível gravar a inicialização do usuário: {e}")
+        return 1
+    print(f"Pronto: o Rajant Monitor sobe sozinho quando "
+          f"{os.environ.get('USERNAME', 'este usuário')} entrar no Windows, "
+          f"sem administrador.\n"
+          f"  Comando: {linha}\n"
+          f"  Atenção: com a máquina ligada e ninguém logado, nada roda; "
+          f"logoff encerra tudo. Bloquear a tela (Win+L) não para nada.")
+    return iniciar(base)
+
+
+def remover_usuario(base=None):
+    parar_tudo(base)
+    if not EH_WINDOWS:
+        return 0
+    print("Inicialização no logon removida." if _run_apagar()
+          else "Não havia inicialização no logon.")
+    return 0
+
+
+ACOES = {"--servico", "--iniciar", "--parar", "--status",
+         "--instalar-usuario", "--remover-usuario",
+         "--instalar-servico", "--remover-servico"}
 
 
 def executar(acao, cfg_loader):
@@ -552,6 +721,12 @@ def executar(acao, cfg_loader):
     os.chdir(base)
     if acao == "--parar":
         return parar_tudo(base)
+    if acao == "--iniciar":
+        return iniciar(base)
+    if acao == "--instalar-usuario":
+        return instalar_usuario(base)
+    if acao == "--remover-usuario":
+        return remover_usuario(base)
     if acao == "--instalar-servico":
         return instalar_tarefa(base)
     if acao == "--remover-servico":
