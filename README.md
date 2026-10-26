@@ -7,10 +7,11 @@ Binário único: `rajant_monitor.py` (no Windows, `rajant_monitor.exe`). Sem
 framework, sem serviço externo além de Prometheus e Grafana. Roda em rede
 isolada.
 
-> O site survey foi descontinuado: saíram o `site_survey.exe`, a leitura de
-> arquivos do MeshMapper, a aba Survey da página, os comandos `--survey-*`,
-> os slides de survey do semanal e o dashboard *Site Survey Contínuo*. O
-> código continua no histórico do git.
+> O site survey saiu do monitor: não há mais aba Survey na página, comandos
+> `--survey-*`, slides de survey no semanal nem o dashboard *Site Survey
+> Contínuo*. Ele é um projeto separado, na pasta `survey/` (o
+> `site_survey.exe`, com coleta ao vivo e leitura do MeshMapper) — ver
+> `survey/LEIAME_SURVEY.md`. Os dois projetos não dependem um do outro.
 
 ## Por onde começar
 

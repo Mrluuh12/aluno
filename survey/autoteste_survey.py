@@ -8,8 +8,8 @@ de campo:
 
     python autoteste_survey.py
 
-A suíte completa (629 testes) fica no projeto principal; aqui o objetivo
-é outro — provar que ESTA cópia, nesta máquina, gera o que promete.
+A suíte completa fica em teste_survey.py; aqui o objetivo é outro —
+provar que ESTA cópia, nesta máquina, gera o que promete.
 """
 import sys, io, zipfile, tempfile, shutil
 from pathlib import Path

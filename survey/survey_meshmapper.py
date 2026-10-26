@@ -37,7 +37,8 @@ EXTENSOES = [("Captura do MeshMapper", "*.kmz *.json *.csv"),
 # O TRABALHO — sem nada de interface, para poder ser testado
 # ══════════════════════════════════════════════════════════════
 def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
-          fazer_kmz=True, fazer_ppt=True, fazer_excel=True, aviso=print):
+          fazer_kmz=True, fazer_ppt=True, fazer_excel=True, aviso=print,
+          areas=None):
     """Lê as capturas e grava os relatórios. Devolve a lista de arquivos.
 
     `juntar=True` produz UM relatório com tudo — é o caso da campanha de
@@ -46,6 +47,9 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
 
     `aviso` recebe cada linha de progresso; a interface passa a própria
     função para escrever na janela.
+
+    `areas`: o KMZ/KML com as áreas demarcadas (ou a lista já lida). Sem
+    ele vale o [survey] areas do config; vazio nos dois, laudo sem áreas.
     """
     arquivos = [str(a) for a in arquivos]
     if not arquivos:
@@ -53,6 +57,10 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
     destino = Path(saida or ".").resolve()
     destino.mkdir(parents=True, exist_ok=True)
     cfg = rm.carregar_config(); rm.cfg_relatorio(cfg)
+    areas = rm.carregar_areas(areas, cfg)
+    if areas:
+        aviso(f"Áreas demarcadas: {len(areas)} em {areas[0]['arquivo']} — "
+              + ", ".join(a["nome"] for a in areas))
 
     if not juntar:
         feitos = []
@@ -66,7 +74,7 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
                 sub = destino / rm._slug_arquivo(Path(arq).stem)[:60]
                 sub.mkdir(parents=True, exist_ok=True)
                 feitos += _um(arq, sub, cfg, nome, bandas,
-                              fazer_kmz, fazer_ppt, fazer_excel, aviso)
+                              fazer_kmz, fazer_ppt, fazer_excel, aviso, areas)
             except Exception as e:
                 # Um arquivo ruim não pode levar os outros junto.
                 aviso(f"    ! falhou: {e}")
@@ -74,7 +82,7 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
 
     aviso(f"Lendo {len(arquivos)} arquivo(s)…")
     sid, sv, amostras, peers, origens = rm.importar_meshmapper_varios(
-        arquivos, nome=nome)
+        arquivos, nome=nome, areas=areas)
     for o in origens:
         if o["ok"]:
             aviso(f"  ok      {o['arquivo']} — {o.get('movel')}, "
@@ -82,20 +90,22 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
         else:
             aviso(f"  FALHOU  {o['arquivo']} — {o.get('erro')}")
     return _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
-                   fazer_kmz, fazer_ppt, fazer_excel, aviso)
+                   fazer_kmz, fazer_ppt, fazer_excel, aviso, areas)
 
 
-def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso):
-    sid, sv, amostras, peers = rm.importar_meshmapper(arq, nome=nome)
+def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso, areas=None):
+    sid, sv, amostras, peers = rm.importar_meshmapper(arq, nome=nome,
+                                                      areas=areas)
     sv["origens"] = [{"arquivo": Path(arq).name, "ok": True,
                       "movel": sv.get("movel"), "amostras": len(amostras),
                       "peers": len(peers), "inicio": sv.get("inicio"),
                       "fim": sv.get("fim")}]
     return _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
-                   kmz, ppt, xls, aviso)
+                   kmz, ppt, xls, aviso, areas)
 
 
-def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso):
+def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso,
+                   areas=None):
     """Um KMZ por banda. Devolve os arquivos gravados.
 
     2,4 e 5,8 GHz são malhas diferentes no mesmo terreno: num arquivo só,
@@ -116,7 +126,7 @@ def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso):
         try:
             dados, nome = rm.gerar_kml_survey(
                 sv, amostras, cfg=cfg, campos=campos, banda=b,
-                peers=(peers if com_viz else None))
+                peers=(peers if com_viz else None), areas=areas)
         except Exception as e:
             aviso(f"  ! KMZ de {b or 'todas as bandas'} não gerado: {e}")
             continue
@@ -126,7 +136,7 @@ def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso):
 
 
 def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
-            fazer_kmz, fazer_ppt, fazer_excel, aviso):
+            fazer_kmz, fazer_ppt, fazer_excel, aviso, areas=None):
     campos = rm.campos_com_medicao(amostras)
     faltando = [c for c in rm.CAMPOS_KMZ if c not in campos]
     dur = ((sv["fim"] - sv["inicio"]) / 60.0) if sv.get("fim") and sv.get("inicio") else 0
@@ -143,6 +153,7 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
     if sv.get("descartadas_parado"):
         aviso(f"  parado, descartadas  {sv['descartadas_parado']} "
               f"(uma leitura por parada)")
+    _aviso_areas(sv, amostras, aviso)
     aviso(f"  vizinhos lidos ..... {len(peers)}")
     aviso(f"  duração ............ {dur:.1f} min")
     aviso(f"  intervalo real ..... {rm._mm_intervalo_real(amostras)} s")
@@ -160,7 +171,7 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
     if fazer_kmz:
         if campos and andando:
             feitos += _kmz_por_banda(sv, amostras, peers, destino, cfg,
-                                     campos, aviso)
+                                     campos, aviso, areas)
         elif not campos:
             aviso("  ! sem grandeza medida: KMZ do trajeto não gerado")
         else:
@@ -191,6 +202,26 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
     for f in feitos:
         aviso(f"  → {f.name}")
     return feitos
+
+
+def _aviso_areas(sv, amostras, aviso):
+    """Quantas leituras ficaram em cada área e quantas saíram."""
+    info = rm.areas_do_survey(sv)
+    if not info:
+        return
+    aviso(f"  fora das áreas ..... {info['fora']} de {info['lidas']} "
+          f"leituras (descartadas)")
+    if info.get("sobrepostas"):
+        aviso(f"  ! {info['sobrepostas']} leitura(s) em duas áreas ao mesmo "
+              f"tempo: contadas na primeira do arquivo")
+    por = {}
+    for a in amostras:
+        por[a.get("area")] = por.get(a.get("area"), 0) + 1
+    for n in rm.ordem_das_areas(amostras, sv):
+        aviso(f"    {n} .. {por.get(n, 0)} amostras")
+    vazias = [n for n in info["ordem"] if not por.get(n)]
+    if vazias:
+        aviso(f"  sem leitura ........ {', '.join(vazias)}")
 
 
 def abrir_pasta(caminho):
@@ -441,6 +472,10 @@ def main():
                     help="um conjunto de relatórios por arquivo, em vez de "
                          "juntar tudo num só")
     ap.add_argument("--bandas", help="bandas a detalhar no PPT")
+    ap.add_argument("--areas", metavar="ARQ",
+                    help="KMZ/KML do Google Earth com as áreas demarcadas "
+                         "(um polígono por área; o nome do polígono é o da "
+                         "área). Leitura fora das áreas sai do laudo.")
     ap.add_argument("--sem-ppt", action="store_true")
     ap.add_argument("--sem-excel", action="store_true")
     ap.add_argument("--sem-kmz", action="store_true")
@@ -456,7 +491,8 @@ def main():
     bandas = [b.strip() for b in a.bandas.split(",")] if a.bandas else None
     try:
         feitos = gerar(a.arquivos, a.saida, a.nome, not a.separado, bandas,
-                       not a.sem_kmz, not a.sem_ppt, not a.sem_excel)
+                       not a.sem_kmz, not a.sem_ppt, not a.sem_excel,
+                       areas=a.areas)
         print(f"\n{len(feitos)} arquivo(s) gerado(s).")
     except Exception as e:
         print(f"\nERRO: {e}")

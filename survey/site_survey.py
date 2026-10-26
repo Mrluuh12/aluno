@@ -270,6 +270,50 @@ def main():
     for txt_, var in (("KMZ", v_kmz), ("PPT", v_ppt), ("Excel", v_xls)):
         ttk.Checkbutton(rod, text=txt_, variable=var).pack(side="left", padx=(14, 0))
 
+    # Áreas demarcadas (KMZ/KML do Google Earth, um polígono por área):
+    # valem para as duas abas. Vazio = laudo sem áreas.
+    rod_ar = ttk.Frame(jan, padding=(14, 2, 14, 0))
+    rod_ar.pack(side="bottom", fill="x")
+    ttk.Label(rod_ar, text="Áreas").pack(side="left")
+    v_areas = tk.StringVar(value=cfg.get("survey", "areas", fallback="").strip())
+    ttk.Entry(rod_ar, textvariable=v_areas, width=46).pack(side="left", padx=(25, 8))
+    lbl_areas = ttk.Label(rod_ar, text="", style="Fraco.TLabel")
+
+    def _ler_areas_da_tela(avisar=True):
+        """As áreas do campo, ou [] sem arquivo. None: arquivo com erro."""
+        cam = v_areas.get().strip()
+        if not cam:
+            lbl_areas.configure(text="laudo sem áreas")
+            return []
+        try:
+            ar = rm.ler_areas(cam)
+        except Exception as e:
+            lbl_areas.configure(text="arquivo de áreas com erro")
+            if avisar:
+                messagebox.showerror(TITULO, f"Áreas demarcadas:\n{e}")
+            return None
+        nomes = ", ".join(a["nome"] for a in ar)
+        lbl_areas.configure(text=f"{len(ar)} área(s): "
+                                 + (nomes if len(nomes) < 70 else nomes[:67] + "…"))
+        return ar
+
+    def escolher_areas():
+        f = filedialog.askopenfilename(
+            title="Áreas demarcadas (Google Earth)",
+            filetypes=[("Google Earth", "*.kmz *.kml"),
+                       ("Todos os arquivos", "*.*")])
+        if f:
+            v_areas.set(f)
+            if _ler_areas_da_tela() is None:
+                v_areas.set("")
+
+    ttk.Button(rod_ar, text="Escolher…", command=escolher_areas).pack(side="left")
+    ttk.Button(rod_ar, text="Sem áreas",
+               command=lambda: (v_areas.set(""), _ler_areas_da_tela())
+               ).pack(side="left", padx=(6, 0))
+    lbl_areas.pack(side="left", padx=(12, 0))
+    _ler_areas_da_tela(avisar=False)
+
     # ═══════════════════════ ABA COLETA ══════════════════════════
     if rm.Breadcrumb is None:
         ttk.Label(ab_col, style="Titulo.TLabel",
@@ -470,6 +514,9 @@ def main():
         if not est["arquivos"]:
             messagebox.showwarning(TITULO, "Escolha ao menos um arquivo.")
             return
+        areas = _ler_areas_da_tela()
+        if areas is None:
+            return
         b_ger.configure(state="disabled", text="Gerando…")
         txt.delete("1.0", "end")
         arqs = list(est["arquivos"]); juntar = v_juntar.get()
@@ -480,7 +527,8 @@ def main():
             try:
                 feitos = smm.gerar(arqs, alvo, juntar=juntar, fazer_kmz=kmz,
                                    fazer_ppt=ppt, fazer_excel=xls,
-                                   aviso=lambda t: fila.put(("log", t)))
+                                   aviso=lambda t: fila.put(("log", t)),
+                                   areas=areas)
                 fila.put(("pronto_arq", feitos))
             except Exception as e:
                 fila.put(("log", f"ERRO: {e}"))
@@ -534,6 +582,11 @@ def main():
                 messagebox.showwarning(TITULO, "Passo: um número maior que zero.")
                 return
             minutos = _minutos()
+            # Lidas AGORA: arquivo errado aparece antes da coleta, não
+            # depois dela.
+            areas = _ler_areas_da_tela()
+            if areas is None:
+                return
             c = col.Coleta(alvos, role=v_role.get(), senha=v_senha.get(),
                            porta=int(v_porta.get() or 2300), passo_m=passo,
                            aviso=lambda t: fila.put(("log", t)),
@@ -553,7 +606,7 @@ def main():
                     fila.put(("log", "gerando relatórios…"))
                     feitos = col.gravar_e_gerar(
                         c, alvo, fazer_kmz=kmz, fazer_ppt=ppt, fazer_excel=xls,
-                        aviso=lambda t: fila.put(("log", t)))
+                        aviso=lambda t: fila.put(("log", t)), areas=areas)
                     fila.put(("pronto_col", feitos))
                 except Exception as e:
                     fila.put(("log", f"ERRO: {e}"))

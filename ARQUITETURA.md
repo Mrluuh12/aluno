@@ -52,7 +52,7 @@ E um supervisor (`servico_rajant.py`) que sobe exportador, Prometheus e
 Grafana em segundo plano e os reergue se caírem.
 
 O site survey (captura ao vivo, leitura do MeshMapper, KMZ, deck próprio)
-foi descontinuado e saiu do código; está no histórico do git.
+saiu deste código e é um projeto separado, na pasta `survey/`.
 
 ### Números do código
 

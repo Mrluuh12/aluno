@@ -57,6 +57,12 @@ seeds                   = 10.188.96.140
 password                = anglomesh-view
 role                    = VIEW
 porta_bcapi             = 2300
+
+[survey]
+# Áreas demarcadas: KMZ ou KML do Google Earth com um polígono por área (o
+# nome do polígono é o nome da área). O laudo sai por área e a leitura
+# fora de todas elas é descartada. Vazio = laudo sem áreas.
+areas                   =
 """
 
 def carregar_config():
@@ -1820,7 +1826,8 @@ def _pior_primeiro(campo, n):
     return [((n - k) if alto else (k + 1)) * 1e-3 for k in range(n)]
 
 
-def calor_por_faixas(amostras, campo, raio_m=RAIO_CALOR_M, res_m=2.5):
+def calor_por_faixas(amostras, campo, raio_m=RAIO_CALOR_M, res_m=2.5,
+                     mascara=None):
     """Mapa de calor por FAIXA, para GroundOverlay.
 
     Cada pixel toma a faixa da legenda que reúne MAIS trecho medido a até
@@ -1834,6 +1841,9 @@ def calor_por_faixas(amostras, campo, raio_m=RAIO_CALOR_M, res_m=2.5):
     Contagem, não média: a cor é sempre uma faixa da régua. Empate vai
     para a pior. Onde só há leitura SEM valor (sem trace, por exemplo),
     cinza mais claro; onde não há leitura, transparente.
+
+    `mascara` (os polígonos de uma área) recorta a imagem: fora da área,
+    transparente — o calor de uma área não transborda para a vizinha.
 
     Devolve (png_bytes, (norte, sul, leste, oeste), n_leituras) ou None.
     """
@@ -1914,6 +1924,13 @@ def calor_por_faixas(amostras, campo, raio_m=RAIO_CALOR_M, res_m=2.5):
     sombra = (gaussian_filter(cobre.astype(np.float32), 3.0) * 0.28).astype(np.float32)
     rgb[~cobre] = 0
     a_fim = np.where(cobre, alfa, sombra)
+    if mascara:
+        # Só os pixels pintados: a imagem inteira passa de milhões.
+        ls, cs = np.nonzero(a_fim > 0)
+        if len(ls):
+            dentro = mascara_de_area((y1 - (ls + 0.5) * res) / ky,
+                                     (x0 + (cs + 0.5) * res) / kx, mascara)
+            a_fim[ls[~dentro], cs[~dentro]] = 0
     img = np.dstack([rgb, np.clip(a_fim * 255, 0, 255)]).astype(np.uint8)
     buf = _io.BytesIO()
     Image.fromarray(img, "RGBA").save(buf, "PNG", optimize=True)
@@ -2082,7 +2099,7 @@ def _legenda_de_faixas_png(caminho, campo, banda=None):
 def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                      campo="sinal", max_pontos=8000, comprimir=True,
                      grade_zonas=50.0, banda=None, campos=None,
-                     peers=None, max_repetidoras=12):
+                     peers=None, max_repetidoras=12, areas=None):
     """KML/KMZ do survey para abrir no Google Earth.
 
     `peers` (a lista de vizinhos da captura) acrescenta uma pasta por
@@ -2099,6 +2116,10 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     `banda` recorta as amostras de uma malha só — misturar 2.4 e 5.8 GHz
     no mesmo mapa esconde justamente a banda que está ruim.
 
+    `areas` (de `ler_areas`): cada aba ganha uma pasta por área, com o
+    calor recortado no polígono, e o arquivo ganha a pasta "Áreas" com o
+    contorno e os números de cada uma. Leitura fora das áreas não entra.
+
     Devolve (bytes, nome_arquivo).
     """
     import zipfile, io as _io, tempfile
@@ -2113,6 +2134,14 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
           if a.get("lat") is not None and a.get("lon") is not None]
     if banda:
         am = [a for a in am if _norm_banda(a.get("banda")) == banda]
+    if areas:
+        # A área vem da separação (`separar_por_area`); amostra que chegou
+        # sem ela é situada aqui, e a de fora de todas sai.
+        am = [a if a.get("area") else dict(a, area=area_do_ponto(
+                  areas, a["lat"], a["lon"])) for a in am]
+        am = [a for a in am if a.get("area")]
+        nomes_area = ordem_das_areas(am, areas=areas)
+        geo_area = {a["nome"]: a for a in areas}
     if not am and not fixos:
         raise RuntimeError(
             f"survey sem ponto georreferenciado"
@@ -2230,20 +2259,20 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     cores_fixos = set()
     rx_infra = re.compile(PADRAO_INFRA, re.I)
 
-    def _calor_overlay(campo_a):
+    def _calor_overlay(campo_a, am_x, sufixo="", mascara=None):
         """O mapa de calor da aba: a camada que se lê de relance."""
         if not comprimir:
             return ""
-        do_calor = [a for a in am if not rx_infra.search(a.get("radio") or "")]
+        do_calor = [a for a in am_x if not rx_infra.search(a.get("radio") or "")]
         try:
-            r = calor_por_faixas(do_calor, campo_a)
+            r = calor_por_faixas(do_calor, campo_a, mascara=mascara)
         except Exception as e:
             log.warning(f"[kml] calor de {campo_a} falhou: {e}")
             return ""
         if not r:
             return ""
         png, (n_, s_, l_, o_), n_lei = r
-        nome_png = f"files/calor_{campo_a}.png"
+        nome_png = f"files/calor_{campo_a}{sufixo}.png"
         extras.append((nome_png, png))
         n_eq = len({a.get("radio") for a in do_calor})
         return (f"<GroundOverlay><name>{CAMADA_DO_CALOR}</name>"
@@ -2255,10 +2284,10 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                 f"<east>{l_:.7f}</east><west>{o_:.7f}</west></LatLonBox>"
                 f"</GroundOverlay>")
 
-    def _fixos_na_aba(campo_a, un_a):
+    def _fixos_na_aba(campo_a, un_a, am_x):
         """Um quadrado por ERB/ERM, na cor da mediana das leituras dela."""
         por = {}
-        for a in am:
+        for a in am_x:
             if rx_infra.search(a.get("radio") or ""):
                 por.setdefault(a["radio"], []).append(a)
         itens = []
@@ -2395,122 +2424,147 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         op_a, lim_a, un_a, _r = (limite_de(campo_a)
                                  or (">", None, "", campo_a.upper()))
         rot_a = nome_da_aba(campo_a)
-        dentro = []
+        pintou = [False]
 
-        # ── o trajeto: fita contínua, como o MeshMapper desenha ──
-        # Uma linha por onde o rádio passou, colorida pela leitura. Era
-        # calor — um núcleo de raio fixo por amostra —, e com amostras a
-        # 60-80 m e raio de 25 m o rastro saía em bolhas soltas, borradas
-        # nas bordas, com o chão da cava tingindo a cor pela transparência.
-        #
-        # FIDELIDADE À LEGENDA, por construção:
-        #   · a cor é a FAIXA da legenda (`_bucket_cor` sobre FAIXAS_KML),
-        #     não um gradiente — a mesma régua do balão, da legenda na
-        #     tela e do slide de Metodologia;
-        #   · cada amostra é dona do caminho entre o ponto médio com a
-        #     anterior e o ponto médio com a seguinte. Qualquer ponto da
-        #     linha mostra a leitura REAL mais próxima — sem média, sem
-        #     interpolação entre duas leituras;
-        #   · a linha é opaca: com transparência, o vermelho do chão da
-        #     cava tingia o verde e a cor vista deixava de ser a da faixa.
-        #
-        # E a linha não inventa caminho: `_trechos_continuos` a parte onde
-        # houve buraco de medição (tempo ou salto de posição). Foi a reta
-        # atravessando a cava que tinha tirado a linha do padrão antes.
-        # UMA linha por caminho (`trilha_consolidada`): com uma por veículo,
-        # 29 rádios nas mesmas estradas viravam uma faixa larga e salpicada.
-        contornos, fitas, soltos = [], [], []
-        do_rastro = _amostras_do_rastro(am, fixos)
-        por_radio_rastro = {a["radio"] for a in do_rastro}
-        campo_l = campo_a
-        pecas, cadeias, soltas = trilha_consolidada(do_rastro, campo_l,
-                                                    FAIXAS_KML[campo_l])
-        un_l = (ESCALAS.get(campo_l) or {}).get("un", "")
-        for geo in cadeias:
-            contornos.append(_placemark(None, None, "lcontorno", linha=geo))
-        desc_cel = (f"<![CDATA[mediana das leituras de todos os rádios, em "
-                    f"grupos de {TRILHA_CELULA_M:g} m ao longo da pista]]>")
-        for cor, geo, vals in pecas:
-            fitas.append(_placemark(_rotulo_trecho(vals, un_l, campo_l),
-                                    desc_cel, f"l{cor}", linha=geo))
-        for la, lo, v, n in soltas:
-            # Célula sem ligação (leitura isolada entre dois buracos): não
-            # há linha a traçar, mas a medida não pode sumir do mapa.
-            cor = cor_da_leitura(v, campo_l)
-            cores_ponto.add(cor)
-            soltos.append(_placemark(
-                _rotulo_trecho([v], un_l, campo_l),
-                f"<![CDATA[{n} leitura{'s' if n != 1 else ''}]]>",
-                f"q{cor}", ponto=(la, lo)))
-        # O calor é a camada que abre ligada: é a que se lê de relance.
-        calor = _calor_overlay(campo_a)
-        if calor:
-            dentro.append(calor)
-        fx = _fixos_na_aba(campo_a, un_a)
-        if fx:
-            dentro.append(fx)
-        if contornos or soltos:
-            # TODOS os contornos antes de TODAS as cores: com um contorno
-            # por veículo intercalado, o de um cobria a cor do outro no
-            # cruzamento de pistas. Desligada quando há calor: as duas
-            # juntas se cobrem.
-            dentro.append(
-                f"<Folder><name>{CAMADA_DO_RASTRO} "
-                f"({len(por_radio_rastro)} "
-                f"rádio{'s' if len(por_radio_rastro) != 1 else ''})</name>"
-                f"<open>0</open><visibility>"
-                f"{0 if calor else 1}</visibility>"
-                f"{''.join(contornos)}{''.join(fitas)}"
-                f"{''.join(soltos)}</Folder>")
-        leg = _legenda_na_tela(campo_a)
-        if leg and (contornos or soltos or calor):
-            dentro.append(leg)
+        def _conteudo(am_x, sufixo="", mascara=None, max_pontos_x=max_pontos):
+            """Calor, ERB/ERM, trajeto, medições e fora do requisito de um
+            conjunto de amostras: a aba inteira, ou uma área dela."""
+            dentro = []
 
-        # pontos de medição, com balão e linha do tempo
-        usados, passo = _decimar(sorted(am, key=lambda x: x.get("ts") or 0),
-                                 max_pontos)
-        marcas = []
-        for a in usados:
-            v = a.get(campo_a)
-            # A MESMA faixa da linha: ponto e linha discordarem de cor no
-            # mesmo lugar tiraria a confiança nos dois.
-            cor = cor_da_leitura(v, campo_a)
-            cores_ponto.add(cor)
-            quando_a = (datetime.fromtimestamp(a["ts"]).strftime(
-                "%Y-%m-%dT%H:%M:%S") if a.get("ts") else None)
-            rotulo = (_rotulo_trecho([v], un_a, campo_a)
-                      if isinstance(v, (int, float))
-                      else a.get("radio", ""))
-            # Sem TimeStamp: com ele o Google Earth abre a barra de tempo e
-            # esconde o que está fora do intervalo escolhido. A hora está
-            # no balão.
-            marcas.append(_placemark(rotulo, _balao_amostra(a), f"q{cor}",
-                                     ponto=(a["lat"], a["lon"])))
-        nota = (f" — 1 a cada {passo} amostras" if passo > 1 else "")
-        # Desligada: com milhares de leituras, os pontos cobrem a fita.
-        # Ligada, dá o balão de cada leitura com todas as grandezas.
-        dentro.append(
-            f"<Folder><name>Medições ({len(marcas)})</name><open>0</open>"
-            f"<visibility>0</visibility>"
-            f"<description><![CDATA[Clique num ponto para ver todas as "
-            f"grandezas medidas ali.{nota}]]></description>"
-            f"{''.join(marcas)}</Folder>")
-
-        # fora do requisito — desligada: ligada, cobre os pontos bons
-        if lim_a is not None:
-            ruins = [a for a in am if a.get(campo_a) is not None
-                     and not atende(a[campo_a], op_a, lim_a)]
-            ruins, _ = _decimar(ruins, max_pontos // 2)
-            if ruins:
-                itens = [_placemark(_rotulo_trecho([a[campo_a]], un_a, campo_a),
-                                    _balao_amostra(a), "pFora",
-                                    ponto=(a["lat"], a["lon"]))
-                         for a in ruins]
+            # ── o trajeto: fita contínua, como o MeshMapper desenha ──
+            # Uma linha por onde o rádio passou, colorida pela leitura. Era
+            # calor — um núcleo de raio fixo por amostra —, e com amostras a
+            # 60-80 m e raio de 25 m o rastro saía em bolhas soltas, borradas
+            # nas bordas, com o chão da cava tingindo a cor pela transparência.
+            #
+            # FIDELIDADE À LEGENDA, por construção:
+            #   · a cor é a FAIXA da legenda (`_bucket_cor` sobre FAIXAS_KML),
+            #     não um gradiente — a mesma régua do balão, da legenda na
+            #     tela e do slide de Metodologia;
+            #   · cada amostra é dona do caminho entre o ponto médio com a
+            #     anterior e o ponto médio com a seguinte. Qualquer ponto da
+            #     linha mostra a leitura REAL mais próxima — sem média, sem
+            #     interpolação entre duas leituras;
+            #   · a linha é opaca: com transparência, o vermelho do chão da
+            #     cava tingia o verde e a cor vista deixava de ser a da faixa.
+            #
+            # E a linha não inventa caminho: `_trechos_continuos` a parte onde
+            # houve buraco de medição (tempo ou salto de posição). Foi a reta
+            # atravessando a cava que tinha tirado a linha do padrão antes.
+            # UMA linha por caminho (`trilha_consolidada`): com uma por veículo,
+            # 29 rádios nas mesmas estradas viravam uma faixa larga e salpicada.
+            contornos, fitas, soltos = [], [], []
+            do_rastro = _amostras_do_rastro(am_x, fixos)
+            por_radio_rastro = {a["radio"] for a in do_rastro}
+            campo_l = campo_a
+            pecas, cadeias, soltas = trilha_consolidada(do_rastro, campo_l,
+                                                        FAIXAS_KML[campo_l])
+            un_l = (ESCALAS.get(campo_l) or {}).get("un", "")
+            for geo in cadeias:
+                contornos.append(_placemark(None, None, "lcontorno", linha=geo))
+            desc_cel = (f"<![CDATA[mediana das leituras de todos os rádios, em "
+                        f"grupos de {TRILHA_CELULA_M:g} m ao longo da pista]]>")
+            for cor, geo, vals in pecas:
+                fitas.append(_placemark(_rotulo_trecho(vals, un_l, campo_l),
+                                        desc_cel, f"l{cor}", linha=geo))
+            for la, lo, v, n in soltas:
+                # Célula sem ligação (leitura isolada entre dois buracos): não
+                # há linha a traçar, mas a medida não pode sumir do mapa.
+                cor = cor_da_leitura(v, campo_l)
+                cores_ponto.add(cor)
+                soltos.append(_placemark(
+                    _rotulo_trecho([v], un_l, campo_l),
+                    f"<![CDATA[{n} leitura{'s' if n != 1 else ''}]]>",
+                    f"q{cor}", ponto=(la, lo)))
+            # O calor é a camada que abre ligada: é a que se lê de relance.
+            calor = _calor_overlay(campo_a, am_x, sufixo, mascara)
+            if calor:
+                dentro.append(calor)
+            fx = _fixos_na_aba(campo_a, un_a, am_x)
+            if fx:
+                dentro.append(fx)
+            if contornos or soltos:
+                # TODOS os contornos antes de TODAS as cores: com um contorno
+                # por veículo intercalado, o de um cobria a cor do outro no
+                # cruzamento de pistas. Desligada quando há calor: as duas
+                # juntas se cobrem.
                 dentro.append(
-                    f"<Folder><name>Fora do requisito — "
-                    f"{_esc(_OP_TXT.get(op_a, op_a))} "
-                    f"{(f'{lim_a:g} {un_a}').rstrip()} ({len(ruins)})</name><open>0</open>"
-                    f"<visibility>0</visibility>{''.join(itens)}</Folder>")
+                    f"<Folder><name>{CAMADA_DO_RASTRO} "
+                    f"({len(por_radio_rastro)} "
+                    f"rádio{'s' if len(por_radio_rastro) != 1 else ''})</name>"
+                    f"<open>0</open><visibility>"
+                    f"{0 if calor else 1}</visibility>"
+                    f"{''.join(contornos)}{''.join(fitas)}"
+                    f"{''.join(soltos)}</Folder>")
+            if contornos or soltos or calor:
+                pintou[0] = True
+
+            # pontos de medição, com balão e linha do tempo
+            usados, passo = _decimar(sorted(am_x, key=lambda x: x.get("ts") or 0),
+                                     max_pontos_x)
+            marcas = []
+            for a in usados:
+                v = a.get(campo_a)
+                # A MESMA faixa da linha: ponto e linha discordarem de cor no
+                # mesmo lugar tiraria a confiança nos dois.
+                cor = cor_da_leitura(v, campo_a)
+                cores_ponto.add(cor)
+                quando_a = (datetime.fromtimestamp(a["ts"]).strftime(
+                    "%Y-%m-%dT%H:%M:%S") if a.get("ts") else None)
+                rotulo = (_rotulo_trecho([v], un_a, campo_a)
+                          if isinstance(v, (int, float))
+                          else a.get("radio", ""))
+                # Sem TimeStamp: com ele o Google Earth abre a barra de tempo e
+                # esconde o que está fora do intervalo escolhido. A hora está
+                # no balão.
+                marcas.append(_placemark(rotulo, _balao_amostra(a), f"q{cor}",
+                                         ponto=(a["lat"], a["lon"])))
+            nota = (f" — 1 a cada {passo} amostras" if passo > 1 else "")
+            # Desligada: com milhares de leituras, os pontos cobrem a fita.
+            # Ligada, dá o balão de cada leitura com todas as grandezas.
+            dentro.append(
+                f"<Folder><name>Medições ({len(marcas)})</name><open>0</open>"
+                f"<visibility>0</visibility>"
+                f"<description><![CDATA[Clique num ponto para ver todas as "
+                f"grandezas medidas ali.{nota}]]></description>"
+                f"{''.join(marcas)}</Folder>")
+
+            # fora do requisito — desligada: ligada, cobre os pontos bons
+            if lim_a is not None:
+                ruins = [a for a in am_x if a.get(campo_a) is not None
+                         and not atende(a[campo_a], op_a, lim_a)]
+                ruins, _ = _decimar(ruins, max_pontos_x // 2)
+                if ruins:
+                    itens = [_placemark(_rotulo_trecho([a[campo_a]], un_a, campo_a),
+                                        _balao_amostra(a), "pFora",
+                                        ponto=(a["lat"], a["lon"]))
+                             for a in ruins]
+                    dentro.append(
+                        f"<Folder><name>Fora do requisito — "
+                        f"{_esc(_OP_TXT.get(op_a, op_a))} "
+                        f"{(f'{lim_a:g} {un_a}').rstrip()} ({len(ruins)})</name><open>0</open>"
+                        f"<visibility>0</visibility>{''.join(itens)}</Folder>")
+
+            return dentro
+
+        if areas:
+            # Uma pasta por área, na ordem do arquivo. O teto de pontos
+            # se divide entre elas: o arquivo segue do mesmo tamanho.
+            teto = max(200, max_pontos // max(1, len(nomes_area)))
+            dentro = []
+            for k, nome_ar in enumerate(nomes_area):
+                am_ar = [a for a in am if a.get("area") == nome_ar]
+                partes = _conteudo(am_ar, sufixo=f"_area{k + 1}",
+                                   mascara=geo_area[nome_ar]["poligonos"],
+                                   max_pontos_x=teto)
+                dentro.append(
+                    f"<Folder><name>{_esc(nome_ar)} ({len(am_ar)})</name>"
+                    f"<open>0</open>{''.join(partes)}</Folder>")
+        else:
+            dentro = _conteudo(am)
+        leg = _legenda_na_tela(campo_a)
+        if leg and pintou[0]:
+            dentro.append(leg)
 
         # A pasta ZONAS-PROBLEMA saiu a pedido: ela sugeria coordenada
         # para avaliar radio, que e decisao de projeto de RF e nao
@@ -2530,6 +2584,22 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     abas = [_aba(cp, visivel=(i == 0)) for i, cp in enumerate(campos)]
     pastas.append(f"<Folder><name>Grandeza</name><open>1</open>"
                   f"<styleUrl>#radio</styleUrl>{''.join(abas)}</Folder>")
+
+    # ── Áreas demarcadas: contorno, nome e números de cada uma ──
+    if areas:
+        estilos.append(
+            '<Style id="area"><IconStyle><scale>0</scale></IconStyle>'
+            '<LabelStyle><color>ffffffff</color><scale>1.1</scale></LabelStyle>'
+            '<LineStyle><color>ffffffff</color><width>2.5</width></LineStyle>'
+            '<PolyStyle><fill>0</fill><outline>1</outline></PolyStyle></Style>')
+        itens_a = [_placemark_area(geo_area[n],
+                                   [a for a in am if a.get("area") == n],
+                                   campos, banda)
+                   for n in nomes_area]
+        pastas.append(f"<Folder><name>Áreas ({len(itens_a)})</name>"
+                      f"<open>0</open><description><![CDATA[Contorno de cada "
+                      f"área demarcada; clique no nome para ver os números "
+                      f"dela.]]></description>{''.join(itens_a)}</Folder>")
 
     # ── Pegada de cada repetidora ──
     # As abas acima misturam as repetidoras: a cobertura disponível é o
@@ -2643,10 +2713,12 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
         + (f" · {_esc(banda)}" if banda else "") + "<br>"
         f"{quando:%d/%m/%Y %H:%M}"
         + (f" – {datetime.fromtimestamp(fim):%H:%M}" if fim else "") +
-        f"<br>{len(am)} amostras · {len(por_radio_geral)} rádios"
+        f"<br>{len(am)} amostras · {len(por_radio_geral)} "
+        f"rádio{'s' if len(por_radio_geral) != 1 else ''}"
         + (f" · intervalo efetivo {ef:g} s" if ef else "") + "</p>"
         + (f"<p><i>{n_cache} amostra(s) do cache do exporter, marcadas no "
            f"balão.</i></p>" if n_cache else "")
+        + (_desc_areas(sv, nomes_area) if areas else "")
         + f"<h4>Cor dos pontos — {_esc(rot_req)}</h4>"
           f"<table border='0' cellpadding='2'>{''.join(legenda)}</table>"
         + (f"<p>Requisito Modular: <b>{_esc(rot_req)} {_esc(op)} {limite:g} "
@@ -2687,6 +2759,83 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                  f"{len(am)} amostras, {len(posicoes)} BCs")
         return buf.getvalue(), f"{base}.kmz"
     return doc.encode("utf-8"), f"{base}.kml"
+
+
+def _desc_areas(sv, nomes):
+    """Parágrafo da descrição do KMZ: as áreas e o que ficou fora delas."""
+    info = areas_do_survey(sv) or {}
+    txt = (f"<p><b>{len(nomes)} área{'s' if len(nomes) != 1 else ''} "
+           f"demarcada{'s' if len(nomes) != 1 else ''}</b>"
+           + (f" ({_esc(info['arquivo'])})" if info.get("arquivo") else "")
+           + f": {_esc(', '.join(nomes))}")
+    if info.get("lidas"):
+        txt += (f"<br>{info['fora']} de {info['lidas']} leituras fora das "
+                f"áreas, descartadas")
+    return txt + "</p>"
+
+
+def _centro_do_anel(anel):
+    """Centroide do anel (lat, lon), pela fórmula da área com sinal."""
+    a2 = cx = cy = 0.0
+    for (y0, x0), (y1, x1) in zip(anel, anel[1:] + anel[:1]):
+        f = x0 * y1 - x1 * y0
+        a2 += f; cx += (x0 + x1) * f; cy += (y0 + y1) * f
+    if abs(a2) < 1e-15:
+        return anel[0]
+    return (cy / (3 * a2), cx / (3 * a2))
+
+
+def _ponto_do_rotulo(area, amostras):
+    """Onde vai o nome da área: o centro do maior polígono, se ele cair
+    dentro dela; senão, a leitura mediana da área."""
+    pg = max(area["poligonos"], key=lambda g: (
+        (max(q[0] for q in g["externo"]) - min(q[0] for q in g["externo"]))
+        * (max(q[1] for q in g["externo"]) - min(q[1] for q in g["externo"]))))
+    c = _centro_do_anel(pg["externo"])
+    if _na_area(area, c[0], c[1]) or not amostras:
+        return c
+    lat = sorted(a["lat"] for a in amostras)[len(amostras) // 2]
+    lon = sorted(a["lon"] for a in amostras)[len(amostras) // 2]
+    return (lat, lon)
+
+
+def _placemark_area(area, amostras, campos, banda=None):
+    """O contorno da área no mapa, com o nome e os números dela no balão."""
+    r = survey_resumo(amostras) or {}
+    linhas = []
+    for c in campos:
+        x = r.get(c)
+        if not x:
+            continue
+        linhas.append(f"<tr><td>{_esc(nome_da_aba(c))}</td>"
+                      f"<td align='right'><b>{x['pct_ok']:.1f}%</b></td>"
+                      f"<td align='right'>{_esc(fmt_leitura(x['mediana'], c))}</td>"
+                      f"<td align='right'>{_esc(fmt_leitura(x['pior5'], c))}</td></tr>")
+    n_rad = len({a.get("radio") for a in amostras})
+    desc = (f"<![CDATA[<b>{_esc(area['nome'])}</b>"
+            + (f" · {_esc(banda)}" if banda else "")
+            + f"<br>{len(amostras)} amostras · {n_rad} "
+              f"rádio{'s' if n_rad != 1 else ''}"
+            + (f"<table style='font-size:12px;margin-top:6px' cellpadding='3'>"
+               f"<tr><th align='left'>Grandeza</th><th>Dentro</th>"
+               f"<th>Mediana</th><th>Pior 5%</th></tr>{''.join(linhas)}</table>"
+               if linhas else "") + "]]>")
+    def _anel_kml(anel):
+        c = " ".join(f"{lo:.7f},{la:.7f},0" for la, lo in anel + anel[:1])
+        return f"<LinearRing><coordinates>{c}</coordinates></LinearRing>"
+    geos = []
+    for pg in area["poligonos"]:
+        geos.append(
+            "<Polygon><tessellate>1</tessellate>"
+            "<altitudeMode>clampToGround</altitudeMode>"
+            f"<outerBoundaryIs>{_anel_kml(pg['externo'])}</outerBoundaryIs>"
+            + "".join(f"<innerBoundaryIs>{_anel_kml(b)}</innerBoundaryIs>"
+                      for b in pg["buracos"]) + "</Polygon>")
+    la, lo = _ponto_do_rotulo(area, amostras)
+    geos.append(f"<Point><coordinates>{lo:.7f},{la:.7f},0</coordinates></Point>")
+    return (f"<Placemark><name>{_esc(area['nome'])}</name>"
+            f"<description>{desc}</description><styleUrl>#area</styleUrl>"
+            f"<MultiGeometry>{''.join(geos)}</MultiGeometry></Placemark>")
 
 
 def gerar_kml_pontos_fixos(sitios, cfg=None, comprimir=True):
@@ -3112,7 +3261,7 @@ def _mm_dos_csv(p):
     return sv, amostras, peers
 
 
-def importar_meshmapper(caminho, con=None, nome=None):
+def importar_meshmapper(caminho, con=None, nome=None, areas=None):
     """Importa uma captura do MeshMapper como um survey no banco.
 
     Passar pelo banco em vez de gerar direto do arquivo nao e burocracia:
@@ -3120,12 +3269,20 @@ def importar_meshmapper(caminho, con=None, nome=None):
     comparada com outra e alimentar os MESMOS geradores de KMZ, PPT e
     Excel que o survey proprio usa. Um caminho de saida, duas origens.
 
+    `areas` (de `ler_areas`): só fica a leitura que caiu numa área, e cada
+    uma leva o nome dela.
+
     Devolve (sid, sv, amostras, peers).
     """
     sv, amostras, peers = ler_meshmapper(caminho)
     if not amostras:
         raise RuntimeError(f"{Path(caminho).name}: nenhuma amostra com posicao")
     amostras, peers, sv["descartadas_parado"] = descartar_parados(amostras, peers)
+    amostras, peers, info_a = separar_por_area(amostras, peers, areas)
+    sv["areas"] = info_das_areas(areas, [info_a])
+    if not amostras and info_a:
+        raise RuntimeError(f"{Path(caminho).name}: nenhuma leitura dentro "
+                           f"das áreas demarcadas ({info_a['lidas']} lidas)")
     sv["cobertura"] = cobertura_disponivel(amostras, peers)
     fechar = con is None
     con = con or banco()
@@ -3134,6 +3291,7 @@ def importar_meshmapper(caminho, con=None, nome=None):
         sid = survey_criar(con, nome or sv["nome"], sv["inicio"],
                            sv.get("intervalo_s"), radios)
         survey_destino_trace(con, sid, sv.get("destino_trace"))
+        survey_areas(con, sid, sv["areas"])
         amostras_gravar(con, sid, amostras)
         resumo = survey_resumo(amostras)
         # n_moveis/n_fixos: no MeshMapper quem anda e o veiculo com o
@@ -3149,7 +3307,7 @@ def importar_meshmapper(caminho, con=None, nome=None):
         if fechar: con.close()
 
 
-def importar_meshmapper_varios(caminhos, con=None, nome=None):
+def importar_meshmapper_varios(caminhos, con=None, nome=None, areas=None):
     """Junta VARIAS capturas do MeshMapper num survey so.
 
     Uma campanha de survey costuma ser varios veiculos, ou o mesmo
@@ -3163,8 +3321,10 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
     Devolve (sid, sv, amostras, peers, origens), onde `origens` lista o
     que veio de cada arquivo, inclusive os que falharam: relatorio que
     engole arquivo ilegivel em silencio e pior que relatorio que falta.
+
+    `areas`: como em `importar_meshmapper`, arquivo a arquivo.
     """
-    amostras, peers, origens = [], [], []
+    amostras, peers, origens, infos_a = [], [], [], []
     for c in caminhos:
         try:
             sv_i, am_i, pr_i = ler_meshmapper(c)
@@ -3174,6 +3334,8 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
             log.warning(f"[meshmapper] {Path(c).name}: {e}")
             continue
         am_i, pr_i, desc_i = descartar_parados(am_i, pr_i)
+        am_i, pr_i, info_i = separar_por_area(am_i, pr_i, areas)
+        infos_a.append(info_i)
         # A cobertura e por ARQUIVO: os numeros de ponto se repetem entre
         # capturas, e cruza-los ligaria o vizinho de uma ao trajeto de
         # outra.
@@ -3184,11 +3346,16 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
         origens.append({"arquivo": Path(c).name, "ok": True,
                         "movel": sv_i.get("movel"), "cobertura": cob_i,
                         "descartadas_parado": desc_i,
+                        "fora_das_areas": (info_i or {}).get("fora"),
                         "amostras": len(am_i), "peers": len(pr_i),
                         "inicio": sv_i.get("inicio"), "fim": sv_i.get("fim"),
                         "versao_bcc": sv_i.get("versao_bcc"),
                         "destino_trace": sv_i.get("destino_trace")})
+    info_a = info_das_areas(areas, infos_a)
     if not amostras:
+        if info_a and info_a["lidas"]:
+            raise RuntimeError(f"nenhuma leitura dentro das áreas demarcadas "
+                               f"({info_a['lidas']} lidas)")
         raise RuntimeError("nenhuma amostra com posicao nos arquivos lidos")
 
     ok = [o for o in origens if o["ok"]]
@@ -3213,6 +3380,7 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
         },
         "origens": origens,
         "descartadas_parado": sum(o.get("descartadas_parado", 0) for o in ok),
+        "areas": info_a,
     }
 
     fechar = con is None
@@ -3221,6 +3389,7 @@ def importar_meshmapper_varios(caminhos, con=None, nome=None):
         radios = sorted({a["radio"] for a in amostras})
         sid = survey_criar(con, sv["nome"], sv["inicio"], None, radios)
         survey_destino_trace(con, sid, sv.get("destino_trace"))
+        survey_areas(con, sid, info_a)
         amostras_gravar(con, sid, amostras)
         survey_fechar(con, sid, sv["fim"], survey_resumo(amostras),
                       n_moveis=len(radios), n_fixos=0,
@@ -3322,6 +3491,14 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
         # Registrar o que NAO veio evita a leitura de "mediu e deu ruim".
         ("Não fornecido pelo MeshMapper", ", ".join(faltam) or "—"),
     ]
+    info_ar = areas_do_survey(sv)
+    nomes_area = ordem_das_areas(amostras, sv)
+    if nomes_area:
+        itens.insert(7, ("Áreas demarcadas",
+                         f"{len(nomes_area)}: {', '.join(nomes_area)}"))
+        if info_ar and info_ar.get("lidas"):
+            itens.insert(8, ("Fora das áreas (descartadas)",
+                             f"{info_ar['fora']} de {info_ar['lidas']} leituras"))
     for k, v in itens:
         lin = _td(ws, lin, [k, v], zebra=(lin % 2 == 0))
 
@@ -3391,6 +3568,43 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                             r.get("pct_ok")],
                   zebra=(lin % 2 == 0))
 
+    # ── 2b. Por área ──
+    if nomes_area:
+        ws = wb.create_sheet("Por Área")
+        _cab(ws, "Indicadores por área demarcada",
+             "Requisito Modular Mining"
+             + (f" · {info_ar['fora']} de {info_ar['lidas']} leituras fora "
+                f"das áreas, descartadas" if (info_ar or {}).get("lidas")
+                else ""), 9)
+        lin = 4
+        _th(ws, lin, ["Área", "Banda", "Grandeza", "Unid.", "Amostras",
+                      "Mediana", "Pior 5%", "Requisito", "Dentro (%)"],
+            [24, 10, 18, 8, 11, 12, 12, 14, 12])
+        lin += 1
+        bandas_x = sorted({_norm_banda(a.get("banda")) for a in amostras
+                           if a.get("banda")}) or [None]
+        for nome_ar in nomes_area:
+            am_n = [a for a in amostras if a.get("area") == nome_ar]
+            for b in bandas_x:
+                am_b = ([a for a in am_n if _norm_banda(a.get("banda")) == b]
+                        if b else am_n)
+                if not am_b:
+                    continue
+                r_b = survey_resumo(am_b) or {}
+                for campo in CAMPOS_KMZ:
+                    r = r_b.get(campo)
+                    if not r:
+                        continue
+                    e = ESCALAS.get(campo) or {}
+                    op, lim_e = (limite_de(campo) or (None, None))[:2]
+                    lin = _td(ws, lin, [
+                        nome_ar, b or "", e.get("rot", campo), e.get("un", ""),
+                        r.get("n"), fmt_leitura(r.get("mediana"), campo, False),
+                        fmt_leitura(r.get("pior5"), campo, False),
+                        f"{_OP_TXT.get(op, op)} {lim_e:g}" if op else "",
+                        r.get("pct_ok")], zebra=(lin % 2 == 0))
+        ws.freeze_panes = "A5"
+
     # ── 3. Amostras ──
     ws = wb.create_sheet("Amostras")
     _cab(ws, "Trajeto medido", f"{len(amostras)} pontos", 14)
@@ -3399,15 +3613,20 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     # entao cada uma diz de qual enlace fala. "RSSI (dBm)" sozinho ao
     # lado de "Cobertura (dBm)" nao dizia, e o laudo (mapa e slides)
     # reporta a SEGUNDA.
-    _th(ws, lin, ["#", "Hora (UTC)", "Latitude", "Longitude", "Alt (m)",
-                  "Banda", "Canal", "RSSI do enlace (dBm)", "SNR (dB)",
-                  "Ruído (dBm)", "Taxa (Mbps)", "Vizinhos",
-                  "Servidor", "RSSI da melhor ERB/ERM (dBm)",
-                  "Melhor ERB/ERM", "Δ não usado (dB)"],
-        [6, 19, 12, 12, 9, 10, 8, 19, 10, 12, 12, 10, 22, 24, 22, 15])
+    cab_am = ["#", "Hora (UTC)", "Latitude", "Longitude", "Alt (m)",
+              "Banda", "Canal", "RSSI do enlace (dBm)", "SNR (dB)",
+              "Ruído (dBm)", "Taxa (Mbps)", "Vizinhos",
+              "Servidor", "RSSI da melhor ERB/ERM (dBm)",
+              "Melhor ERB/ERM", "Δ não usado (dB)"]
+    larg_am = [6, 19, 12, 12, 9, 10, 8, 19, 10, 12, 12, 10, 22, 24, 22, 15]
+    if nomes_area:
+        cab_am.insert(2, "Área"); larg_am.insert(2, 22)
+    _th(ws, lin, cab_am, larg_am)
     lin += 1
     for i, a in enumerate(sorted(amostras, key=lambda x: x.get("ts") or 0), 1):
-        lin = _td(ws, lin, [i, dt(a.get("ts")), a.get("lat"), a.get("lon"),
+        lin = _td(ws, lin, [i, dt(a.get("ts"))]
+                           + ([a.get("area")] if nomes_area else [])
+                           + [a.get("lat"), a.get("lon"),
                             a.get("alt"), a.get("banda"), a.get("canal"),
                             a.get("sinal"), a.get("snr"), a.get("ruido"),
                             a.get("taxa"), a.get("peers"),
@@ -3591,6 +3810,281 @@ def descartar_parados(amostras, peers=None, raio_m=RAIO_MESMO_PONTO_M):
         if j is not None:
             pr.append(dict(p, ponto=j))
     return guardadas, pr, len(amostras) - len(guardadas)
+
+
+# ══════════════════════════════════════════════════════════════
+# ÁREAS DEMARCADAS
+# ══════════════════════════════════════════════════════════════
+# O laudo sai por área. Cada área é um polígono desenhado no Google Earth
+# e salvo em KMZ ou KML; o nome do polígono é o nome da área. Leitura fora
+# de todas as áreas sai do laudo.
+
+def _sem_ns(tag):
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _filhos(el, nome):
+    return [f for f in el if _sem_ns(f.tag) == nome]
+
+
+def _descendentes(el, nome):
+    return [f for f in el.iter() if _sem_ns(f.tag) == nome]
+
+
+def _coords_kml(txt):
+    """'lon,lat[,alt] lon,lat …' do KML → [(lat, lon), …]."""
+    pts = []
+    for tok in (txt or "").split():
+        partes = tok.split(",")
+        if len(partes) < 2:
+            continue
+        try:
+            lon, lat = float(partes[0]), float(partes[1])
+        except ValueError:
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            pts.append((lat, lon))
+    return pts
+
+
+def _anel(pts):
+    """Anel sem o ponto de fechamento; None se não fecha um polígono."""
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    return pts if len(pts) >= 3 else None
+
+
+def _anel_do(el):
+    """Anel de um outerBoundaryIs/innerBoundaryIs."""
+    for ring in _descendentes(el, "LinearRing"):
+        for c in _filhos(ring, "coordinates"):
+            a = _anel(_coords_kml(c.text))
+            if a:
+                return a
+    return None
+
+
+# Um "caminho" do Google Earth que volta ao ponto de partida é um
+# polígono desenhado com a ferramenta errada: aceito se fechar a até 5 m.
+_FECHA_CAMINHO_M = 5.0
+
+
+def _ler_kml_bytes(caminho):
+    p = Path(caminho)
+    dados = p.read_bytes()
+    if dados[:2] == b"PK":
+        import zipfile, io as _io
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        nomes = [n for n in z.namelist() if n.lower().endswith(".kml")]
+        if not nomes:
+            raise RuntimeError(f"{p.name}: KMZ sem arquivo .kml dentro")
+        nomes.sort(key=lambda n: (n.lower() != "doc.kml", n.count("/"), n))
+        return z.read(nomes[0])
+    return dados
+
+
+def ler_areas(caminho):
+    """As áreas demarcadas de um KMZ/KML do Google Earth.
+
+    Uma área por nome de polígono, na ordem do arquivo. Polígonos com o
+    mesmo nome viram uma área só (uma área em duas partes). Buracos do
+    polígono ficam fora da área.
+
+    Devolve [{"nome", "poligonos": [{"externo", "buracos"}], "caixa",
+    "arquivo"}], com pontos em (lat, lon) e caixa (sul, norte, oeste, leste).
+    """
+    from xml.etree import ElementTree as ET
+    p = Path(caminho)
+    if not p.exists():
+        raise RuntimeError(f"arquivo de áreas não encontrado: {p}")
+    try:
+        raiz = ET.fromstring(_ler_kml_bytes(p))
+    except ET.ParseError as e:
+        raise RuntimeError(f"{p.name}: não é um KML válido ({e})")
+    areas, por_chave, abertos, sem_nome = [], {}, 0, 0
+    for pm in _descendentes(raiz, "Placemark"):
+        nome = next((n.text.strip() for n in _filhos(pm, "name")
+                     if n.text and n.text.strip()), "")
+        polis = []
+        for pg in _descendentes(pm, "Polygon"):
+            ext = next((_anel_do(b) for b in _filhos(pg, "outerBoundaryIs")),
+                       None)
+            if not ext:
+                continue
+            bur = [a for a in (_anel_do(b) for b in _filhos(pg, "innerBoundaryIs"))
+                   if a]
+            polis.append({"externo": ext, "buracos": bur})
+        for ls in _descendentes(pm, "LineString"):
+            pts = [c for el in _filhos(ls, "coordinates")
+                   for c in _coords_kml(el.text)]
+            if (len(pts) >= 4 and _dist_m(pts[0][0], pts[0][1], pts[-1][0],
+                                          pts[-1][1]) <= _FECHA_CAMINHO_M):
+                polis.append({"externo": pts[:-1], "buracos": []})
+            else:
+                abertos += 1
+        if not polis:
+            continue
+        if not nome:
+            sem_nome += 1
+            nome = f"Área {sem_nome}"
+        chave = " ".join(nome.split()).casefold()
+        if chave in por_chave:
+            por_chave[chave]["poligonos"].extend(polis)
+        else:
+            por_chave[chave] = {"nome": " ".join(nome.split()),
+                                "poligonos": polis, "arquivo": p.name}
+            areas.append(por_chave[chave])
+    if not areas:
+        dica = (f" Há {abertos} caminho(s) aberto(s): no Google Earth, "
+                f"desenhe cada área com \"Adicionar polígono\"."
+                if abertos else "")
+        raise RuntimeError(f"{p.name}: nenhum polígono encontrado.{dica}")
+    for a in areas:
+        lat = [q[0] for pg in a["poligonos"] for q in pg["externo"]]
+        lon = [q[1] for pg in a["poligonos"] for q in pg["externo"]]
+        a["caixa"] = (min(lat), max(lat), min(lon), max(lon))
+    if abertos:
+        log.warning(f"[areas] {p.name}: {abertos} caminho(s) aberto(s) "
+                    f"ignorado(s) — só polígono demarca área")
+    return areas
+
+
+def _no_anel(lat, lon, anel):
+    """Ponto dentro do anel (cruzamento de raio, lat/lon como plano)."""
+    dentro = False
+    j = len(anel) - 1
+    for i in range(len(anel)):
+        yi, xi = anel[i]
+        yj, xj = anel[j]
+        if (yi > lat) != (yj > lat):
+            if lon < (xj - xi) * (lat - yi) / (yj - yi) + xi:
+                dentro = not dentro
+        j = i
+    return dentro
+
+
+def _na_area(area, lat, lon):
+    s_, n_, o_, l_ = area["caixa"]
+    if not (s_ <= lat <= n_ and o_ <= lon <= l_):
+        return False
+    for pg in area["poligonos"]:
+        if _no_anel(lat, lon, pg["externo"]) and not any(
+                _no_anel(lat, lon, b) for b in pg["buracos"]):
+            return True
+    return False
+
+
+def areas_do_ponto(areas, lat, lon):
+    """Nomes das áreas que contêm o ponto, na ordem do arquivo."""
+    if lat is None or lon is None:
+        return []
+    return [a["nome"] for a in areas or [] if _na_area(a, lat, lon)]
+
+
+def area_do_ponto(areas, lat, lon):
+    """A área do ponto (a primeira do arquivo, se houver sobreposição)."""
+    achadas = areas_do_ponto(areas, lat, lon)
+    return achadas[0] if achadas else None
+
+
+def separar_por_area(amostras, peers, areas):
+    """Põe em cada amostra a área demarcada em que ela caiu e tira as de
+    fora de todas. Sem `areas`, devolve tudo como veio.
+
+    `peers` acompanha como em `descartar_parados`: os da leitura que saiu
+    saem, e os outros ganham o `ponto` novo.
+
+    Devolve (amostras, peers, info) — info é None sem áreas, ou
+    {"lidas", "fora", "sobrepostas", "por_area"}.
+    """
+    if not areas:
+        return amostras, peers, None
+    dentro, novo_ponto, sobre = [], {}, 0
+    por_area = {a["nome"]: 0 for a in areas}
+    for i, a in enumerate(amostras, start=1):
+        achadas = areas_do_ponto(areas, a.get("lat"), a.get("lon"))
+        if not achadas:
+            continue
+        if len(achadas) > 1:
+            sobre += 1
+        b = dict(a)
+        b["area"] = achadas[0]
+        por_area[achadas[0]] += 1
+        dentro.append(b)
+        novo_ponto[i] = len(dentro)
+    info = {"lidas": len(amostras), "fora": len(amostras) - len(dentro),
+            "sobrepostas": sobre, "por_area": por_area}
+    if peers is None:
+        return dentro, None, info
+    pr = []
+    for p in peers:
+        j = novo_ponto.get(p.get("ponto"))
+        if j is not None:
+            pr.append(dict(p, ponto=j))
+    return dentro, pr, info
+
+
+def info_das_areas(areas, infos):
+    """O registro das áreas para o survey (banco, PPT, Excel): arquivo,
+    ordem e quanto ficou fora. `infos`: os de `separar_por_area`, um por
+    arquivo de captura."""
+    infos = [i for i in infos if i]
+    if not areas:
+        return None
+    ordem = [a["nome"] for a in areas]
+    por_area = {n: sum((i.get("por_area") or {}).get(n, 0) for i in infos)
+                for n in ordem}
+    return {"arquivo": areas[0].get("arquivo"), "ordem": ordem,
+            "lidas": sum(i.get("lidas", 0) for i in infos),
+            "fora": sum(i.get("fora", 0) for i in infos),
+            "sobrepostas": sum(i.get("sobrepostas", 0) for i in infos),
+            "por_area": por_area}
+
+
+def areas_do_survey(sv):
+    """O registro das áreas guardado no survey (dict), ou None."""
+    v = (sv or {}).get("areas")
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return None
+    return v if isinstance(v, dict) and v.get("ordem") is not None else None
+
+
+def ordem_das_areas(amostras, sv=None, areas=None):
+    """Nomes das áreas com amostra, na ordem do arquivo de áreas."""
+    tem = {a.get("area") for a in amostras if a.get("area")}
+    ordem = ([a["nome"] for a in areas] if areas
+             else (areas_do_survey(sv) or {}).get("ordem") or [])
+    fora_da_ordem = sorted(tem - set(ordem), key=str.casefold)
+    return [n for n in ordem if n in tem] + fora_da_ordem
+
+
+def carregar_areas(fonte=None, cfg=None):
+    """As áreas a usar: `fonte` (caminho ou lista já lida) ou, sem ela, o
+    arquivo de [survey] areas do config. None = laudo sem áreas."""
+    if isinstance(fonte, list):
+        return fonte or None
+    if not fonte and cfg is not None:
+        fonte = cfg.get("survey", "areas", fallback="").strip()
+    if not fonte:
+        return None
+    return ler_areas(fonte)
+
+
+def mascara_de_area(lats, lons, poligonos):
+    """Vetor booleano: cada (lat, lon) está dentro dos polígonos?"""
+    import numpy as np
+    from matplotlib.path import Path as _P
+    pts = np.column_stack([np.asarray(lons, float), np.asarray(lats, float)])
+    dentro = np.zeros(len(pts), dtype=bool)
+    for pg in poligonos:
+        d = _P([(lo, la) for la, lo in pg["externo"]]).contains_points(pts)
+        for b in pg["buracos"]:
+            d &= ~_P([(lo, la) for la, lo in b]).contains_points(pts)
+        dentro |= d
+    return dentro
 
 
 def cobertura_disponivel(amostras, peers, padrao=None):
@@ -4019,7 +4513,8 @@ CREATE TABLE IF NOT EXISTS amostra (
     fonte      TEXT,          -- 'direto' (consultado agora) | 'cache' (exporter)
     servidor   TEXT,          -- BC que atendeu neste ponto (melhor enlace)
     interf     REAL,          -- % de antena ocupada por transmissor alheio
-    canal      INTEGER        -- canal do rádio que atendeu
+    canal      INTEGER,       -- canal do rádio que atendeu
+    area       TEXT           -- área demarcada em que a leitura caiu
 );
 CREATE INDEX IF NOT EXISTS ix_amostra_survey ON amostra(survey_id);
 CREATE INDEX IF NOT EXISTS ix_amostra_radio  ON amostra(survey_id, radio);
@@ -4059,7 +4554,9 @@ def banco(caminho=None):
                       ("n_moveis", "INTEGER"), ("n_fixos", "INTEGER"),
                       ("intervalo_efetivo_s", "REAL"),
                       # Para onde o trace apontou o enlace de saída.
-                      ("destino_trace", "TEXT")):
+                      ("destino_trace", "TEXT"),
+                      # JSON de `info_das_areas`: arquivo, ordem, fora.
+                      ("areas", "TEXT")):
         if col not in tem:
             con.execute(f"ALTER TABLE survey ADD COLUMN {col} {tipo}")
     tem_am = {r["name"] for r in con.execute("PRAGMA table_info(amostra)")}
@@ -4069,7 +4566,8 @@ def banco(caminho=None):
                       # infraestrutura, que e outra grandeza do enlace que
                       # atendeu. Ver cobertura_disponivel().
                       ("sinal_cob", "REAL"), ("snr_cob", "REAL"),
-                      ("servidor_cob", "TEXT"), ("delta_cob", "REAL")):
+                      ("servidor_cob", "TEXT"), ("delta_cob", "REAL"),
+                      ("area", "TEXT")):
         if col not in tem_am:
             con.execute(f"ALTER TABLE amostra ADD COLUMN {col} {tipo}")
     con.commit()
@@ -4093,6 +4591,14 @@ def survey_destino_trace(con, sid, host):
         con.commit()
 
 
+def survey_areas(con, sid, info):
+    """Registra as áreas demarcadas do survey (ver `info_das_areas`)."""
+    if info:
+        con.execute("UPDATE survey SET areas=? WHERE id=?",
+                    (json.dumps(info, ensure_ascii=False), sid))
+        con.commit()
+
+
 def survey_fechar(con, sid, fim, resumo=None, calibracao=None,
                   n_moveis=None, n_fixos=None, intervalo_efetivo_s=None):
     n_am = con.execute("SELECT COUNT(*) FROM amostra WHERE survey_id=?",
@@ -4112,7 +4618,7 @@ def amostras_gravar(con, sid, linhas):
     cols = ["radio","ts","lat","lon","vel","snr","sinal","ruido","rtt","perda",
             "taxa","vazao","peers","sats","hdop","banda","fonte",
             "servidor","interf","canal",
-            "sinal_cob","snr_cob","servidor_cob","delta_cob"]
+            "sinal_cob","snr_cob","servidor_cob","delta_cob","area"]
     con.executemany(
         f"INSERT INTO amostra (survey_id,{','.join(cols)}) "
         f"VALUES (?,{','.join('?'*len(cols))})",
@@ -5819,6 +6325,10 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
                          if a.get("banda")}) or [None]
     quando = datetime.fromtimestamp(sv.get("inicio") or time.time())
     nome_sv = sv.get("nome") or "Site Survey"
+    # Áreas demarcadas: as páginas de grandeza saem por área, e o Sumário
+    # segue sendo do survey inteiro (só o que caiu dentro das áreas).
+    info_ar = areas_do_survey(sv)
+    nomes_area = ordem_das_areas(am, sv)
 
     p = Presentation()
     p.slide_width  = Inches(13.333)
@@ -5873,6 +6383,8 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
             ("Área coberta",
              f"{_milhar(round(ext['raio_m']))} m de raio" if ext else "—"),
             ("Handovers", str(srv.get("n_handovers", 0)))]
+    if nomes_area:
+        cart.insert(2, ("Áreas demarcadas", str(len(nomes_area))))
     y = 1.45
     for rot, val in cart:
         _cartao_anglo(s, 8.35, y, 4.45, 0.72, rot, val)
@@ -5922,6 +6434,14 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
          if tem_saida else "não identificado (sem trace)"],
         ["Grandezas não medidas", "latência e perda de pacotes"],
     ]
+    if nomes_area:
+        ficha.insert(4, [
+            "Áreas demarcadas",
+            f"{len(nomes_area)} polígono{'s' if len(nomes_area) != 1 else ''}"
+            + (f" ({info_ar['arquivo']})" if (info_ar or {}).get("arquivo")
+               else "")
+            + (f" · {info_ar['fora']} de {info_ar['lidas']} leituras fora "
+               f"delas, descartadas" if (info_ar or {}).get("lidas") else "")])
     _tabela_anglo(s, 0.55, 1.5, 7.5, ["Parâmetro", "Especificação"],
                   ficha, tam=10)
 
@@ -6015,66 +6535,90 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     # Os slides de Zonas-Problema sairam junto, pelo mesmo motivo: a
     # pagina listava coordenada sugerida para avaliar radio.
 
-    # ── Molduras para o print do Google Earth ──
-    for b in bandas:
-        # UMA pagina de RSSI, a do melhor ERB/ERM do ponto. Duas paginas
-        # com o mesmo rotulo em dBm faziam o leitor procurar a diferenca
-        # entre elas em vez de ler o mapa.
-        for campo, rot in (("sinal_cob", "Intensidade de Sinal (RSSI)"),
-                           ("snr", "Relação Sinal/Ruído (SNR)"),
-                           ("ruido", "Noise Floor"),
-                           ("interf", "Interferência de Canal"),
-                           ("perda", "Packet Loss"),
-                           ("rtt", "Latência (RTT)")):
-            rot_b = f" — {b}" if b else ""
-            am_b = [a for a in am if _norm_banda(a.get("banda")) == b] or am
-            # Grandeza sem NENHUMA medicao nao vira slide. Uma pagina com
-            # escala, requisito e grafico vazio le-se como "medi e deu
-            # tudo fora" — que e o oposto de "nao medi". E o caso de
-            # latencia, perda e interferencia numa captura do MeshMapper,
-            # que simplesmente nao fornece esses campos.
-            if not any(a.get(campo) is not None for a in am_b):
-                continue
-            lim_ = limite_de(campo)
-            nome_lim = ("requisito" if campo in REQUISITOS
-                        or campo == "sinal_cob" else "referência")
-            sub = ("Rota medida, colorida pelo valor de cada amostra"
-                   + (f"  ·  {nome_lim} {_OP_TXT[lim_[0]]} {lim_[1]:g} "
-                      f"{lim_[2]}".rstrip() if lim_ else ""))
-            s = slide_anglo(p, f"{rot}{rot_b}", sub)
+    def _paginas(am_x, area=None):
+        """Uma página por banda e grandeza medida: a moldura do mapa, a
+        distribuição e a escala. `area`: só as amostras dela, e o título e
+        a moldura dizem qual é. Devolve os slides criados."""
+        feitos = []
+        for b in bandas:
+            for campo, rot in (("sinal_cob", "Intensidade de Sinal (RSSI)"),
+                               ("snr", "Relação Sinal/Ruído (SNR)"),
+                               ("ruido", "Noise Floor"),
+                               ("interf", "Interferência de Canal"),
+                               ("perda", "Packet Loss"),
+                               ("rtt", "Latência (RTT)")):
+                rot_b = f" — {b}" if b else ""
+                am_b = [a for a in am_x if _norm_banda(a.get("banda")) == b]
+                if not am_b and area is None:
+                    am_b = am_x
+                # Grandeza sem NENHUMA medicao nao vira slide. Uma pagina com
+                # escala, requisito e grafico vazio le-se como "medi e deu
+                # tudo fora" — que e o oposto de "nao medi". E o caso de
+                # latencia, perda e interferencia numa captura do MeshMapper,
+                # que simplesmente nao fornece esses campos.
+                if not any(a.get(campo) is not None for a in am_b):
+                    continue
+                lim_ = limite_de(campo)
+                nome_lim = ("requisito" if campo in REQUISITOS
+                            or campo == "sinal_cob" else "referência")
+                sub = ("Rota medida, colorida pelo valor de cada amostra"
+                       + (f"  ·  {nome_lim} {_OP_TXT[lim_[0]]} {lim_[1]:g} "
+                          f"{lim_[2]}".rstrip() if lim_ else ""))
+                s = slide_anglo(p, (f"{area} · " if area else "") + f"{rot}{rot_b}",
+                                sub)
+                feitos.append(s)
 
-            # Mapa a esquerda, distribuicao a direita: a moldura mostra
-            # ONDE, o grafico mostra QUANTO.
-            suf = f"_{b.replace(' ', '').replace('.', '')}" if b else ""
-            # A aba e a camada com os nomes EXATOS do painel do Google
-            # Earth. Era "camada: Rotas" — pasta que deixou de existir
-            # quando o rastro virou a fita do Trajeto.
-            _moldura_anglo(s, 0.55, 1.45, 7.3, 5.4,
-                           f"Survey_*_todas{suf}.kmz",
-                           f"aba: {nome_da_aba(campo)}   ·   "
-                           f"camada: {CAMADA_DO_CALOR}"
-                           + (f"   ·   {b}" if b else ""))
-            rotulos, pcts, un = distribuicao(am_b, campo)
-            if rotulos:
-                _grafico_anglo(s, 8.05, 1.45, 4.75, 3.4,
-                               "Distribuição" + (f" ({un})" if un else "")
-                               + " — % das amostras",
-                               rotulos, pcts, campo=campo)
-            r_res = (survey_resumo(am_b) or {}).get(campo)
-            if r_res:
-                # "Requisito" só para o que é do contrato. O ruído é
-                # comparado a uma referência derivada, e o cartão diz isso.
-                _cartao_anglo(s, 8.05, 5.05, 2.28, 0.85,
-                              "Dentro do requisito" if campo in REQUISITOS
-                              or campo == "sinal_cob"
-                              else "Dentro da referência",
-                              f"{r_res['pct_ok']:.1f}%")
-                _cartao_anglo(s, 10.52, 5.05, 2.28, 0.85, "Pior 5%",
-                              fmt_leitura(r_res["pior5"], campo))
-            # Escala embaixo, na faixa que sobrou entre os cartões e o pé
-            # do slide: sem ela o mapa é uma fita colorida sem significado
-            # para quem não fez a medição.
-            _escala_anglo(s, 8.05, 6.05, 4.75, campo)
+                # Mapa a esquerda, distribuicao a direita: a moldura mostra
+                # ONDE, o grafico mostra QUANTO.
+                suf = f"_{b.replace(' ', '').replace('.', '')}" if b else ""
+                # A aba e a camada com os nomes EXATOS do painel do Google
+                # Earth. Era "camada: Rotas" — pasta que deixou de existir
+                # quando o rastro virou a fita do Trajeto.
+                _moldura_anglo(s, 0.55, 1.45, 7.3, 5.4,
+                               f"Survey_*_todas{suf}.kmz",
+                               f"aba: {nome_da_aba(campo)}   ·   "
+                               + (f"pasta: {area}   ·   " if area else "")
+                               + f"camada: {CAMADA_DO_CALOR}"
+                               + (f"   ·   {b}" if b else ""))
+                rotulos, pcts, un = distribuicao(am_b, campo)
+                if rotulos:
+                    _grafico_anglo(s, 8.05, 1.45, 4.75, 3.4,
+                                   "Distribuição" + (f" ({un})" if un else "")
+                                   + " — % das amostras",
+                                   rotulos, pcts, campo=campo)
+                r_res = (survey_resumo(am_b) or {}).get(campo)
+                if r_res:
+                    # "Requisito" só para o que é do contrato. O ruído é
+                    # comparado a uma referência derivada, e o cartão diz isso.
+                    _cartao_anglo(s, 8.05, 5.05, 2.28, 0.85,
+                                  "Dentro do requisito" if campo in REQUISITOS
+                                  or campo == "sinal_cob"
+                                  else "Dentro da referência",
+                                  f"{r_res['pct_ok']:.1f}%")
+                    _cartao_anglo(s, 10.52, 5.05, 2.28, 0.85, "Pior 5%",
+                                  fmt_leitura(r_res["pior5"], campo))
+                # Escala embaixo, na faixa que sobrou entre os cartões e o pé
+                # do slide: sem ela o mapa é uma fita colorida sem significado
+                # para quem não fez a medição.
+                _escala_anglo(s, 8.05, 6.05, 4.75, campo)
+
+        return feitos
+
+    # ── Molduras para o print do Google Earth ──
+    # Com áreas demarcadas, as páginas saem por área (abaixo); sem elas,
+    # do survey inteiro.
+    secoes = {}
+    if not nomes_area:
+        _paginas(am)
+    else:
+        _resumo_por_area(p, am, nomes_area, bandas, info_ar)
+        for nome_ar in nomes_area:
+            am_ar = [a for a in am if a.get("area") == nome_ar]
+            cab = _abertura_da_area(p, nome_ar, am_ar, bandas)
+            pags = _paginas(am_ar, area=nome_ar)
+            _indice_da_area(cab, pags, nome_ar)
+            for sl in pags:
+                secoes[sl.slide_id] = cab
 
     # ── Diagnóstico e conclusões: em branco, para preencher ──
     # O deck entrega o que foi MEDIDO. A leitura daquilo — o que explica
@@ -6104,8 +6648,9 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
 
     # ── Navegacao: indice + botoes em cada slide ──
     # Feita DEPOIS de tudo: os alvos precisam existir para o link nao
-    # nascer morto. O indice entra logo apos a capa.
-    n_nav = _navegacao_anglo(p)
+    # nascer morto. O indice entra logo apos a capa. As páginas de cada
+    # área ficam no índice da própria área, não no geral.
+    n_nav = _navegacao_anglo(p, secoes=secoes)
 
     if MARCA_DEMO.get("ativa"):
         marcar_ppt_demo(p)
@@ -6117,71 +6662,211 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     return buf.getvalue(), f"Site_Survey_{seguro}_{quando:%Y%m%d}.pptx"
 
 
-def _navegacao_anglo(p, titulo_indice="Índice"):
-    """Índice clicável + botão de volta em cada slide.
+def _botao_de_ir(s, x, y, w, texto, alvo, h=0.36, tam=10.5):
+    """Botão claro que leva a outro slide (modo apresentação)."""
+    from pptx.util import Inches, Pt
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.text import MSO_ANCHOR
+    bt = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x),
+                            Inches(y), Inches(w), Inches(h))
+    bt.fill.solid(); bt.fill.fore_color.rgb = _rgb(ANGLO["cartao"])
+    bt.line.color.rgb = _rgb(ANGLO["linha"]); bt.shadow.inherit = False
+    tf = bt.text_frame; tf.word_wrap = False
+    tf.margin_left = Inches(0.12); tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    r = tf.paragraphs[0].add_run(); r.text = f"›  {texto}"
+    r.font.name = ANGLO["fonte"]; r.font.size = Pt(tam)
+    r.font.color.rgb = _rgb(ANGLO["azul"])
+    return 1 if _link_para(bt, alvo) else 0
 
-    Mesma regra do outro deck: um botão por seção não resolve quando a
-    seção tem quinze slides. Aqui o índice lista TODOS e cada slide tem o
-    caminho de volta.
-    """
+
+def _botao_de_volta(s, x, y, texto, alvo):
+    """Botão azul do canto, de volta ao índice (ou à área)."""
     from pptx.util import Inches, Pt
     from pptx.enum.shapes import MSO_SHAPE
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    bt = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x),
+                            Inches(y), Inches(1.08), Inches(0.30))
+    bt.fill.solid(); bt.fill.fore_color.rgb = _rgb(ANGLO["azul"])
+    bt.line.fill.background(); bt.shadow.inherit = False
+    tf = bt.text_frame; tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    par = tf.paragraphs[0]; par.alignment = PP_ALIGN.CENTER
+    r = par.add_run(); r.text = texto
+    r.font.name = ANGLO["fonte"]; r.font.size = Pt(9)
+    r.font.bold = True; r.font.color.rgb = _rgb("FFFFFF")
+    _link_para(bt, alvo)
 
-    def _titulo(s):
-        cands = [(sh.top or 0, sh.text_frame.text.strip())
-                 for sh in s.shapes if sh.has_text_frame
-                 and sh.text_frame.text.strip()
-                 and sh.text_frame.text.strip()[0] not in "◂▤"]
-        return min(cands)[1].replace("\n", " ") if cands else ""
 
-    alvos = [(i, _titulo(s)) for i, s in enumerate(p.slides)]
-    # A capa (0) nao entra no indice, e o proprio indice ainda nao existe.
-    itens = [(i, tt) for i, tt in alvos[1:] if tt]
+def _resumo_por_area(p, am, nomes, bandas, info=None):
+    """Tabela área × banda: amostras e o RSSI e o SNR contra o requisito.
+    Mais de 13 linhas viram mais de um slide."""
+    linhas, dest = [], {}
+    for nome in nomes:
+        am_n = [a for a in am if a.get("area") == nome]
+        for b in bandas:
+            am_b = ([a for a in am_n if _norm_banda(a.get("banda")) == b]
+                    if b else am_n)
+            if not am_b:
+                continue
+            r = survey_resumo(am_b) or {}
+            lin = [nome, b or "—", _milhar(len(am_b))]
+            for c in ("sinal_cob", "snr"):
+                x = r.get(c)
+                lin += ([f"{x['pct_ok']:.1f}%", fmt_leitura(x["mediana"], c)]
+                        if x else [None, None])
+            linhas.append(lin)
+    por_slide = 13
+    partes = [linhas[k:k + por_slide] for k in range(0, len(linhas), por_slide)]
+    req_s = float(ESCALAS["sinal_cob"]["req"])
+    req_n = float(ESCALAS["snr"]["req"])
+    for k, parte in enumerate(partes, 1):
+        tit = "Resumo por área" + (f" ({k}/{len(partes)})" if len(partes) > 1
+                                   else "")
+        s = slide_anglo(p, tit, f"Cada área demarcada contra os requisitos "
+                                f"Modular Mining: RSSI > {req_s:g} dBm · "
+                                f"SNR > {req_n:g} dB")
+        dest = {}
+        for i, l in enumerate(parte, start=1):
+            for j in (3, 5):
+                try:
+                    if l[j] and float(l[j].rstrip("%")) < 90:
+                        dest[(i, j)] = "C0392B"
+                except ValueError:
+                    pass
+        _tabela_anglo(s, 0.55, 1.45, 12.25,
+                      ["Área", "Banda", "Amostras", "RSSI dentro",
+                       "RSSI mediana", "SNR dentro", "SNR mediana"],
+                      parte, dest, tam=10)
+        if info and info.get("lidas"):
+            _txt_anglo(s, 0.55, 6.85, 12.25, 0.35,
+                       f"{info['fora']} de {info['lidas']} leituras caíram "
+                       f"fora das áreas demarcadas e não entram no laudo.",
+                       9.5, False, ANGLO["suave"])
+
+
+def _abertura_da_area(p, nome, am, bandas):
+    """Slide que abre a seção da área: números e a tabela por grandeza.
+    Os botões para as páginas dela entram depois (`_indice_da_area`)."""
+    n_rad = len({a.get("radio") for a in am})
+    bandas_ar = [b for b in bandas
+                 if b is None or any(_norm_banda(a.get("banda")) == b for a in am)]
+    s = slide_anglo(p, nome, "Área demarcada — "
+                    + " e ".join(b for b in bandas_ar if b)
+                    + (f" · {_milhar(len(am))} amostras de {n_rad} "
+                       f"rádio{'s' if n_rad != 1 else ''}"))
+    ext = extensao_da_captura(am)
+    passo = _passo_tipico(am)
+    cart = [("Amostras", _milhar(len(am))), ("Rádios", str(n_rad)),
+            ("Passo entre amostras", f"{passo:g} m" if passo is not None else "—"),
+            ("Extensão", f"{_milhar(round(ext['raio_m']))} m de raio"
+                         if ext else "—")]
+    for k, (rot, val) in enumerate(cart):
+        _cartao_anglo(s, 0.55 + k * 3.12, 1.35, 2.95, 0.72, rot, val)
+    linhas, dest = [], {}
+    for b in bandas_ar:
+        am_b = ([a for a in am if _norm_banda(a.get("banda")) == b]
+                if b else am)
+        r = survey_resumo(am_b) or {}
+        for c in ("sinal_cob", "snr", "ruido", "interf", "rtt", "perda"):
+            x = r.get(c)
+            if not x:
+                continue
+            op, lim, un, _ = limite_de(c)
+            linhas.append([nome_da_aba(c), b or "—",
+                           f"{_OP_TXT[op]} {lim:g} {un}".rstrip(),
+                           f"{x['pct_ok']:.1f}%",
+                           fmt_leitura(x["mediana"], c),
+                           fmt_leitura(x["pior5"], c)])
+            if x["pct_ok"] < 90:
+                dest[(len(linhas), 3)] = "C0392B"
+    if linhas:
+        _tabela_anglo(s, 0.55, 2.35, 7.6,
+                      ["Grandeza", "Banda", "Requisito", "Dentro", "Mediana",
+                       "Pior 5%"], linhas[:13], dest, tam=9.5)
+    return s
+
+
+def _indice_da_area(cab, paginas, nome):
+    """Na abertura da área, um botão para cada página dela."""
+    if not paginas:
+        return
+    _txt_anglo(cab, 8.45, 2.35, 4.4, 0.3, "Páginas desta área", 10.5, True,
+               ANGLO["texto"])
+    y = 2.72
+    for sl in paginas[:11]:
+        tt = _titulo_do_slide(sl)
+        if tt.startswith(nome + " · "):
+            tt = tt[len(nome) + 3:]
+        _botao_de_ir(cab, 8.45, y, 4.4, tt, sl, h=0.34, tam=10)
+        y += 0.40
+
+
+def _titulo_do_slide(s):
+    cands = [(sh.top or 0, sh.text_frame.text.strip())
+             for sh in s.shapes if sh.has_text_frame
+             and sh.text_frame.text.strip()
+             and sh.text_frame.text.strip()[0] not in "◂▤›"]
+    return min(cands)[1].replace("\n", " ") if cands else ""
+
+
+def _navegacao_anglo(p, titulo_indice="Índice", secoes=None):
+    """Índice clicável + botão de volta em cada slide.
+
+    Mesma regra do outro deck: um botão por seção não resolve quando a
+    seção tem quinze slides. Aqui o índice lista todos os slides gerais e
+    cada slide tem o caminho de volta.
+
+    `secoes` ({slide_id da página: slide de abertura da área}): a página
+    de área fica fora do índice geral — ela está nos botões da abertura
+    da área — e ganha também o botão de volta à área. Com mais de 28
+    itens, o índice continua em outro slide.
+    """
+    secoes = secoes or {}
+    alvos = [(s, _titulo_do_slide(s)) for s in list(p.slides)[1:]]
+    # A capa nao entra no indice, e o proprio indice ainda nao existe.
+    itens = [(s, tt) for s, tt in alvos if tt and s.slide_id not in secoes]
     if not itens:
         return 0
 
-    s = slide_anglo(p, titulo_indice,
-                    "Clique num item para ir direto ao slide "
-                    "(modo apresentação)")
-    # Duas colunas: com 15 itens, uma so nao cabe na altura util.
-    meio = (len(itens) + 1) // 2
+    por_indice = 28
+    grupos = [itens[k:k + por_indice] for k in range(0, len(itens), por_indice)]
+    indices = []
     ligados = 0
-    for col, grupo in enumerate((itens[:meio], itens[meio:])):
-        x = 0.55 + col * 6.35
-        y = 1.5
-        for idx, tt in grupo:
-            bt = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x),
-                                    Inches(y), Inches(6.05), Inches(0.36))
-            bt.fill.solid(); bt.fill.fore_color.rgb = _rgb(ANGLO["cartao"])
-            bt.line.color.rgb = _rgb(ANGLO["linha"]); bt.shadow.inherit = False
-            tf = bt.text_frame; tf.word_wrap = False
-            tf.margin_left = Inches(0.12); tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-            r = tf.paragraphs[0].add_run(); r.text = f"›  {tt}"
-            r.font.name = ANGLO["fonte"]; r.font.size = Pt(10.5)
-            r.font.color.rgb = _rgb(ANGLO["azul"])
-            if _link_para(bt, p.slides[idx]): ligados += 1
-            y += 0.42
+    for g, grupo in enumerate(grupos, 1):
+        s = slide_anglo(p, titulo_indice + (f" ({g}/{len(grupos)})"
+                                            if len(grupos) > 1 else ""),
+                        "Clique num item para ir direto ao slide "
+                        "(modo apresentação)")
+        indices.append(s)
+        # Duas colunas: com 15 itens, uma so nao cabe na altura util.
+        meio = (len(grupo) + 1) // 2
+        for col, metade in enumerate((grupo[:meio], grupo[meio:])):
+            x = 0.55 + col * 6.35
+            y = 1.5
+            for alvo, tt in metade:
+                ligados += _botao_de_ir(s, x, y, 6.05, tt, alvo)
+                y += 0.42
 
-    # Move o indice para logo depois da capa.
+    # Move os índices para logo depois da capa, na ordem.
     lst = p.slides._sldIdLst
-    el = list(lst)[-1]; lst.remove(el); lst.insert(1, el)
-    indice = p.slides[1]
+    els = list(lst)[-len(indices):]
+    for k, el in enumerate(els):
+        lst.remove(el); lst.insert(1 + k, el)
+    ids_indice = {s.slide_id for s in indices}
+    # Um índice puxa o próximo: o botão de volta leva ao primeiro.
+    for a, b in zip(indices, indices[1:]):
+        ligados += _botao_de_ir(a, 9.0, 6.85, 3.8, "continua no próximo",
+                                b, h=0.34, tam=10)
 
-    # Botao de volta em todos, menos capa e o proprio indice.
+    # Botao de volta em todos, menos capa e os proprios indices.
     for i, sl in enumerate(p.slides):
-        if i <= 1: continue
-        bt = sl.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(11.95),
-                                 Inches(0.22), Inches(1.08), Inches(0.32))
-        bt.fill.solid(); bt.fill.fore_color.rgb = _rgb(ANGLO["azul"])
-        bt.line.fill.background(); bt.shadow.inherit = False
-        tf = bt.text_frame; tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-        par = tf.paragraphs[0]; par.alignment = PP_ALIGN.CENTER
-        r = par.add_run(); r.text = "◂ ÍNDICE"
-        r.font.name = ANGLO["fonte"]; r.font.size = Pt(9)
-        r.font.bold = True; r.font.color.rgb = _rgb("FFFFFF")
-        _link_para(bt, indice)
+        if i == 0 or sl.slide_id in ids_indice:
+            continue
+        _botao_de_volta(sl, 11.95, 0.22, "◂ ÍNDICE", indices[0])
         ligados += 1
+        cab = secoes.get(sl.slide_id)
+        if cab is not None:
+            _botao_de_volta(sl, 11.95, 0.60, "◂ ÁREA", cab)
+            ligados += 1
     return ligados
 
 

@@ -1,6 +1,7 @@
 # Site Survey — Rajant
 
-Gera os KMZ com o trajeto colorido, o PPT na identidade Anglo e o Excel.
+Gera os KMZ com o trajeto colorido, o PPT na identidade Anglo e o Excel,
+separados por **área demarcada**.
 
 **Duplo clique** no `site_survey.exe`. A janela tem duas abas:
 
@@ -16,10 +17,52 @@ mesmo executável serve as duas máquinas.
 Pela linha de comando, os módulos funcionam soltos:
 
 ```
-survey_meshmapper captura1.kmz captura2.kmz -o relatorios
+survey_meshmapper captura1.kmz captura2.kmz -o relatorios --areas areas.kmz
 survey_meshmapper *.kmz --separado          # um relatório por arquivo
-coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios
+coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios --areas areas.kmz
 ```
+
+## Áreas demarcadas
+
+O laudo sai **por área**. As áreas vêm de um KMZ (ou KML) do Google Earth:
+
+1. No Google Earth, **Adicionar polígono** e desenhar o contorno da área.
+2. O **nome do polígono é o nome da área** no laudo ("Cava Norte",
+   "Britagem"…). Um polígono por área; dois polígonos com o mesmo nome
+   viram uma área em duas partes. Um buraco no polígono fica fora da área.
+3. Pôr todos numa pasta e **Salvar lugar como… → KMZ**.
+4. Na janela, campo **Áreas** (embaixo, vale para as duas abas) →
+   **Escolher…**. A janela lê o arquivo na hora e mostra as áreas achadas.
+
+Também vale `--areas arquivo.kmz` na linha de comando, ou fixar no
+`config.ini`:
+
+```ini
+[survey]
+areas = C:\Survey\areas.kmz
+```
+
+Com áreas:
+
+| | o que muda |
+|---|---|
+| leituras | cada uma leva a área em que caiu; **as de fora de todas as áreas são descartadas** (o andamento, a Metodologia e o Excel dizem quantas) |
+| sobreposição | a leitura que cai em duas áreas fica na **primeira do arquivo**; o andamento avisa |
+| KMZ | em cada aba de grandeza, **uma pasta por área**, com o calor recortado no polígono, o trajeto, as medições e o fora do requisito daquela área; e a pasta **Áreas**, com o contorno e o nome de cada uma — clicando, os números dela |
+| PPT | **Resumo por área** (área × banda: amostras, RSSI e SNR contra o requisito) e uma **seção por área**: a abertura com os números e os botões para as páginas dela, e as páginas de grandeza da área. O Índice leva às áreas; cada página tem **◂ ÍNDICE** e **◂ ÁREA** |
+| Excel | coluna **Área** nas amostras e a aba **Por Área** |
+
+O Sumário continua sendo do survey inteiro — do que caiu dentro das áreas.
+
+Sem arquivo de áreas, tudo sai como antes, do survey inteiro.
+
+Na coleta ao vivo o arquivo é lido **antes** de começar: arquivo errado
+aparece na hora, não depois de meia hora de coleta. Se no fim nenhuma
+leitura cair dentro das áreas, o laudo sai sem áreas — a coleta não se
+perde.
+
+Só polígono demarca área. Um caminho (linha) que volta ao ponto de partida
+é aceito como polígono; caminho aberto é ignorado.
 
 ## Coleta ao vivo: densidade de leituras
 
@@ -70,11 +113,10 @@ foram descartadas ("Parados"), e o fim da coleta também.
 
 ## Coleta ao vivo: o enlace de saída
 
-A lista de vizinhos do rádio mostra o custo de **um salto** até cada um;
-a rede escolhe a saída pelo custo do **caminho inteiro** até o destino.
-Nos dados do CA-1006, o vizinho de sinal mais forte era a saída real em só
-5 de 53 pontos, e o de menor custo em 18. Quem diz por onde o rádio sai é
-o **trace** — o que o MeshMapper grava em `traceInfo`.
+O laudo **não usa custo** — nem do enlace, nem do caminho. O TRACE fica
+só para saber **por qual vizinho o rádio sai**: nos dados do CA-1006, o
+vizinho de sinal mais forte era a saída real em só 5 de 53 pontos. É o
+que o MeshMapper grava em `traceInfo`.
 
 A coleta faz o trace em cada leitura, na mesma sessão e no mesmo instante
 do State (nada de defasagem), até o destino da tela — padrão
@@ -84,12 +126,19 @@ amostra traz, como no arquivo:
 | campo | de onde |
 |---|---|
 | RSSI do enlace, SNR, banda, canal | o enlace de **saída** |
-| Custo do enlace | o custo do salto de saída |
-| Custo do caminho | o custo total até o destino |
 | Servidor | o vizinho por onde saiu |
 
-Sem trace (rádio que recusa, ou caixa desmarcada), a amostra sai como
-antes — vizinho de sinal mais forte — e o custo do caminho fica vazio.
+Sem trace (rádio que recusa, rádio sem rota, ou caixa desmarcada), a
+amostra sai como antes — vizinho de sinal mais forte.
+
+**A saída tem de ser a nossa.** O rádio roda uma tarefa por vez, de
+qualquer sessão; se o MeshMapper ou o BC|Commander pedirem um TRACE no
+mesmo rádio no meio do nosso, a saída que chega pode ser a deles. A coleta
+confere que a saída é da **nossa tarefa** e do **nosso destino**; se não
+for, conta como TRACE ocupado e a próxima leitura tenta de novo.
+
+Só o TRACE é pedido ao rádio. As outras tarefas que a mesma mensagem da
+API aceita (REBOOT, ZEROIZE, CLEAR, KICK…) não existem no código.
 
 **A falha é decidida rádio a rádio.** Na v16, a primeira falha de trace de
 qualquer rádio, antes de algum sucesso, desligava o trace da coleta
@@ -119,7 +168,8 @@ ocupando a tarefa. E a sessão se identifica no login como `site_survey`
 para separar a sessão desta ferramenta da de um MeshMapper.
 
 Cada motivo novo aparece uma vez no andamento, com o nome do rádio — e,
-quando o rádio responde algo sem custo, o começo do texto que ele mandou.
+quando o rádio responde algo sem enlace de saída, o começo do texto que
+ele mandou.
 A linha de status mostra `trace N ok · K ocupado · M rádio(s) sem`; no
 fim da coleta sai o total e os motivos mais frequentes (agrupados sem o
 número da sessão, que o rádio põe na mensagem e muda a cada vez).
@@ -192,9 +242,10 @@ voltou "task TRACE is already running": a tarefa era da coleta. O
 diagnóstico agora espera até 10 s pela tarefa livre e grava de quem ela
 é (sessão, endereço, idade, cliente).
 
-A saída daquele rádio: caminho 9225, salto 6352, saída pela `wlan0wds50`
-em 2,4 GHz canal 6, −42 dBm, SNR 53. O interpretador foi escrito e
-testado com esses bytes exatos.
+A saída daquele rádio: saída pela `wlan0wds50` em 2,4 GHz canal 6,
+−42 dBm, SNR 53. O interpretador foi escrito e testado com esses bytes
+exatos. A linha crua do rádio, gravada no arquivo do diagnóstico, traz
+também o custo; a parte interpretada, não.
 
 Para repetir o teste em outro rádio:
 
@@ -226,10 +277,10 @@ existem no código.
 
 | arquivo | o que tem |
 |---|---|
-| `Survey_*_24GHz.kmz` | trajeto de 2,4 GHz, uma aba por grandeza, com a legenda na tela |
+| `Survey_*_24GHz.kmz` | trajeto de 2,4 GHz, uma aba por grandeza (com uma pasta por área), a pasta Áreas e a legenda na tela |
 | `Survey_*_58GHz.kmz` | idem, 5,8 GHz |
-| `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, uma página por grandeza/banda e duas páginas em branco para diagnóstico e conclusões |
-| `Survey_*.xlsx` | origens, resumo, por grandeza e amostras |
+| `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, resumo por área, uma seção por área (com uma página por grandeza/banda) e duas páginas em branco para diagnóstico e conclusões |
+| `Survey_*.xlsx` | origens, resumo, por grandeza, por área e amostras |
 
 **Juntar tudo num relatório só** (padrão) produz um conjunto com todas as
 capturas — é o caso da campanha cobrindo a mina. Desmarcado, sai um
@@ -248,7 +299,8 @@ Dentro de cada arquivo, uma aba por grandeza medida:
 | **RSSI (melhor ERB/ERM do ponto)** | a **cor do laudo** |
 | SNR | relação sinal/ruído do enlace |
 | Ruído | piso de ruído, recuperado de `signal − snr` |
-| Custo do caminho | o *Trace Path Cost* do MeshMapper: custo InstaMesh até o destino do trace |
+
+Com áreas demarcadas, cada aba tem uma pasta por área.
 
 **RSSI aqui é o da melhor ERB/ERM visível no ponto**, não o do enlace que
 o InstaMesh escolheu. Outro caminhão passando dá sinal ótimo e vai
@@ -272,32 +324,14 @@ rádio, é escolha de caminho, e repetidora nova não resolveria.
 
 ## O mapa: calor por faixa
 
-**A aba que abre: Enlaces bons (Rajant).** É a régua do MeshMapper da
-Rajant, conferida no KMZ oficial de 28/09/2026: em cada ponto, quantos
-enlaces são **bons** — custo ≤ 10000 **e** SNR ≥ 20 — ou **ótimos** —
-custo ≤ 5000 **e** SNR ≥ 30 —, somando todas as WLANs do rádio, como o
-MeshMapper conta. Nos arquivos do MeshMapper vale a régua gravada no
-próprio arquivo (`configuration`). Na aba:
+O mapa abre na aba **RSSI**. A aba de enlaces bons pela régua de custo
+da Rajant saiu do laudo junto com o custo.
 
-- **calor** pela contagem: 0 vermelho, 1 laranja, 2 amarelo, 3+ verde
-  (as cores medidas nos pinos oficiais);
-- **pinos numerados**, como os do MeshMapper — gota com o número de
-  enlaces bons, estrela com o de ótimos, "!" sem vizinho. Um pino a cada
-  ~30 m de estrada, mostrando uma leitura real do trecho (a do meio, pelo
-  lado pior); o balão lista os enlaces bons pelo nome, com custo e SNR.
-  Um pino por leitura, com 29 veículos, viraria um tapete por cima do
-  calor;
-- **linha do trajeto colorida pelo custo do caminho**, como o Trace Path
-  do MeshMapper (≤ 10000, ≤ 20000, acima).
-
-No KMZ oficial de 28/09 (CA-1024), o gerador daqui conta os mesmos pinos
-que a Rajant desenhou: 25 com 1, 12 com 2 e 4 com 0.
-
-RSSI, SNR, Ruído e Custo do caminho seguem como abas, cada uma com o seu
-calor. **O calor ficou mais limpo:** a contagem de cada faixa é suavizada
-em ~4 m antes de escolher a cor — a fronteira entre faixas sai sem lascas
-— e a borda esfuma em ~6 m. A cor continua sendo a faixa da maioria,
-nunca uma média.
+**O calor:** a contagem de cada faixa é suavizada em ~4 m antes de
+escolher a cor — a fronteira entre faixas sai sem lascas — e a borda
+esfuma em ~6 m. A cor continua sendo a faixa da maioria, nunca uma média.
+Com áreas, o calor de cada área é **recortado no polígono**: não
+transborda para a área vizinha nem pinta o buraco.
 
 O KMZ abre no **mapa de calor por faixa**, no estilo do KMZ de referência
 de 27/09/2026:
@@ -309,15 +343,15 @@ de 27/09/2026:
   do descarte dos parados, um caminhão a 40 km/h fica com leituras a
   20–100 m uma da outra. Empate vai para a faixa pior.
 - **Transparente** onde não há leitura por perto; **cinza claro** onde só
-  há leitura sem valor (no custo do caminho: sem trace). A cor é a da
+  há leitura sem valor naquela grandeza. A cor é a da
   régua, exata — só a transparência varia —, com sombra suave fora da
   mancha para ela se separar do chão da cava.
 - **ERB/ERM ficam fora do calor** (a leitura delas é o enlace de uma torre
   com outra) e aparecem como **quadrados** na cor da mediana das leituras
   de cada uma; o nome aparece ao passar o mouse, e o balão diz por onde ela
   sai.
-- **Uma grandeza por vez**: no painel, RSSI, SNR, Ruído e Custo do caminho
-  são botões de rádio — ligar uma desliga a outra.
+- **Uma grandeza por vez**: no painel, RSSI, SNR e Ruído são botões de
+  rádio — ligar uma desliga a outra.
 - **Legenda em cartão escuro na tela**, com a banda, a linha do requisito
   entre as faixas que atendem e as que não, e o cinza.
 - **Trilha** (uma linha por caminho) e **Medições** (um ponto por leitura,
@@ -376,32 +410,6 @@ com os próprios requisitos: −75 sobre −85 é SNR 10.
 | −104 a −96 | laranja | SNR 21 a 29 |
 | ≥ −95 | vermelho | SNR ≤ 20 |
 
-**Custo do caminho** — a régua **oficial da Rajant** (`greatPath = 10000`,
-`goodPath = 20000` no `data.json`), a mesma pela qual o MeshMapper pinta a
-linha do trajeto. Não é requisito da Modular: slides, legenda e pasta
-dizem "referência Rajant".
-
-| Custo do caminho | cor | leitura |
-|---|---|---|
-| ≤ 10000 | verde | ótimo |
-| 10001 a 20000 | laranja | bom |
-| ≥ 20001 ou **sem rota** | vermelho | ruim |
-
-É o custo **total** até o destino do trace (o MeshMapper grava o host em
-`traceInfo.host`; nos seus arquivos, `10.188.96.11`, que vai escrito no
-slide de Metodologia). Resume num número os saltos, a taxa e o SNR de cada
-enlace do caminho — é a medida mais próxima de "o Dispatch funciona aqui".
-
-- **Sem rota** (`2147483647`) é medição, a pior possível: sai vermelho,
-  como no MeshMapper, e escrito "sem rota" — nunca o número.
-- A estatística usa a **mediana**: um único ponto sem rota leva a média do
-  custo a dez dígitos.
-- O **custo do enlace** (primeiro salto, `hopcost`) continua na coluna
-  *Custo do enlace* do Excel; *Custo do caminho* fica ao lado.
-- Na **coleta ao vivo**, o custo do caminho vem do TRACE feito pela
-  própria ferramenta — ver "Coleta ao vivo: o enlace de saída", acima.
-  Rádio que recusar o trace sai sem a aba e sem o slide, nunca com zero.
-
 ### A fronteira exata
 
 O rádio reporta dBm e dB **inteiros**: −75 exato é uma leitura comum. O
@@ -418,8 +426,9 @@ basta trocar o operador em `REQUISITOS` e a cor muda junto com a contagem.
 O PPT traz um slide de **Metodologia** logo após o sumário: ficha técnica
 do levantamento — instrumento, número de equipamentos e amostras, a
 grandeza de referência, como a posição foi obtida e validada, as bandas,
-o requisito Modular Mining e o que **não** foi medido — mais essa mesma
-régua de cores com a classificação de cada faixa.
+o requisito Modular Mining, as áreas demarcadas (e quantas leituras
+ficaram fora delas) e o que **não** foi medido — mais essa mesma régua de
+cores com a classificação de cada faixa.
 
 ## Diagnóstico e conclusões
 
@@ -529,13 +538,11 @@ python site_survey.py
 | `site_survey.py` | a janela: só a interface |
 | `coleta_rajant.py` | a coleta ao vivo dos rádios |
 | `survey_meshmapper.py` | a leitura de arquivos do MeshMapper |
-| `rajant_monitor.py` | o motor de KMZ, PPT e Excel |
-| `bcapi-ref/proto/` | os `.proto` do bcapi: fonte de tudo que se afirma sobre a API |
+| `motor_survey.py` | o motor de KMZ, PPT e Excel, a leitura dos rádios e das áreas |
 | `marca/` | logos usados nos decks |
 | `exemplos/` | uma captura de veículo e uma de repetidora, usadas pelos testes |
 | `build/` | spec do PyInstaller e o `.bat` |
 
-O `rajant_monitor.py` vem junto porque é ele que gera KMZ, PPT e Excel —
-são milhares de linhas já corrigidas contra armadilhas do formato (ordem
-dos elementos no KML, escape do XML, borda de célula no PPTX). Aqui ele é
-usado só como biblioteca: nada de rede é acionado.
+O `motor_survey.py` é o motor do survey, separado do monitor
+(`rajant_monitor.py`, o exportador para o Grafana): os dois projetos não
+dependem um do outro.

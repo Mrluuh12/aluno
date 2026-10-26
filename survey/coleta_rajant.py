@@ -721,14 +721,32 @@ class Coleta:
 
 
 def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
-                   fazer_excel=True, aviso=print):
-    """Grava o survey no banco e emite os relatórios. Devolve os arquivos."""
+                   fazer_excel=True, aviso=print, areas=None):
+    """Grava o survey no banco e emite os relatórios. Devolve os arquivos.
+
+    `areas`: KMZ/KML das áreas demarcadas (ou a lista já lida); sem ele,
+    o [survey] areas do config. Leitura fora das áreas sai do laudo."""
     am, pr = coleta.amostras, coleta.peers
     if not am:
         raise RuntimeError("nenhuma amostra com posição foi coletada")
+    cfg = rm.cfg_relatorio(rm.carregar_config())
+    # A coleta não se refaz: com o arquivo de áreas ilegível, ou com tudo
+    # fora delas, o laudo sai sem áreas em vez de a coleta se perder.
+    try:
+        areas = rm.carregar_areas(areas, cfg)
+    except Exception as e:
+        aviso(f"  ! áreas não lidas ({e}): laudo sem áreas")
+        areas = None
     # A coleta já descarta na hora (`_no_mesmo_ponto`); aqui é a mesma
     # regra aplicada ao conjunto, para o banco nunca receber o parado.
     am, pr, desc = rm.descartar_parados(am, pr)
+    am_a, pr_a, info_a = rm.separar_por_area(am, pr, areas)
+    if areas and not am_a:
+        aviso(f"  ! nenhuma das {info_a['lidas']} leituras caiu dentro das "
+              f"áreas demarcadas: laudo sem áreas")
+        areas, info_a = None, None
+    else:
+        am, pr = am_a, pr_a
     destino = Path(saida or ".").resolve()
     destino.mkdir(parents=True, exist_ok=True)
 
@@ -737,7 +755,8 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
           "intervalo_s": None, "arquivo": "coleta ao vivo",
           "versao_bcc": None,
           # Para onde o TRACE apontou o enlace de saída; None = sem trace.
-          "destino_trace": coleta.trace_destino if coleta.trace_ok else None}
+          "destino_trace": coleta.trace_destino if coleta.trace_ok else None,
+          "areas": rm.info_das_areas(areas, [info_a])}
     sv["cobertura"] = rm.cobertura_disponivel(am, pr)
 
     con = rm.banco()
@@ -750,10 +769,12 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
                          intervalo_efetivo_s=rm._mm_intervalo_real(am))
         if sv["destino_trace"]:
             rm.survey_destino_trace(con, sid, sv["destino_trace"])
+        rm.survey_areas(con, sid, sv["areas"])
     finally:
         con.close()
 
-    cfg = rm.cfg_relatorio(rm.carregar_config())
+    import survey_meshmapper as _smm
+    _smm._aviso_areas(sv, am, aviso)
     campos = rm.campos_com_medicao(am)
     com_viz = rm._cfg_bool(cfg, "relatorio", "vizinhanca", False)
     sitios = rm.sitios_parados(am, pr) if com_viz else []
@@ -762,8 +783,8 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
         # Um arquivo por banda — ver `_kmz_por_banda` no survey_meshmapper,
         # que é a mesma regra: 2,4 e 5,8 GHz são malhas diferentes no
         # mesmo terreno e num arquivo só uma tapa a outra.
-        import survey_meshmapper as _smm
-        feitos += _smm._kmz_por_banda(sv, am, pr, destino, cfg, campos, aviso)
+        feitos += _smm._kmz_por_banda(sv, am, pr, destino, cfg, campos, aviso,
+                                      areas)
     if fazer_kmz and sitios:
         try:
             dados, nome = rm.gerar_kml_pontos_fixos(sitios, cfg=cfg)
@@ -956,6 +977,10 @@ def main(argv=None):
                     help="não pedir o TRACE (enlace de saída)")
     ap.add_argument("--destino-trace", default=rm.DESTINO_TRACE_PADRAO,
                     help="host para onde o TRACE aponta o enlace de saída")
+    ap.add_argument("--areas", metavar="ARQ",
+                    help="KMZ/KML do Google Earth com as áreas demarcadas "
+                         "(um polígono por área). Leitura fora das áreas "
+                         "sai do laudo.")
     ap.add_argument("--testar-trace", metavar="IP",
                     help="diagnóstico de campo: pergunta a UM rádio como "
                          "ele responde à leitura e ao TRACE e grava um .txt")
@@ -965,6 +990,16 @@ def main(argv=None):
                             senha=a.senha, porta=a.porta, pasta=a.saida)
         print(f"\nArquivo gravado: {alvo}")
         return 0
+
+    # As áreas são lidas ANTES de coletar: arquivo errado aparece agora,
+    # não depois de meia hora de coleta.
+    try:
+        areas = rm.carregar_areas(a.areas, rm.carregar_config())
+    except Exception as e:
+        print(f"ERRO nas áreas: {e}"); return 1
+    if areas:
+        print(f"{len(areas)} área(s) demarcada(s): "
+              + ", ".join(x["nome"] for x in areas))
 
     seeds = [s.strip() for s in a.seeds.replace(";", ",").split(",") if s.strip()]
     if a.lista:
@@ -981,7 +1016,7 @@ def main(argv=None):
                trace_destino=None if a.sem_trace else a.destino_trace,
                malha=achados)
     c.rodar(a.minutos)
-    feitos = gravar_e_gerar(c, a.saida, aviso=print)
+    feitos = gravar_e_gerar(c, a.saida, aviso=print, areas=areas or [])
     print(f"\n{len(feitos)} arquivo(s) gerado(s).")
     return 0
 

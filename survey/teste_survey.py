@@ -5653,5 +5653,427 @@ class TestJanelaUnica(unittest.TestCase):
         self.assertNotIn("def descobrir_malha", fonte)
 
 
+
+# ══════════════════════════════════════════════════════════════════
+# ÁREAS DEMARCADAS (pedido de 26/10/2026)
+# ══════════════════════════════════════════════════════════════════
+_LAT0, _LON0 = -18.921, -43.4300
+_KX = 111320 * __import__("math").cos(__import__("math").radians(_LAT0))
+
+
+def _captura_sintetica(n=150, passo_m=15.0):
+    """Captura do MeshMapper ao longo de uma estrada reta para leste: um
+    ponto a cada `passo_m`, 5 s entre eles. O RSSI das ERM cai de -60 a
+    -85 dBm a cada 50 pontos."""
+    import json as _j, copy as _c, math as _m
+    base = _j.loads((Path(__file__).resolve().parent / "exemplos"
+                     / "meshmapper_exemplo.json").read_text(encoding="utf-8"))
+    p0 = base["points"][0]
+    pts = []
+    for k in range(n):
+        p = _c.deepcopy(p0)
+        p["unixTimeStamp"] = 1789055967849 + k * 5000
+        p["gpsLat"] = _LAT0 + 0.00002 * _m.sin(k / 9)
+        p["gpsLong"] = _LON0 + k * passo_m / _KX
+        v = -60 - int(25 * (k % 50) / 50)
+        for w in p["wlanPeers"].values():
+            for q in w:
+                if q["name"].startswith("ERM"):
+                    q["signal"] = v; q["rssi"] = v + 95
+        p["traceInfo"]["path"]["signal"] = v - 3
+        p["traceInfo"]["path"]["rssi"] = v + 92
+        pts.append(p)
+    base["points"] = pts
+    return base
+
+
+def _caixa_kml(nome, x0, x1, buraco=None, meia_altura=0.0005, tag="Polygon"):
+    """Placemark de um retângulo entre x0 e x1 metros a leste da origem."""
+    lo0, lo1 = _LON0 + x0 / _KX, _LON0 + x1 / _KX
+    la0, la1 = _LAT0 - meia_altura, _LAT0 + meia_altura
+    c = f"{lo0},{la0},0 {lo1},{la0},0 {lo1},{la1},0 {lo0},{la1},0 {lo0},{la0},0"
+    if tag == "LineString":
+        return (f"<Placemark><name>{nome}</name><LineString><coordinates>{c}"
+                f"</coordinates></LineString></Placemark>")
+    dentro = ""
+    if buraco:
+        b0, b1 = _LON0 + buraco[0] / _KX, _LON0 + buraco[1] / _KX
+        y0, y1 = la0 + 0.0001, la1 - 0.0001
+        dentro = (f"<innerBoundaryIs><LinearRing><coordinates>{b0},{y0},0 "
+                  f"{b1},{y0},0 {b1},{y1},0 {b0},{y1},0 {b0},{y0},0"
+                  f"</coordinates></LinearRing></innerBoundaryIs>")
+    return (f"<Placemark>" + (f"<name>{nome}</name>" if nome else "")
+            + f"<Polygon><outerBoundaryIs><LinearRing><coordinates>{c}"
+              f"</coordinates></LinearRing></outerBoundaryIs>{dentro}"
+              f"</Polygon></Placemark>")
+
+
+def _kml(*placemarks, ns="http://www.opengis.net/kml/2.2"):
+    xmlns = f' xmlns="{ns}"' if ns else ""
+    return (f'<?xml version="1.0" encoding="UTF-8"?><kml{xmlns}><Document>'
+            f'<name>Áreas</name><Folder><name>Mina</name>{"".join(placemarks)}'
+            f'</Folder></Document></kml>')
+
+
+def _gravar_areas(pasta, *placemarks, kmz=True, **kw):
+    import zipfile
+    pasta = Path(pasta)
+    if kmz:
+        alvo = pasta / "areas.kmz"
+        with zipfile.ZipFile(alvo, "w") as z:
+            z.writestr("doc.kml", _kml(*placemarks, **kw))
+    else:
+        alvo = pasta / "areas.kml"
+        alvo.write_text(_kml(*placemarks, **kw), encoding="utf-8")
+    return str(alvo)
+
+
+# Duas áreas na estrada: Cava Norte (0–700 m, com um buraco de 300 a
+# 360 m) e Britagem (900–1600 m). Com um ponto a cada 15 m de 0 a 2235 m:
+# 43 na Cava, 47 na Britagem e 60 fora.
+_AREAS_PADRAO = (("Cava Norte", -20, 700, (300, 360)), ("Britagem", 900, 1600, None))
+
+
+class TestAreasDemarcadas(unittest.TestCase):
+    """O laudo por área: polígonos do Google Earth, a leitura de fora
+    descartada, e KMZ, PPT e Excel separados por área."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+
+    def _areas(self, **kw):
+        return _gravar_areas(self.tmp, *[_caixa_kml(n, a, b, h)
+                                         for n, a, b, h in _AREAS_PADRAO], **kw)
+
+    def _captura(self, nome="captura.json", **kw):
+        import json as _j
+        alvo = self.tmp / nome
+        alvo.write_text(_j.dumps(_captura_sintetica(**kw)), encoding="utf-8")
+        return str(alvo)
+
+    # ── leitura do arquivo ──
+    def test_le_kmz_com_nome_buraco_e_ordem(self):
+        ar = rm.ler_areas(self._areas())
+        self.assertEqual([a["nome"] for a in ar], ["Cava Norte", "Britagem"])
+        self.assertEqual(len(ar[0]["poligonos"][0]["buracos"]), 1)
+        self.assertEqual(ar[0]["arquivo"], "areas.kmz")
+        # Anel sem o ponto repetido de fechamento.
+        self.assertEqual(len(ar[1]["poligonos"][0]["externo"]), 4)
+
+    def test_le_kml_solto_e_kml_antigo_sem_namespace_novo(self):
+        for ns in ("http://earth.google.com/kml/2.1", None):
+            ar = rm.ler_areas(_gravar_areas(
+                self.tmp, _caixa_kml("A", 0, 100), kmz=False, ns=ns))
+            self.assertEqual([a["nome"] for a in ar], ["A"])
+
+    def test_mesmo_nome_vira_uma_area_em_duas_partes(self):
+        ar = rm.ler_areas(_gravar_areas(
+            self.tmp, _caixa_kml("Pátio", 0, 100), _caixa_kml("Pátio ", 500, 600),
+            _caixa_kml("Outra", 200, 300)))
+        self.assertEqual([a["nome"] for a in ar], ["Pátio", "Outra"])
+        self.assertEqual(len(ar[0]["poligonos"]), 2)
+        self.assertEqual(rm.area_do_ponto(ar, _LAT0, _LON0 + 550 / _KX), "Pátio")
+
+    def test_poligono_sem_nome_ganha_nome(self):
+        ar = rm.ler_areas(_gravar_areas(self.tmp, _caixa_kml("", 0, 100)))
+        self.assertEqual(ar[0]["nome"], "Área 1")
+
+    def test_caminho_fechado_vale_e_aberto_nao(self):
+        ar = rm.ler_areas(_gravar_areas(
+            self.tmp, _caixa_kml("Fechado", 0, 100, tag="LineString")))
+        self.assertEqual([a["nome"] for a in ar], ["Fechado"])
+        aberto = ('<Placemark><name>Aberto</name><LineString><coordinates>'
+                  f'{_LON0},{_LAT0},0 {_LON0 + 0.001},{_LAT0},0 '
+                  f'{_LON0 + 0.001},{_LAT0 + 0.001},0</coordinates>'
+                  '</LineString></Placemark>')
+        with self.assertRaises(RuntimeError) as ctx:
+            rm.ler_areas(_gravar_areas(self.tmp, aberto))
+        self.assertIn("Adicionar polígono", str(ctx.exception))
+
+    def test_arquivo_sem_poligono_ou_invalido_explica(self):
+        with self.assertRaises(RuntimeError):
+            rm.ler_areas(_gravar_areas(self.tmp))
+        ruim = self.tmp / "ruim.kml"; ruim.write_text("<kml><Document>", "utf-8")
+        with self.assertRaises(RuntimeError):
+            rm.ler_areas(str(ruim))
+        with self.assertRaises(RuntimeError):
+            rm.ler_areas(str(self.tmp / "nao_existe.kmz"))
+
+    # ── ponto na área ──
+    def test_ponto_dentro_fora_e_no_buraco(self):
+        ar = rm.ler_areas(self._areas())
+        lon = lambda x: _LON0 + x / _KX
+        self.assertEqual(rm.area_do_ponto(ar, _LAT0, lon(100)), "Cava Norte")
+        self.assertIsNone(rm.area_do_ponto(ar, _LAT0, lon(330)))     # buraco
+        self.assertIsNone(rm.area_do_ponto(ar, _LAT0, lon(800)))     # entre
+        self.assertEqual(rm.area_do_ponto(ar, _LAT0, lon(1000)), "Britagem")
+        self.assertIsNone(rm.area_do_ponto(ar, _LAT0 + 0.001, lon(100)))
+        self.assertIsNone(rm.area_do_ponto(ar, None, None))
+
+    def test_sobreposicao_fica_com_a_primeira_do_arquivo(self):
+        ar = rm.ler_areas(_gravar_areas(
+            self.tmp, _caixa_kml("Primeira", 0, 200), _caixa_kml("Segunda", 100, 300)))
+        am = [{"radio": "X", "lat": _LAT0, "lon": _LON0 + 150 / _KX}]
+        dentro, _, info = rm.separar_por_area(am, None, ar)
+        self.assertEqual(dentro[0]["area"], "Primeira")
+        self.assertEqual(info["sobrepostas"], 1)
+
+    def test_separar_descarta_fora_e_renumera_vizinhos(self):
+        ar = rm.ler_areas(self._areas())
+        lon = lambda x: _LON0 + x / _KX
+        am = [{"radio": "X", "lat": _LAT0, "lon": lon(x)} for x in (100, 800, 1000)]
+        pr = [{"ponto": k, "nome": f"v{k}"} for k in (1, 2, 3)]
+        dentro, pr2, info = rm.separar_por_area(am, pr, ar)
+        self.assertEqual([a["area"] for a in dentro], ["Cava Norte", "Britagem"])
+        self.assertEqual([(p["ponto"], p["nome"]) for p in pr2], [(1, "v1"), (2, "v3")])
+        self.assertEqual((info["lidas"], info["fora"]), (3, 1))
+        self.assertNotIn("area", am[0], "a lista de entrada não muda")
+        # Sem áreas, tudo como veio.
+        self.assertIs(rm.separar_por_area(am, pr, None)[0], am)
+
+    # ── importação e banco ──
+    def test_importar_descarta_fora_e_grava_a_area(self):
+        ar = rm.ler_areas(self._areas())
+        con = rm.banco(str(self.tmp / "s.db"))
+        try:
+            sid, sv, am, pr, _ = rm.importar_meshmapper_varios(
+                [self._captura()], con=con, areas=ar)
+            self.assertEqual(len(am), 90)
+            info = rm.areas_do_survey(sv)
+            self.assertEqual((info["lidas"], info["fora"]), (150, 60))
+            self.assertEqual(info["ordem"], ["Cava Norte", "Britagem"])
+            self.assertEqual(info["por_area"], {"Cava Norte": 43, "Britagem": 47})
+            # No banco: a área de cada amostra e o registro do survey, que
+            # é de onde o PPT lê.
+            do_banco = rm.survey_amostras(con, sid)
+            self.assertEqual({a["area"] for a in do_banco}, {"Cava Norte", "Britagem"})
+            self.assertEqual(rm.areas_do_survey(rm.survey_obter(con, sid))["fora"], 60)
+        finally:
+            con.close()
+
+    def test_tudo_fora_das_areas_e_erro_claro(self):
+        ar = rm.ler_areas(_gravar_areas(self.tmp, _caixa_kml("Longe", 50000, 50100)))
+        con = rm.banco(str(self.tmp / "s.db"))
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                rm.importar_meshmapper_varios([self._captura()], con=con, areas=ar)
+            self.assertIn("dentro das áreas", str(ctx.exception))
+        finally:
+            con.close()
+
+    def test_banco_antigo_ganha_as_colunas(self):
+        import sqlite3
+        cam = str(self.tmp / "velho.db")
+        c = sqlite3.connect(cam)
+        c.executescript("CREATE TABLE survey (id INTEGER PRIMARY KEY, nome TEXT, "
+                        "inicio REAL, criado_em REAL);"
+                        "CREATE TABLE amostra (survey_id INTEGER, radio TEXT, ts REAL);")
+        c.close()
+        con = rm.banco(cam)
+        try:
+            self.assertIn("areas", {r["name"] for r in con.execute("PRAGMA table_info(survey)")})
+            self.assertIn("area", {r["name"] for r in con.execute("PRAGMA table_info(amostra)")})
+        finally:
+            con.close()
+
+    # ── relatórios ──
+    def _gerar(self, areas="padrao"):
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        if areas == "padrao":
+            areas = self._areas()
+        return sm.gerar([self._captura()], str(self.tmp / "saida"),
+                        aviso=lambda t: None, areas=areas)
+
+    def _doc_kml(self, feitos):
+        import zipfile
+        k = [f for f in feitos if f.suffix == ".kmz"][0]
+        z = zipfile.ZipFile(k)
+        return z, z.read("doc.kml").decode("utf-8")
+
+    def test_kmz_tem_uma_pasta_por_area_em_cada_aba(self):
+        from xml.etree import ElementTree as ET
+        NS = "{http://www.opengis.net/kml/2.2}"
+        z, doc = self._doc_kml(self._gerar())
+        raiz = ET.fromstring(doc).find(NS + "Document")
+        grandeza = [f for f in raiz.findall(NS + "Folder")
+                    if f.find(NS + "name").text == "Grandeza"][0]
+        abas = grandeza.findall(NS + "Folder")
+        self.assertTrue(abas)
+        for aba in abas:
+            sub = [f.find(NS + "name").text for f in aba.findall(NS + "Folder")]
+            self.assertEqual(sub, ["Cava Norte (43)", "Britagem (47)"], sub)
+            for f in aba.findall(NS + "Folder"):
+                self.assertTrue(f.findall(NS + "GroundOverlay"),
+                                "área sem mapa de calor")
+        nomes = z.namelist()
+        self.assertIn("files/calor_sinal_cob_area1.png", nomes)
+        self.assertIn("files/calor_sinal_cob_area2.png", nomes)
+
+    def test_kmz_tem_a_pasta_areas_com_contorno_e_numeros(self):
+        z, doc = self._doc_kml(self._gerar())
+        self.assertIn("<name>Áreas (2)</name>", doc)
+        self.assertEqual(doc.count("<styleUrl>#area</styleUrl>"), 2)
+        self.assertEqual(doc.count("<innerBoundaryIs>"), 1)       # o buraco
+        self.assertIn("43 amostras", doc)
+        self.assertIn("60 de 150 leituras fora das áreas", doc)
+
+    def test_calor_da_area_e_recortado_no_poligono(self):
+        import io as _io, numpy as np
+        from PIL import Image
+        ar = rm.ler_areas(self._areas())
+        sv, am, pr = rm.ler_meshmapper(self._captura())
+        rm.cobertura_disponivel(am, pr)
+        dentro, _, _ = rm.separar_por_area(am, pr, ar)
+        cava = [a for a in dentro if a["area"] == "Cava Norte"]
+        png, (n_, s_, l_, o_), _ = rm.calor_por_faixas(
+            cava, "sinal_cob", mascara=ar[0]["poligonos"])
+        img = np.array(Image.open(_io.BytesIO(png)).convert("RGBA"))
+        def alfa(x_m):
+            lon = _LON0 + x_m / _KX
+            c = int((lon - o_) / (l_ - o_) * (img.shape[1] - 1))
+            l = int((n_ - _LAT0) / (n_ - s_) * (img.shape[0] - 1))
+            return img[l, c, 3]
+        self.assertGreater(alfa(150), 100)          # medido, dentro
+        self.assertEqual(alfa(330), 0)              # no buraco
+        # Sem a máscara, o buraco sai pintado: é ela que recorta.
+        png2, cx2, _ = rm.calor_por_faixas(cava, "sinal_cob")
+        img2 = np.array(Image.open(_io.BytesIO(png2)).convert("RGBA"))
+        n2, s2, l2, o2 = cx2
+        c = int((_LON0 + 330 / _KX - o2) / (l2 - o2) * (img2.shape[1] - 1))
+        l = int((n2 - _LAT0) / (n2 - s2) * (img2.shape[0] - 1))
+        self.assertGreater(img2[l, c, 3], 0)
+
+    def _ppt(self, feitos):
+        from pptx import Presentation
+        return Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+
+    @staticmethod
+    def _titulo(sl):
+        return rm._titulo_do_slide(sl)
+
+    def test_ppt_tem_resumo_e_secao_por_area(self):
+        p = self._ppt(self._gerar())
+        tits = [self._titulo(s) for s in p.slides]
+        self.assertIn("Resumo por área", tits)
+        i_cava, i_brit = tits.index("Cava Norte"), tits.index("Britagem")
+        self.assertLess(i_cava, i_brit)
+        entre = tits[i_cava + 1:i_brit]
+        self.assertTrue(entre and all(t.startswith("Cava Norte · ") for t in entre), entre)
+        # Sem páginas do survey inteiro: com áreas, a grandeza é por área.
+        self.assertFalse([t for t in tits if t.startswith("Intensidade de Sinal")])
+        texto = " ".join(sh.text_frame.text for s in p.slides for sh in s.shapes
+                         if sh.has_text_frame)
+        self.assertIn("60 de 150 leituras", texto)
+
+    def test_indice_geral_leva_as_areas_e_a_area_leva_as_paginas(self):
+        p = self._ppt(self._gerar())
+        slides = list(p.slides)
+        por_id = {s.slide_id: s for s in slides}
+        def links(sl):
+            out = []
+            for sh in sl.shapes:
+                if not sh.has_text_frame: continue
+                rel = sh.click_action.target_slide if sh.click_action else None
+                if rel is not None:
+                    out.append((sh.text_frame.text.strip(), rel.slide_id))
+            return out
+        indice = slides[1]
+        self.assertEqual(self._titulo(indice), "Índice")
+        alvos = [self._titulo(por_id[i]) for _, i in links(indice)]
+        self.assertIn("Cava Norte", alvos)
+        self.assertIn("Resumo por área", alvos)
+        self.assertFalse([a for a in alvos if " · " in a],
+                         "página de área no índice geral")
+        cava = [s for s in slides if self._titulo(s) == "Cava Norte"][0]
+        pags = [self._titulo(por_id[i]) for t, i in links(cava) if t.startswith("›")]
+        self.assertTrue(pags and all(t.startswith("Cava Norte · ") for t in pags), pags)
+        # A página da área volta à área e ao índice.
+        pag = [s for s in slides if self._titulo(s).startswith("Cava Norte · ")][0]
+        volta = dict(links(pag))
+        self.assertEqual(volta.get("◂ ÁREA"), cava.slide_id)
+        self.assertEqual(volta.get("◂ ÍNDICE"), indice.slide_id)
+
+    def test_moldura_da_area_aponta_pasta_que_existe_no_kmz(self):
+        import re as _re
+        feitos = self._gerar()
+        _, doc = self._doc_kml(feitos)
+        p = self._ppt(feitos)
+        molduras = 0
+        for s in p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame and "COLAR AQUI" in sh.text_frame.text:
+                    m = _re.search(r"pasta: (.+?)\s+·", sh.text_frame.text)
+                    self.assertIsNotNone(m, sh.text_frame.text)
+                    self.assertIn(f"<name>{m.group(1)} (", doc)
+                    molduras += 1
+        self.assertGreaterEqual(molduras, 4)
+
+    def test_excel_tem_area_por_amostra_e_aba_por_area(self):
+        import io as _io
+        from openpyxl import load_workbook
+        x = [f for f in self._gerar() if f.suffix == ".xlsx"][0]
+        wb = load_workbook(x)
+        self.assertIn("Por Área", wb.sheetnames)
+        linhas = [r for r in wb["Por Área"].iter_rows(min_row=5, values_only=True)
+                  if r and r[0]]
+        self.assertEqual({r[0] for r in linhas}, {"Cava Norte", "Britagem"})
+        cab = [c.value for c in wb["Amostras"][4]]
+        self.assertIn("Área", cab)
+
+    def test_sem_areas_tudo_como_antes(self):
+        feitos = self._gerar(areas=[])
+        _, doc = self._doc_kml(feitos)
+        self.assertNotIn("<name>Áreas (", doc)
+        p = self._ppt(feitos)
+        tits = [self._titulo(s) for s in p.slides]
+        self.assertNotIn("Resumo por área", tits)
+        self.assertTrue([t for t in tits if t.startswith("Intensidade de Sinal")])
+
+    def test_areas_do_config_valem_sem_argumento(self):
+        cfg = rm.configparser.ConfigParser()
+        cfg.read_string(f"[survey]\nareas = {self._areas()}\n")
+        self.assertEqual([a["nome"] for a in rm.carregar_areas(None, cfg)],
+                         ["Cava Norte", "Britagem"])
+        # Lista vazia é "sem áreas" de propósito: não cai no config.
+        self.assertIsNone(rm.carregar_areas([], cfg))
+
+    def test_indice_longo_continua_em_outro_slide(self):
+        from pptx import Presentation
+        p = Presentation()
+        for k in range(35):
+            rm.slide_anglo(p, f"Página {k + 1}")
+        rm._navegacao_anglo(p)
+        tits = [self._titulo(s) for s in p.slides]
+        # O primeiro slide faz as vezes de capa; os índices vêm logo depois.
+        self.assertEqual(tits[1:3], ["Índice (1/2)", "Índice (2/2)"])
+        self.assertEqual(tits[3], "Página 2")
+
+    def test_coleta_ao_vivo_nao_se_perde_com_area_ruim(self):
+        # A coleta não se refaz: arquivo de áreas com erro, ou tudo fora
+        # delas, dá laudo sem áreas — nunca a coleta perdida.
+        import sys as _s, types, os
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import coleta_rajant as col
+        sv, am, pr = rm.ler_meshmapper(self._captura())
+        c = types.SimpleNamespace(amostras=am, peers=pr, nome="t",
+                                  inicio=am[0]["ts"], fim=am[-1]["ts"],
+                                  trace_destino=None, trace_ok=0)
+        longe = _gravar_areas(self.tmp, _caixa_kml("Longe", 50000, 50100))
+        ditos = []
+        antes = os.getcwd(); os.chdir(self.tmp)
+        try:
+            feitos = col.gravar_e_gerar(c, str(self.tmp / "saida"),
+                                        fazer_ppt=False, fazer_excel=False,
+                                        aviso=ditos.append, areas=longe)
+        finally:
+            os.chdir(antes)
+        self.assertTrue(feitos)
+        self.assertTrue([d for d in ditos if "laudo sem áreas" in d], ditos)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
