@@ -1,0 +1,5757 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+TESTES DO SITE SURVEY — motor_survey.py, coleta_rajant.py, site_survey.py
+e survey_meshmapper.py
+
+Um caso por correção da auditoria das métricas contra os .proto oficiais
+do bcapi (bcapi-ref/proto/). Cada teste referencia o campo do protocolo
+que justifica o comportamento esperado.
+
+Regra que orienta todos os casos: campo que NÃO existe no protocolo não
+pode virar 0 — 0 é indistinguível de "medido e sem ocorrência". Ou vira
+None (e a série não é publicada), ou a métrica deixa de existir.
+
+    python3 teste_survey.py
+"""
+import sys, types, unittest, tempfile, shutil, os, csv, inspect, re, pathlib, json, time
+import sqlite3
+from pathlib import Path
+from unittest import mock
+
+# ── rajant_api não é instalável em CI; o módulo faz sys.exit(1) sem ele ──
+if 'rajant_api' not in sys.modules:
+    _fake = types.ModuleType('rajant_api')
+    class Breadcrumb:                     # stub: nenhum teste vai à rede
+        def __init__(self, *a, **k): pass
+    _fake.Breadcrumb = Breadcrumb
+    sys.modules['rajant_api'] = _fake
+
+import motor_survey as rm
+
+
+# ══════════════════════════════════════════════════════════════════
+# FIXTURE — State no formato text-format EXATO do State.proto
+# ══════════════════════════════════════════════════════════════════
+# Inclui de propósito a ARMADILHA `configuration`: ela repete os nomes
+# wired / wireless / battery / general com os campos de CONFIGURAÇÃO,
+# que não têm contador nenhum. Um parser que extraia do texto inteiro
+# pega esses blocos e lê zero em tudo.
+STATE = """
+system {
+  kernel: "3.18.20"
+  platform: "ES1"
+  uptime: 864000000.0
+  idle: 691200000.0
+  running: true
+  bridgeup: true
+  version: "11.25.0"
+  freeMemory: 131072
+  temperature: 4520
+  bootCounter: 7
+  reboot: false
+  ipv4 {
+    address: "10.188.96.140"
+    subnet: "255.255.255.0"
+  }
+}
+build {
+  date: "2024-03-01"
+  version: "11.25.0"
+  number: "4471"
+}
+instamesh {
+  arpDropped: 3
+  arpRequests: 900
+  arpTotal: 1200
+  floodsDropped: 44
+  packetsDropped: 120
+  packetsMulticast: 5000
+  packetsReceived: 900000
+  packetsSent: 850000
+  sourceFloodsDropped: 17
+  timeWaited: 90
+  discoveriesSourced: 12
+  discoveriesPassed: 34
+}
+battery {
+  hardwareRevision: "B"
+  milliamps: 1500
+  charging: false
+  capacityPercent: 87
+  temperatureCelsius: 31
+  dischargeTimeMinutes: 210
+  chargeTimeMinutes: 0
+}
+alertSystem {
+  bestRadioRate: 866
+  ledMode: "normal"
+  alerts {
+    index: 1
+    type: WARNING
+    message: "link marginal"
+  }
+  alerts {
+    index: 2
+    type: INFORMATION
+    message: "config salva"
+  }
+}
+gps {
+  gpsSwitch {
+    enabled: true
+  }
+  gpsPos {
+    gpsTime: 143025.0
+    gpsLat: "2743.8950S"
+    gpsLong: "05004.1429W"
+    gpsPrecisionH: 0.9
+    gpsQuality: 1.0
+    gpsSatsInView: 9
+    gpsAlt: 812.5
+  }
+  gpsVel {
+    gpsTrackDegreesTrue: 187.3
+    gpsSpeedKnots: 22.95
+    gpsSpeedKph: 42.5
+  }
+}
+wireless {
+  key: 1
+  mac: "00:11:22:33:44:55"
+  name: "wlan0"
+  noise: -95
+  channel: 149
+  txpower: 23
+  type: "5GHz"
+  stats {
+    rxBytes: 5000000
+    rxPackets: 40000
+    txBytes: 3000000
+    txPackets: 30000
+  }
+  ap {
+    key: 1
+    essid: "MESH-OPERACAO"
+    client {
+      mac: "aa:bb:cc:00:00:01"
+      rate: 650
+      rssi: 38
+      signal: -57
+      age: 4
+    }
+    client {
+      mac: "aa:bb:cc:00:00:02"
+      rate: 780
+      rssi: 41
+      signal: -54
+      age: 2
+    }
+    client {
+      mac: "aa:bb:cc:00:00:03"
+      rate: 520
+      rssi: 29
+      signal: -66
+      age: 9
+    }
+  }
+  peer {
+    mac: "00:11:22:33:44:66"
+    enabled: true
+    cost: 120
+    rate: 1300
+    rssi: 42
+    signal: -58
+    age: 3
+    ipv4Address: "10.188.96.141"
+    stats {
+      rxBytes: 900000
+      txBytes: 700000
+    }
+  }
+  peer {
+    mac: "00:11:22:33:44:77"
+    enabled: true
+    cost: 340
+    rate: 650
+    rssi: 21
+    signal: -81
+    age: 11
+  }
+  channelActiveTime: 100000
+  channelBusyTime: 22000
+  channelReceiveTime: 9000
+  channelTransmitTime: 6000
+}
+wired {
+  key: 1
+  mac: "00:11:22:33:44:88"
+  masterMac: "00:11:22:33:44:88"
+  aptState: APT_STATE_MASTER
+  stats {
+    rxBytes: 12000000
+    rxPackets: 90000
+    txBytes: 8000000
+    txPackets: 70000
+  }
+  peer {
+    mac: "00:11:22:33:44:99"
+    enabled: true
+    cost: 10
+    ipv4Address: "10.188.96.142"
+  }
+  name: "eth0"
+  ipv4 {
+    address: "10.188.96.140"
+  }
+}
+wired {
+  key: 2
+  mac: "00:11:22:33:44:aa"
+  aptState: APT_STATE_NONE
+  stats {
+    rxBytes: 0
+    rxPackets: 0
+    txBytes: 0
+    txPackets: 0
+  }
+  name: "eth1"
+}
+configuration {
+  saved {
+    general {
+      name: "BC-MINA-01"
+      notes: "backbone"
+      groups {
+        name: "MINA-NORTE"
+      }
+      groups {
+        name: "BACKBONE"
+      }
+    }
+    battery {
+      warningThresholdMinutes: 30
+      errorThresholdMinutes: 10
+    }
+    wired {
+      name: "eth0"
+      requestFallback: false
+      speedMbps: 1000
+    }
+    wireless {
+      name: "wlan0"
+      ap {
+        essid: "MESH-OPERACAO"
+      }
+    }
+  }
+}
+"""
+
+
+class BaseParser(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.d = rm.parse_state(STATE)
+        cls.s = cls.d["sistema"]
+        cls.im = cls.d["instamesh"]
+        cls.r = cls.d["radios"][0]
+        cls.eth = {e["nome"]: e for e in cls.d["ethernet"]}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 1. ARMADILHA `configuration`
+# ══════════════════════════════════════════════════════════════════
+class TestBlocoConfiguration(BaseParser):
+    """State e Config têm mensagens de mesmo nome; o parser tem de ler o
+    bloco de ESTADO, não o de configuração."""
+
+    def test_wired_vem_do_estado_nao_da_config(self):
+        # Config.Wired tem name/requestFallback/speedMbps e nenhum contador.
+        self.assertEqual(self.eth["eth0"]["rx_bytes"], 12000000)
+        self.assertEqual(self.eth["eth0"]["tx_bytes"], 8000000)
+
+    def test_apenas_duas_portas_a_config_nao_vira_porta(self):
+        self.assertEqual(len(self.d["ethernet"]), 2)
+
+    def test_bateria_vem_de_state_battery_nao_de_config_battery(self):
+        # Config.Battery só tem warning/errorThresholdMinutes. Se o parser
+        # pegasse esse bloco, capacityPercent viria 0.
+        self.assertEqual(self.s["bateria"]["pct"], 87)
+
+    def test_nome_vem_de_configuration_saved_general_name(self):
+        # Buscar `name:` na configuration inteira pegaria "MINA-NORTE"
+        # (nome de grupo) ou "eth0" (nome de porta).
+        self.assertEqual(self.s["nome"], "BC-MINA-01")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 2. CAMPOS INVENTADOS — nunca podem virar 0
+# ══════════════════════════════════════════════════════════════════
+class TestCamposInexistentes(BaseParser):
+
+    def test_sem_chaves_de_erro_de_ethernet(self):
+        # CommStats = rxBytes, rxPackets, txBytes, txPackets. Ponto.
+        for chave in ("rx_err","tx_err","rx_crc","rx_drop","tx_drop","mudancas"):
+            self.assertNotIn(chave, self.eth["eth0"],
+                             f"{chave} não existe em State.Wired/CommStats")
+
+    def test_sem_chaves_de_radar_e_phy(self):
+        for chave in ("radar_detec","radar_pulsos","phy"):
+            self.assertNotIn(chave, self.r,
+                             f"{chave} não existe em State.Wireless")
+
+    def test_sem_txpower_por_peer(self):
+        # State.Peer não tem txpower; só State.Wireless tem.
+        self.assertNotIn("txpwr", self.r["peers"][0])
+
+    def test_sem_session_state(self):
+        self.assertNotIn("session_st", self.s)
+
+    def test_sem_metricas_de_tensao(self):
+        # Não existe bloco `sensors` em nenhum .proto.
+        for chave in ("volt_v","volt_min_v","volt_max_v","bateria_v"):
+            self.assertNotIn(chave, self.s)
+
+    def test_instamesh_sem_campos_inventados(self):
+        for chave in ("unicast","ovf","undel_rx","undel_tx"):
+            self.assertNotIn(chave, self.im,
+                             f"{chave} não consta de State.InstaMesh")
+
+    def test_metricas_removidas_nao_existem_mais(self):
+        for nome in ("m_volt","m_volt_min","m_volt_max","m_bateria",
+                     "m_session_state","m_r_radar","m_r_pulsos","m_r_phy",
+                     "m_p_txpwr","m_e_rx_err","m_e_tx_err","m_e_rx_crc",
+                     "m_e_rx_drop","m_e_tx_drop","m_e_mudancas",
+                     "m_im_unicast","m_im_ovf","m_im_undel_rx","m_im_undel_tx"):
+            self.assertFalse(hasattr(rm, nome), f"{nome} deveria ter sido removida")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 3. InstaMesh — campos reais
+# ══════════════════════════════════════════════════════════════════
+class TestInstaMesh(BaseParser):
+
+    def test_contadores_reais(self):
+        self.assertEqual(self.im["pkt_tx"], 850000)
+        self.assertEqual(self.im["pkt_rx"], 900000)
+        self.assertEqual(self.im["pkt_drop"], 120)
+        self.assertEqual(self.im["floods"], 44)
+        self.assertEqual(self.im["arp"], 1200)
+
+    def test_campos_novos_aproveitados(self):
+        # sourceFloodsDropped e packetsMulticast existiam e não eram lidos.
+        self.assertEqual(self.im["src_floods"], 17)
+        self.assertEqual(self.im["multicast"], 5000)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 4. APT / link ethernet
+# ══════════════════════════════════════════════════════════════════
+class TestAPT(BaseParser):
+
+    def test_apt_state_usa_enum_do_proto(self):
+        # APT_STATE_MASTER = 0, APT_STATE_NONE = 2
+        self.assertEqual(self.eth["eth0"]["apt_int"], 0)
+        self.assertEqual(self.eth["eth1"]["apt_int"], 2)
+
+    def test_apt_master_derivado_de_aptstate(self):
+        # aptMaster/isMaster não existem; deriva de Wired.aptState == MASTER
+        self.assertTrue(self.s["apt_master"])
+
+    def test_link_inferido(self):
+        self.assertTrue(self.eth["eth0"]["link"])    # MASTER + peer
+        self.assertFalse(self.eth["eth1"]["link"])   # NONE, sem peer
+
+    def test_peers_por_porta(self):
+        self.assertEqual(self.eth["eth0"]["peers_eth"], 1)
+        self.assertEqual(self.eth["eth1"]["peers_eth"], 0)
+
+    def test_apt_master_falso_sem_porta_master(self):
+        st = STATE.replace("aptState: APT_STATE_MASTER", "aptState: APT_STATE_SLAVE")
+        self.assertFalse(rm.parse_state(st)["sistema"]["apt_master"])
+
+
+# ══════════════════════════════════════════════════════════════════
+# 5. Clientes de AP — contagem de blocos
+# ══════════════════════════════════════════════════════════════════
+class TestClientesAP(BaseParser):
+
+    def test_conta_blocos_client(self):
+        # State.Wireless.AP tem `repeated Client client`; não há clientCount.
+        self.assertEqual(self.r["aps"][0]["clients"], 3)
+
+    def test_total_por_radio(self):
+        self.assertEqual(self.r["total_cli"], 3)
+
+    def test_ap_entra_sem_campo_enabled(self):
+        # State.Wireless.AP NÃO tem `enabled`. Exigi-lo zerava a lista de APs.
+        self.assertEqual(len(self.r["aps"]), 1)
+        self.assertEqual(self.r["aps"][0]["essid"], "MESH-OPERACAO")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 6. Peers — SNR, taxa, IP opcional
+# ══════════════════════════════════════════════════════════════════
+class TestPeers(BaseParser):
+
+    def test_taxa_dividida_por_10(self):
+        # bc_livestats.py oficial: pv.rate / 10 = Mbps
+        self.assertEqual(self.r["peers"][0]["taxa"], 130.0)
+
+    def test_snr_e_sinal_menos_ruido(self):
+        # signal=-58, noise=-95  ->  SNR = 37 dB
+        # A conta antiga (rssi - abs(noise)) dava 42-95 = -53.
+        self.assertEqual(self.r["peers"][0]["snr"], 37)
+        self.assertEqual(self.r["peers"][1]["snr"], 14)   # -81 - (-95)
+
+    def test_peer_sem_ipv4_nao_e_descartado(self):
+        # ipv4Address é `optional` em State.Peer: exigir descartava o enlace
+        # inteiro, com taxa, custo, RSSI e SNR junto.
+        self.assertEqual(len(self.r["peers"]), 2)
+        self.assertTrue(self.r["peers"][1]["ip"].startswith("mac:"))
+
+    def test_good_peers_usa_snr_correto(self):
+        # Só o primeiro peer tem SNR > 30 dB.
+        self.assertEqual(self.r["good_peers"], 1)
+
+    def test_custo_e_first_hop(self):
+        self.assertEqual(self.r["peers"][0]["custo"], 120)
+        self.assertEqual(self.r["first_hop"], 120)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 7. GPS
+# ══════════════════════════════════════════════════════════════════
+class TestGPS(BaseParser):
+
+    def test_nmea_convertido(self):
+        self.assertAlmostEqual(self.s["gps_lat"], -27.7316, places=3)
+        self.assertAlmostEqual(self.s["gps_lon"], -50.0690, places=3)
+        self.assertEqual(self.s["gps_fix"], 1)
+
+    def test_velocidade_em_kph_sem_reconverter(self):
+        # gpsSpeedKph JÁ está em km/h. O parser antigo lia `speed`
+        # (inexistente) e ainda multiplicava por 1,852.
+        self.assertEqual(self.s["gps_vel"], 42.5)
+
+    def test_rumo_de_gpstrackdegreestrue(self):
+        # `course`/`heading`/`track` não existem no Gps.proto.
+        self.assertEqual(self.s["gps_rumo"], 187.3)
+
+    def test_campos_de_qualidade(self):
+        self.assertEqual(self.s["gps_sats"], 9)
+        self.assertEqual(self.s["gps_alt"], 812.5)
+        self.assertEqual(self.s["gps_hdop"], 0.9)
+
+    def test_fallback_para_knots(self):
+        st = STATE.replace("    gpsSpeedKph: 42.5\n", "")
+        # 22.95 kn * 1.852 = 42.5 km/h
+        self.assertAlmostEqual(rm.parse_state(st)["sistema"]["gps_vel"], 42.5, places=1)
+
+    def test_sem_velocidade_fica_none_nao_zero(self):
+        st = STATE.replace("    gpsSpeedKnots: 22.95\n", "").replace(
+            "    gpsSpeedKph: 42.5\n", "")
+        self.assertIsNone(rm.parse_state(st)["sistema"]["gps_vel"])
+
+    def test_gpsswitch_desligado_invalida_posicao(self):
+        st = STATE.replace("enabled: true", "enabled: false", 1)
+        d = rm.parse_state(st)
+        self.assertIsNone(d["sistema"]["gps_lat"])
+        self.assertEqual(d["sistema"]["gps_fix"], 0)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 8. Sistema — temperatura, CPU, bateria, alertas
+# ══════════════════════════════════════════════════════════════════
+class TestSistema(BaseParser):
+
+    def test_temperatura_centi_grau(self):
+        self.assertEqual(self.s["temp_c"], 45.2)
+
+    def test_temperatura_grau_inteiro(self):
+        # Firmware que publica o grau direto não pode virar 0,45 °C.
+        st = STATE.replace("temperature: 4520", "temperature: 45")
+        self.assertEqual(rm.parse_state(st)["sistema"]["temp_c"], 45.0)
+
+    def test_cpu_none_na_primeira_coleta(self):
+        # cpuLoad não existe; a carga vem do delta de idle/uptime e exige
+        # duas coletas. None = não publica (0 seria "CPU ociosa", mentira).
+        self.assertIsNone(self.s["cpu_pct"])
+
+    def test_cpu_expoe_idle_bruto(self):
+        self.assertEqual(self.s["cpu_idle"], 691200000.0)
+        self.assertEqual(self.s["uptime_raw"], 864000000.0)
+
+    def test_bateria_completa(self):
+        b = self.s["bateria"]
+        self.assertEqual(b["pct"], 87)
+        self.assertEqual(b["ma"], 1500)
+        self.assertEqual(b["temp_c"], 31)
+        self.assertEqual(b["desc_min"], 210)
+        self.assertFalse(b["carregando"])
+
+    def test_sem_bateria_tudo_none(self):
+        # Modelo sem bateria: nenhuma série publicada, nada de zeros.
+        st = rm.remover_bloco(STATE, 'battery')
+        b = rm.parse_state(st)["sistema"]["bateria"]
+        self.assertTrue(all(v is None for v in b.values()))
+
+    def test_alert_system(self):
+        self.assertEqual(self.s["best_rate"], 866)
+        self.assertEqual(self.s["alertas"], 2)
+
+    def test_reboot_e_bridge(self):
+        self.assertEqual(self.s["reboot"], 0)
+        self.assertTrue(self.s["bridge"])
+
+    def test_grupos(self):
+        self.assertEqual(self.s["grupos"], "MINA-NORTE|BACKBONE")
+
+    def test_ip_e_modelo(self):
+        self.assertEqual(self.s["ip"], "10.188.96.140")
+        self.assertEqual(self.s["modelo"], "ES1")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 9. Rádio — canal, ruído, ocupação
+# ══════════════════════════════════════════════════════════════════
+class TestRadio(BaseParser):
+
+    def test_campos_basicos(self):
+        self.assertEqual(self.r["nome"], "wlan0")
+        self.assertEqual(self.r["canal"], 149)
+        self.assertEqual(self.r["freq"], "5GHz")
+        self.assertEqual(self.r["ruido"], -95)
+        self.assertEqual(self.r["txpwr"], 23)
+
+    def test_stats_do_radio(self):
+        self.assertEqual(self.r["rx_bytes"], 5000000)
+        self.assertEqual(self.r["tx_pkts"], 30000)
+
+    def test_ocupacao_de_canal(self):
+        self.assertEqual(self.r["ch_active"], 100000)
+        self.assertEqual(self.r["busy_pct"], 22.0)
+        self.assertEqual(self.r["rx_pct"], 9.0)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 10. CPU derivada — precisa de duas coletas
+# ══════════════════════════════════════════════════════════════════
+class TestCPUDerivada(unittest.TestCase):
+    """100 * (1 - Δidle/Δuptime). A razão é adimensional: vale para
+    segundos ou milissegundos, desde que os dois campos usem a mesma
+    unidade."""
+
+    def setUp(self):
+        rm._ultimo.clear()
+
+    def _coleta(self, ip, uptime, idle, ts):
+        st = STATE.replace("uptime: 864000000.0", f"uptime: {uptime}") \
+                  .replace("idle: 691200000.0",   f"idle: {idle}")
+        return rm.calcular_taxas(ip, rm.parse_state(st), ts)
+
+    def test_carga_75_pct(self):
+        self._coleta("1.1.1.1", 1000.0, 500.0, 100.0)
+        # +100 de uptime, +25 de idle  ->  75% de carga
+        d = self._coleta("1.1.1.1", 1100.0, 525.0, 200.0)
+        self.assertEqual(d["sistema"]["cpu_pct"], 75.0)
+
+    def test_maquina_ociosa(self):
+        self._coleta("2.2.2.2", 1000.0, 500.0, 100.0)
+        d = self._coleta("2.2.2.2", 1100.0, 600.0, 200.0)
+        self.assertEqual(d["sistema"]["cpu_pct"], 0.0)
+
+    def test_reboot_no_meio_nao_publica(self):
+        # uptime volta a zero: delta negativo, resultado sem sentido.
+        self._coleta("3.3.3.3", 100000.0, 90000.0, 100.0)
+        d = self._coleta("3.3.3.3", 50.0, 40.0, 200.0)
+        self.assertIsNone(d["sistema"]["cpu_pct"])
+
+    def test_idle_por_nucleo_nao_publica(self):
+        # Δidle > Δuptime (multicore) -> carga negativa -> não publica.
+        self._coleta("4.4.4.4", 1000.0, 500.0, 100.0)
+        d = self._coleta("4.4.4.4", 1100.0, 900.0, 200.0)
+        self.assertIsNone(d["sistema"]["cpu_pct"])
+
+
+# ══════════════════════════════════════════════════════════════════
+# 11. publicar() nunca pode estourar
+# ══════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════
+# 12. Regressões de robustez já existentes
+# ══════════════════════════════════════════════════════════════════
+
+
+
+
+
+
+class TestRobustez(unittest.TestCase):
+
+    def test_nmea_para_graus(self):
+        self.assertAlmostEqual(rm.nmea_para_graus("2743.8950S"), -27.7316, places=3)
+        self.assertAlmostEqual(rm.nmea_para_graus("05004.1429W"), -50.0690, places=3)
+        self.assertIsNone(rm.nmea_para_graus(""))
+
+    def test_state_vazio_nao_estoura(self):
+        d = rm.parse_state("")
+        self.assertEqual(d["radios"], [])
+        self.assertEqual(d["ethernet"], [])
+        self.assertFalse(d["sistema"]["apt_master"])
+
+    def test_porta_sem_nome_recebe_rotulo(self):
+        # label 'porta' vazio some do Grafana.
+        st = 'wired {\n  aptState: APT_STATE_LINK\n  stats { rxBytes: 5 txBytes: 5 }\n}\n'
+        self.assertEqual(rm.parse_state(st)["ethernet"][0]["nome"], "eth0")
+
+    def test_extrair_blocos_aninhados(self):
+        txt = "a {\n  b {\n    c: 1\n  }\n}\na {\n  d: 2\n}\n"
+        self.assertEqual(len(rm.extrair_blocos(txt, 'a')), 2)
+
+    def test_peers_ips(self):
+        d = rm.parse_state(STATE)
+        self.assertIn("10.188.96.141", d["peers_ips"])
+
+
+# ══════════════════════════════════════════════════════════════════
+# 13. SITE SURVEY CONTÍNUO — CSV a partir do Prometheus
+# ══════════════════════════════════════════════════════════════════
+class PromFalso:
+    """Prometheus de mentira: devolve séries conforme a consulta pedida."""
+
+    def __init__(self, series):
+        self.series = series
+        self.consultas = []
+
+    def range(self, q, ini, fim, passo):
+        self.consultas.append(q)
+        for chave, resultado in self.series.items():
+            if chave in q:
+                return resultado
+        return []
+
+
+def _serie(rotulos, pares):
+    return [{"metric": rotulos,
+             "values": [[ts, str(v)] for ts, v in pares]}]
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# 14. COLETA ACELERADA DOS MÓVEIS
+# ══════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════
+# 15. SURVEY ANEXADO AO PPT E FORMULÁRIO WEB
+# ══════════════════════════════════════════════════════════════════
+
+
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# 16. PAINEL HTML PRÓPRIO
+# ══════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════
+# 17. PERSISTÊNCIA DOS SURVEYS
+# ══════════════════════════════════════════════════════════════════
+
+
+
+
+
+
+class TestResumoSurvey(unittest.TestCase):
+    """Percentual dentro de cada requisito Modular Mining."""
+
+    def test_pct_dentro_de_cada_requisito(self):
+        am = [{"radio": "A", "sinal": -60, "snr": 30, "rtt": 8,  "perda": 0.5},
+              {"radio": "A", "sinal": -80, "snr": 15, "rtt": 150,"perda": 5.0},
+              {"radio": "B", "sinal": -70, "snr": 25, "rtt": 20, "perda": 1.0}]
+        r = rm.survey_resumo(am)
+        self.assertEqual(r["amostras"], 3)
+        self.assertEqual(r["radios"], 2)
+        # RSSI > -75: dois de três
+        self.assertAlmostEqual(r["sinal"]["pct_ok"], 66.7, places=1)
+        self.assertAlmostEqual(r["snr"]["pct_ok"], 66.7, places=1)
+        self.assertAlmostEqual(r["rtt"]["pct_ok"], 66.7, places=1)
+        self.assertAlmostEqual(r["perda"]["pct_ok"], 66.7, places=1)
+
+    def test_campo_sem_amostra_e_none_nao_zero_pct(self):
+        # 0 % de aprovação e "não medido" são coisas diferentes.
+        r = rm.survey_resumo([{"radio": "A", "sinal": -60}])
+        self.assertIsNone(r["rtt"])
+        self.assertIsNone(r["vazao"])
+        self.assertIsNotNone(r["sinal"])
+
+    def test_limiares_sao_os_da_modular(self):
+        self.assertEqual(rm.REQUISITOS["sinal"][1], -75.0)
+        self.assertEqual(rm.REQUISITOS["snr"][1],    20.0)
+        self.assertEqual(rm.REQUISITOS["rtt"][1],   100.0)
+        self.assertEqual(rm.REQUISITOS["perda"][1],   2.0)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 18. CALIBRAÇÃO DA PROPAGAÇÃO
+# ══════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════
+# 19. FUNDO DE SATÉLITE E BBOX
+# ══════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════
+# 20. COMPARAÇÃO ENTRE SURVEYS E MEDIÇÕES MANUAIS
+# ══════════════════════════════════════════════════════════════════
+
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# 21. ENDPOINTS DO SURVEY (servidor real, sem mock)
+# ══════════════════════════════════════════════════════════════════
+
+
+
+
+
+
+class _BCFalso:
+    """Rádio de mentira. `falhas` diz quantas consultas seguidas quebram."""
+    def __init__(self, falhas=0, alcancavel=True, autentica=True, estado="ok"):
+        self.falhas = falhas; self.alcancavel = alcancavel
+        self.autentica = autentica; self._estado = estado
+        self.logins = 0; self.consultas = 0; self.fechado = False
+
+    def reachable(self):    return self.alcancavel
+    def authenticate(self):
+        self.logins += 1
+        return self.autentica
+
+    def get_state(self):
+        self.consultas += 1
+        if self.falhas > 0:
+            self.falhas -= 1
+            raise OSError("conexao caiu")
+        return self._estado
+
+    def close(self): self.fechado = True
+
+
+class TestSessaoRadio(unittest.TestCase):
+    """Sessão persistente: autenticar por amostra é o que mais pesa no BC."""
+
+    def _sessao(self, bc, **kw):
+        s = rm.SessaoRadio("10.0.0.1", 2300, "VIEW", "x", **kw)
+        s._abrir = lambda: setattr(s, "bc", bc) or bc
+        return s
+
+    def test_autentica_uma_vez_e_reusa(self):
+        bc = _BCFalso()
+        s = self._sessao(bc)
+        for _ in range(5):
+            self.assertEqual(s.estado_bruto(), "ok")
+        self.assertEqual(bc.consultas, 5)
+        self.assertEqual(s.consultas, 5)
+
+    def test_falha_isolada_nao_descarta_o_radio(self):
+        bc = _BCFalso(falhas=1)
+        s = self._sessao(bc, falhas_max=3)
+        with self.assertRaises(OSError):
+            s.estado_bruto()
+        self.assertFalse(s.desistiu)
+        # A sessão foi jogada fora para reautenticar do zero.
+        self.assertIsNone(s.bc)
+        self.assertEqual(s.estado_bruto(), "ok")
+        self.assertEqual(s.falhas, 0, "sucesso zera o contador")
+
+    def test_desiste_apos_n_falhas_seguidas(self):
+        bc = _BCFalso(falhas=99)
+        s = self._sessao(bc, falhas_max=3)
+        for _ in range(3):
+            with self.assertRaises(OSError): s.estado_bruto()
+        self.assertTrue(s.desistiu)
+        # Rádio descartado não é mais tentado: insistir atrasa o ciclo
+        # inteiro, e o ciclo define a resolução do trajeto.
+        antes = bc.consultas
+        self.assertIsNone(s.estado_bruto())
+        self.assertEqual(bc.consultas, antes)
+
+
+class TestFiltroDeEstado(unittest.TestCase):
+    """A rajant-api nem sempre expõe filtro de caminho e o nome do
+    parâmetro muda entre versões — por isso é detectado, não assumido."""
+
+    def setUp(self):  rm._FILTRO_ESTADO["param"] = None
+    def tearDown(self): rm._FILTRO_ESTADO["param"] = None
+
+    def test_sem_filtro_puxa_o_estado_inteiro(self):
+        bc = _BCFalso()
+        self.assertEqual(rm._get_state_filtrado(bc), "ok")
+        self.assertEqual(rm._FILTRO_ESTADO["param"], "")
+
+    def test_usa_o_filtro_quando_existe(self):
+        vistos = {}
+        class BC:
+            def get_state(self, stateFilterPath=None):
+                vistos["p"] = stateFilterPath; return "ok"
+        self.assertEqual(rm._get_state_filtrado(BC()), "ok")
+        self.assertEqual(rm._FILTRO_ESTADO["param"], "stateFilterPath")
+        self.assertEqual(vistos["p"], list(rm.CAMINHOS_ESTADO))
+        for ramo in ("gps", "wireless", "system"):
+            self.assertIn(ramo, vistos["p"])
+
+    def test_filtro_recusado_desliga_de_vez(self):
+        # Aceita o argumento mas recusa o formato: não pode repetir o erro
+        # a cada amostra de cada rádio.
+        chamadas = []
+        class BC:
+            def get_state(self, path=None):
+                chamadas.append(path)
+                if path is not None: raise ValueError("formato invalido")
+                return "ok"
+        self.assertEqual(rm._get_state_filtrado(BC()), "ok")
+        self.assertEqual(rm._FILTRO_ESTADO["param"], "")
+        self.assertEqual(len(chamadas), 2)
+
+
+
+
+class TestPersistenciaFonteEIntervalo(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.con = rm.banco(str(Path(self.tmp) / "s.db"))
+
+    def tearDown(self):
+        self.con.close(); shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fonte_persiste_por_amostra(self):
+        sid = rm.survey_criar(self.con, "s", time.time(), 10, ["CA-1"])
+        rm.amostras_gravar(self.con, sid, [
+            {"radio": "CA-1", "ts": 1, "lat": -27.7, "lon": -50.0,
+             "fonte": "direto"},
+            {"radio": "CA-1", "ts": 2, "lat": -27.7, "lon": -50.0,
+             "fonte": "cache"}])
+        fontes = [a["fonte"] for a in rm.survey_amostras(self.con, sid)]
+        self.assertEqual(fontes, ["direto", "cache"])
+
+    def test_intervalo_efetivo_persiste_no_fechamento(self):
+        sid = rm.survey_criar(self.con, "s", time.time(), 10, ["CA-1"])
+        rm.survey_fechar(self.con, sid, time.time(), intervalo_efetivo_s=14.2)
+        self.assertEqual(rm.survey_obter(self.con, sid)["intervalo_efetivo_s"],
+                         14.2)
+
+    def test_banco_antigo_ganha_as_colunas_novas(self):
+        # Migração: CREATE TABLE IF NOT EXISTS não acrescenta coluna.
+        p = str(Path(self.tmp) / "velho.db")
+        antigo = sqlite3.connect(p)
+        antigo.executescript(
+            "CREATE TABLE survey (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " nome TEXT NOT NULL, inicio REAL NOT NULL, fim REAL,"
+            " intervalo_s INTEGER, radios TEXT, resumo TEXT,"
+            " calibracao TEXT, criado_em REAL NOT NULL);"
+            "CREATE TABLE amostra (survey_id INTEGER NOT NULL, radio TEXT,"
+            " ts REAL, lat REAL, lon REAL);")
+        antigo.commit(); antigo.close()
+        con = rm.banco(p)
+        try:
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(survey)")}
+            self.assertIn("intervalo_efetivo_s", cols)
+            cols_a = {r["name"] for r in con.execute("PRAGMA table_info(amostra)")}
+            self.assertIn("fonte", cols_a)
+        finally:
+            con.close()
+
+
+class TestInterferencia(unittest.TestCase):
+    """A BC API nao tem varredura de espectro — verificado nos .proto. O
+    que ela da e airtime, e dele sai a ocupacao por transmissor alheio."""
+
+    IM = {k: 0 for k in ("pkt_tx", "pkt_drop", "pkt_rx", "arp",
+                         "bytes_tx", "bytes_rx")}
+
+    def _radio(self, ativo, busy, rx, tx):
+        return {"nome": "wlan0", "ch_active": ativo, "ch_busy": busy,
+                "ch_rx": rx, "ch_tx": tx, "rx_bytes": 0, "tx_bytes": 0,
+                "rx_pkts": 0, "tx_pkts": 0, "canal": 149}
+
+    def _pacote(self, r):
+        return {"radios": [r], "ethernet": [],
+                "sistema": {"idle": 0, "uptime": 0},
+                "instamesh": dict(self.IM)}
+
+    def _delta(self, ip, antes, agora, dt=60.0):
+        t = time.monotonic()
+        rm._ultimo[ip] = {"d": self._pacote(self._radio(*antes)), "ts": t - dt}
+        return rm.calcular_taxas(ip, self._pacote(self._radio(*agora)),
+                                 t)["radios"][0]
+
+    def test_proto_nao_tem_varredura_de_espectro(self):
+        # Se um dia a Rajant publicar isso, este teste avisa que da para
+        # trocar a estimativa por medicao de verdade.
+        raiz = pathlib.Path("bcapi-ref/proto")
+        if not raiz.exists():
+            self.skipTest("protos nao disponiveis")
+        texto = " ".join(p.read_text(errors="ignore").lower()
+                         for p in raiz.glob("*.proto"))
+        for termo in ("spectrum", "spectral", "sweep"):
+            self.assertNotIn(termo, texto,
+                             f"'{termo}' apareceu no proto — reavaliar")
+
+    def test_trafego_proprio_nao_conta_como_interferencia(self):
+        # O caso que confunde: canal 50% ocupado, mas ocupado por NOS.
+        r = self._delta("10.9.0.1", (1000,1000,1000,1000),
+                        (61000, 31000, 21000, 10000))
+        self.assertAlmostEqual(r["busy_pct"], 50.0, places=1)
+        self.assertLess(r["interf_pct"], 5.0)
+
+    def test_ocupacao_alheia_vira_interferencia(self):
+        r = self._delta("10.9.0.2", (1000,1000,1000,1000),
+                        (61000, 40000, 3000, 2000))
+        self.assertAlmostEqual(r["interf_pct"], 60.0, places=1)
+
+    def test_primeira_coleta_fica_sem_valor_nao_zero(self):
+        # Contadores sao cumulativos desde o boot: sem delta, a razao
+        # seria a media da vida inteira do radio.
+        d = rm.calcular_taxas("10.9.0.3",
+                              self._pacote(self._radio(61000,40000,3000,2000)),
+                              time.monotonic())
+        self.assertIsNone(d["radios"][0].get("interf_pct"))
+
+    def test_parse_state_nao_inventa_valor_cumulativo(self):
+        fonte = inspect.getsource(rm.parse_state)
+        self.assertIn('"interf_pct":   None', fonte)
+
+    def test_nao_negativa_quando_contadores_desalinham(self):
+        # rx+tx > busy acontece com arredondamento do firmware.
+        r = self._delta("10.9.0.4", (1000,1000,1000,1000),
+                        (61000, 5000, 4000, 4000))
+        self.assertGreaterEqual(r["interf_pct"], 0.0)
+
+    def test_nao_e_requisito_modular_mas_e_analisavel(self):
+        # Pô-la em REQUISITOS faria o resumo reportá-la como exigência
+        # do cliente, o que ela não é.
+        self.assertNotIn("interf", rm.REQUISITOS)
+        op, lim, un, rot = rm.limite_de("interf")
+        self.assertEqual((op, lim, un), ("<", 20.0, "%"))
+
+    def test_limite_de_devolve_none_para_campo_sem_escala(self):
+        self.assertIsNone(rm.limite_de("custo"))
+
+    def test_tem_escala_de_mapa_e_de_kml(self):
+        self.assertIn("interf", rm.ESCALAS)
+        self.assertIn("interf", rm.FAIXAS_KML)
+        self.assertEqual(rm.ESCALAS["interf"]["melhor"], "baixo")
+
+
+    def test_amostra_do_survey_guarda_interferencia_e_canal(self):
+        fonte = inspect.getsource(rm.amostras_gravar)
+        self.assertIn("interf", fonte)
+        self.assertIn("canal", fonte)
+
+
+
+
+class TestShimSslWrapSocket(unittest.TestCase):
+    """A rajant-api 0.1.1 faz `from ssl import wrap_socket`, removido no
+    Python 3.12. O shim do topo do modulo e o que mantem o programa
+    rodando em 3.12+ — sem ele, nao importa."""
+
+    def test_shim_existe_no_topo_do_modulo(self):
+        # Tem de vir ANTES do `from rajant_api import Breadcrumb`, senao
+        # a biblioteca ja quebrou quando o shim seria instalado.
+        fonte = pathlib.Path(__file__).resolve().parent.joinpath("motor_survey.py").read_text()
+        i_shim = fonte.index("ssl.wrap_socket = _wrap")
+        i_imp = fonte.index("from rajant_api import Breadcrumb")
+        self.assertLess(i_shim, i_imp, "shim depois do import: tarde demais")
+
+    def test_shim_reproduz_o_comportamento_antigo(self):
+        # ssl.wrap_socket() com os padroes NAO validava certificado — os
+        # BreadCrumbs usam autoassinado. O shim precisa manter isso, ou a
+        # conexao passa a falhar onde antes funcionava.
+        import ssl as _ssl
+        fonte = pathlib.Path(__file__).resolve().parent.joinpath("motor_survey.py").read_text()
+        trecho = fonte[:fonte.index("import re, json")]
+        self.assertIn("cert_reqs=ssl.CERT_NONE", trecho)
+        self.assertIn("check_hostname = False", trecho)
+
+    def test_shim_nao_sobrescreve_quando_ja_existe(self):
+        # Em Python <=3.11 a funcao original tem de continuar valendo.
+        fonte = pathlib.Path(__file__).resolve().parent.joinpath("motor_survey.py").read_text()
+        self.assertIn("if not hasattr(ssl, 'wrap_socket'):", fonte)
+
+    def test_shim_faz_handshake_de_verdade(self):
+        """Importar nao prova nada: o que importa e a conexao TLS."""
+        import ssl as _ssl, socket, threading, tempfile, subprocess
+        if not hasattr(_ssl, "wrap_socket"):
+            self.skipTest("Python sem wrap_socket original para comparar")
+        d = tempfile.mkdtemp()
+        cert, chave = os.path.join(d, "c.pem"), os.path.join(d, "k.pem")
+        r = subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout",
+             chave, "-out", cert, "-days", "1", "-nodes", "-subj",
+             "/CN=bc-teste"], capture_output=True)
+        if r.returncode != 0:
+            self.skipTest("openssl indisponivel")
+
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, chave)
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        porta = srv.getsockname()[1]
+
+        def atender():
+            try:
+                c, _ = srv.accept()
+                with ctx.wrap_socket(c, server_side=True) as t:
+                    t.sendall(b"OI")
+            except Exception:
+                pass
+        threading.Thread(target=atender, daemon=True).start()
+
+        # Reconstrói o shim isoladamente, do jeito que o módulo faz.
+        def _wrap(sock, cert_reqs=_ssl.CERT_NONE, **kw):
+            c = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            c.check_hostname = False; c.verify_mode = cert_reqs
+            return c.wrap_socket(sock)
+        soc = socket.socket(); soc.settimeout(5)
+        con = _wrap(soc)
+        try:
+            con.connect(("127.0.0.1", porta))
+            self.assertEqual(con.recv(16), b"OI")
+            self.assertIsNotNone(con.cipher())
+        finally:
+            con.close(); srv.close(); shutil.rmtree(d, ignore_errors=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class TestIdentidadeAnglo(unittest.TestCase):
+    """As medidas vieram do Dashboard_Transporte do cliente: logo, titulo
+    e regua caem nos mesmos pontos, senao os decks nao parecem da mesma
+    familia."""
+
+    def test_paleta_e_do_template_do_cliente(self):
+        self.assertEqual(rm.ANGLO["azul"], "031795")
+        self.assertEqual(rm.ANGLO["fonte"], "Calibri")
+
+    def test_geometria_igual_a_do_template(self):
+        self.assertEqual(rm.ANGLO["logo"], (0.30, 0.20, 1.50, 0.59))
+        self.assertEqual(rm.ANGLO["titulo"], (1.80, 0.20, 9.73, 0.70))
+        self.assertEqual(rm.ANGLO["regua_y"], 1.00)
+
+    def test_sem_a_pasta_marca_o_slide_sai_sem_logo_em_vez_de_estourar(self):
+        tmp = tempfile.mkdtemp(); cwd = os.getcwd()
+        try:
+            os.chdir(tmp)
+            with mock.patch.object(rm, "DIR_MARCA", "pasta_que_nao_existe"):
+                self.assertIsNone(rm._logo_anglo())
+                from pptx import Presentation
+                from pptx.util import Inches
+                p = Presentation()
+                p.slide_width = Inches(13.333); p.slide_height = Inches(7.5)
+                s = rm.slide_anglo(p, "Teste")   # nao pode levantar
+                self.assertTrue(any(sh.has_text_frame for sh in s.shapes))
+        finally:
+            os.chdir(cwd); shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestDeckSurveyAnglo(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cwd = os.getcwd(); os.chdir(self.tmp)
+        con = rm.banco(); t0 = time.time() - 3600
+        self.sid = rm.survey_criar(con, "Turno teste", t0, 10, ["CA-1"])
+        linhas = []
+        for b in ("2.4 GHz", "5.8 GHz"):
+            for i in range(14):
+                linhas.append({
+                    "radio": "CA-1", "ts": t0 + i*10,
+                    "lat": -27.73 + i*3e-4, "lon": -50.07 + i*3e-4,
+                    "sinal": -60 - i*2.2, "snr": 32 - i*1.4, "ruido": -95,
+                    "rtt": 8 + i, "perda": 0.1*i, "interf": 3.0 + i,
+                    "banda": b, "servidor": "ERB-01", "fonte": "direto"})
+        rm.amostras_gravar(con, self.sid, linhas)
+        am = rm.survey_amostras(con, self.sid)
+        rm.survey_fechar(con, self.sid, t0+200, rm.survey_resumo(am), {},
+                         1, 0, intervalo_efetivo_s=11.0)
+        con.close()
+
+    def tearDown(self):
+        os.chdir(self.cwd); shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _deck(self):
+        from pptx import Presentation
+        import io as _io
+        dados, nome = rm.ppt_survey_anglo(self.sid)
+        self.assertTrue(nome.endswith(".pptx"))
+        return Presentation(_io.BytesIO(dados)), nome
+
+    def test_deck_e_so_de_survey(self):
+        # Separado do relatorio semanal a pedido: nada de KPI, backbone
+        # ou manutencao aqui.
+        p, _ = self._deck()
+        txt = " ".join(sh.text_frame.text for s in p.slides
+                       for sh in s.shapes if sh.has_text_frame)
+        self.assertIn("Site Survey", txt)
+        for fora in ("Backbone", "Manutenções", "Change Management",
+                     "Inventário", "KPIs da Semana"):
+            self.assertNotIn(fora, txt, fora)
+
+    def test_dimensao_e_identidade(self):
+        from pptx.util import Inches
+        p, _ = self._deck()
+        self.assertEqual(p.slide_width, Inches(13.333))
+        self.assertEqual(p.slide_height, Inches(7.5))
+        fontes = {r.font.name for s in p.slides for sh in s.shapes
+                  if sh.has_text_frame for par in sh.text_frame.paragraphs
+                  for r in par.runs if r.font.name}
+        self.assertEqual(fontes, {"Calibri"})
+
+    def test_todo_slide_tem_logo(self):
+        p, _ = self._deck()
+        sem = [i for i, s in enumerate(p.slides)
+               if not any(sh.shape_type == 13 for sh in s.shapes)]
+        self.assertEqual(sem, [], f"slides sem logo: {sem}")
+
+    def _tit(self, s):
+        return next((sh.text_frame.text.replace("\n", " ")
+                     for sh in s.shapes if sh.has_text_frame
+                     and sh.text_frame.text.strip()
+                     and sh.text_frame.text.strip()[0] not in "◂›"), "")
+
+    def test_capa_indice_e_sumario_nessa_ordem(self):
+        # O indice entra logo apos a capa: e por ele que se navega.
+        p, _ = self._deck()
+        self.assertIn("Site Survey de Rede", self._tit(p.slides[0]))
+        self.assertIn("Índice", self._tit(p.slides[1]))
+        self.assertIn("Sumário", self._tit(p.slides[2]))
+
+    def test_graficos_nativos_com_medicao_real(self):
+        # Nativo e nao imagem: quem recebe pode editar os dados. E com
+        # MEDICAO, nao com o valor de exemplo que o template trazia.
+        p, _ = self._deck()
+        graf = [sh.chart for s in p.slides for sh in s.shapes
+                if getattr(sh, "has_chart", False)]
+        self.assertTrue(graf, "nenhum grafico nativo")
+        for ch in graf:
+            vals = [v or 0 for v in ch.series[0].values]
+            self.assertAlmostEqual(sum(vals), 100.0, delta=0.6)
+
+    def test_distribuicao_soma_cem_e_respeita_as_faixas(self):
+        am = [{"sinal": v} for v in (-92, -83, -78, -73, -68, -63, -58, -48)]
+        rot, pct, un = rm.distribuicao(am, "sinal")
+        self.assertEqual(un, "dBm")
+        self.assertEqual(len(rot), len(rm.FAIXAS_KML["sinal"]))
+        self.assertAlmostEqual(sum(pct), 100.0, delta=0.2)
+
+    def test_distribuicao_sem_medicao_nao_inventa(self):
+        rot, pct, un = rm.distribuicao([{"sinal": None}], "sinal")
+        self.assertEqual(pct, [])
+
+    def test_indice_liga_todos_os_slides(self):
+        p, _ = self._deck()
+        A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+        sl = list(p.slides)
+        def alvo(sh, s):
+            for hl in sh._element.iter(A + "hlinkClick"):
+                rid = hl.get(R + "id")
+                if not rid: continue
+                try:
+                    tp = s.part.rels[rid].target_part
+                    return next(j for j, x in enumerate(sl) if x.part is tp)
+                except Exception:
+                    return "quebrado"
+            return None
+        idx = sl[1]
+        alvos = [alvo(sh, idx) for sh in idx.shapes]
+        alvos = [a for a in alvos if a is not None]
+        self.assertGreaterEqual(len(alvos), len(sl) - 2)
+        self.assertNotIn("quebrado", alvos)
+
+    def test_todo_slide_tem_volta_para_o_indice(self):
+        p, _ = self._deck()
+        sem = [i for i, s in enumerate(p.slides) if i > 1 and not any(
+            sh.has_text_frame and "ÍNDICE" in sh.text_frame.text
+            for sh in s.shapes)]
+        self.assertEqual(sem, [], f"slides sem volta: {sem}")
+
+    def test_survey_sem_amostras_falha_com_motivo(self):
+        con = rm.banco()
+        sid = rm.survey_criar(con, "Vazio", time.time(), 10, ["X"])
+        con.close()
+        with self.assertRaises(RuntimeError) as c:
+            rm.ppt_survey_anglo(sid)
+        self.assertIn("sem amostras", str(c.exception))
+
+
+
+
+
+
+class TestServidorPorAmostra(unittest.TestCase):
+    """Sem saber QUEM serviu cada ponto não dá para dizer 'esta área é
+    servida pelo ERB-03' — que é a frase que o survey existe para produzir."""
+
+    def _am(self, seq, radio="CA-01"):
+        return [{"radio": radio, "ts": 1000 + i*10, "lat": -27.73, "lon": -50.07,
+                 "sinal": -70, "servidor": s} for i, s in enumerate(seq)]
+
+    def test_amostra_grava_o_servidor(self):
+        # A coluna tem de existir no INSERT, senão o dado morre na gravação.
+        fonte = inspect.getsource(rm.amostras_gravar)
+        self.assertIn("servidor", fonte)
+
+
+    def test_estavel_nao_gera_handover(self):
+        r = rm.analisar_servidores(self._am(["A"]*6))
+        self.assertEqual(r["n_handovers"], 0)
+        self.assertEqual(r["n_pingpong"], 0)
+
+    def test_troca_de_servidor_e_handover(self):
+        r = rm.analisar_servidores(self._am(["A","A","B","B"]))
+        self.assertEqual(r["n_handovers"], 1)
+        self.assertEqual(r["handovers"][0]["de"], "A")
+        self.assertEqual(r["handovers"][0]["para"], "B")
+
+    def test_pingpong_e_ida_e_volta_nao_cadeia(self):
+        # A→B→A é disputa de área; A→B→C é só o veículo andando.
+        self.assertEqual(rm.analisar_servidores(
+            self._am(["A","B","A"]))["n_pingpong"], 1)
+        self.assertEqual(rm.analisar_servidores(
+            self._am(["A","B","C"]))["n_pingpong"], 0)
+
+    def test_cobertura_por_bc_com_percentual(self):
+        r = rm.analisar_servidores(self._am(["A","A","A","B"]))
+        self.assertEqual(r["cobertura"]["A"]["amostras"], 3)
+        self.assertEqual(r["cobertura"]["A"]["pct"], 75.0)
+
+    def test_radio_sem_servidor_e_listado(self):
+        r = rm.analisar_servidores(
+            [{"radio": "X", "ts": 1, "lat": -27.7, "lon": -50.0, "sinal": -70}])
+        self.assertEqual(r["radios_sem_servidor"], ["X"])
+
+    def test_handover_de_um_radio_nao_contamina_outro(self):
+        am = self._am(["A", "A"], "CA-01") + self._am(["B", "B"], "CA-02")
+        self.assertEqual(rm.analisar_servidores(am)["n_handovers"], 0)
+
+
+
+
+
+
+class TestKmlSurvey(unittest.TestCase):
+    """O KML existe porque a rede da mina bloqueia o satélite do PNG; o
+    Google Earth já traz o dele."""
+
+    NS = "{http://www.opengis.net/kml/2.2}"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cwd = os.getcwd(); os.chdir(self.tmp)
+        self.cfg = rm.configparser.ConfigParser()
+        rm.cfg_relatorio(self.cfg)
+        self.sv = {"nome": "Turno manhã", "inicio": 1_700_000_000,
+                   "fim": 1_700_003_600, "intervalo_s": 10,
+                   "intervalo_efetivo_s": 14}
+        self.am = []
+        for k in range(12):
+            self.am.append({
+                "radio": "CA-1001", "ts": 1_700_000_000 + k * 10,
+                "lat": -27.7300 + k * 1e-4, "lon": -50.0700 + k * 1e-4,
+                "sinal": -60 - k * 2.5, "snr": 32 - k * 1.5,
+                "ruido": -95, "rtt": 8 + k, "perda": 0.1 * k,
+                "banda": "5.8 GHz",
+                "fonte": "cache" if k == 5 else "direto"})
+        self.am.append({"radio": "ERB-01", "ts": 1_700_000_000,
+                        "lat": -27.7295, "lon": -50.0710, "sinal": -48,
+                        "snr": 40, "banda": "5.8 GHz", "fonte": "direto"})
+
+    def tearDown(self):
+        os.chdir(self.cwd); shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _arvore(self, **kw):
+        import zipfile, io as _io
+        from xml.etree import ElementTree as ET
+        dados, nome = rm.gerar_kml_survey(
+            self.sv, self.am, {"ERB-01": (-27.7295, -50.0710)},
+            cfg=self.cfg, **kw)
+        if nome.endswith(".kmz"):
+            txt = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        else:
+            txt = dados.decode()
+        return ET.fromstring(txt), txt, nome
+
+    def test_xml_bem_formado_e_kmz_zipado(self):
+        raiz, txt, nome = self._arvore()
+        self.assertTrue(nome.endswith(".kmz"))
+        self.assertEqual(raiz.tag, self.NS + "kml")
+
+    def test_coordenadas_em_lon_lat(self):
+        # Trocar a ordem joga a mina para o outro lado do planeta — é o
+        # erro clássico de KML e não aparece em nenhuma validação de XML.
+        raiz, _, _ = self._arvore()
+        for c in raiz.iter(self.NS + "coordinates"):
+            for tr in (c.text or "").split():
+                lon, lat = (float(x) for x in tr.split(",")[:2])
+                self.assertTrue(-51 < lon < -49, f"lon fora: {lon}")
+                self.assertTrue(-28 < lat < -27, f"lat fora: {lat}")
+
+    def _abas(self, raiz):
+        """As abas de grandeza: dentro da pasta "Grandeza" (botão de rádio)."""
+        doc = raiz.find(self.NS + "Document")
+        g = [f for f in doc.findall(self.NS + "Folder")
+             if f.find(self.NS + "name").text == "Grandeza"]
+        return g[0].findall(self.NS + "Folder") if g else []
+
+    def _subpastas(self, raiz, aba):
+        for f in self._abas(raiz):
+            if (f.find(self.NS + "name").text or "").startswith(aba):
+                return [g.find(self.NS + "name").text
+                        for g in f.findall(self.NS + "Folder")]
+        return []
+
+    def test_pastas_esperadas(self):
+        raiz, _, _ = self._arvore()
+        doc = raiz.find(self.NS + "Document")
+        nomes = [f.find(self.NS + "name").text
+                 for f in doc.findall(self.NS + "Folder")]
+        # Equipamento NAO entra por padrão: com uma dezena de BCs a camada
+        # de alfinetes cobre justamente a medição.
+        self.assertFalse(any(n.startswith("BreadCrumbs") for n in nomes), nomes)
+        # A grandeza virou ABA, dentro de "Grandeza"; o resto é subpasta.
+        self.assertIn("Grandeza", nomes)
+        self.assertIn("RSSI", [f.find(self.NS + "name").text
+                               for f in self._abas(raiz)])
+        sub = self._subpastas(raiz, "RSSI")
+        # Rotas saiu do padrão: o rastro agora e o GroundOverlay do calor.
+        self.assertTrue(any(n.startswith("Medições") for n in sub), sub)
+        self.assertTrue(any(n.startswith("Fora do requisito") for n in sub), sub)
+
+    def test_equipamento_volta_quando_pedido(self):
+        # Quem quer o inventario no mesmo arquivo liga a chave; o padrao e
+        # nao poluir o mapa.
+        self.cfg.set("relatorio", "kmz_com_equipamentos", "true")
+        try:
+            raiz, _, _ = self._arvore()
+        finally:
+            self.cfg.set("relatorio", "kmz_com_equipamentos", "false")
+        doc = raiz.find(self.NS + "Document")
+        nomes = [f.find(self.NS + "name").text
+                 for f in doc.findall(self.NS + "Folder")]
+        self.assertTrue(any(n.startswith("BreadCrumbs") for n in nomes), nomes)
+
+    def test_uma_aba_por_grandeza_so_a_primeira_visivel(self):
+        # Ligadas juntas, os pontos de seis grandezas se empilham no mesmo
+        # lugar e o mapa nao diz nada.
+        raiz, txt, _ = self._arvore(campos=["sinal", "snr", "rtt"])
+        vis = [(f.find(self.NS + "name").text, f.find(self.NS + "visibility").text)
+               for f in self._abas(raiz)]
+        self.assertEqual([n for n, _ in vis], ["RSSI", "SNR", "Latência"])
+        self.assertEqual([x for _, x in vis], ["1", "0", "0"])
+        # Botão de rádio: ligar uma grandeza desliga a outra.
+        self.assertIn("<listItemType>radioFolder</listItemType>", txt)
+        self.assertIn("<name>Grandeza</name><open>1</open><styleUrl>#radio", txt)
+
+    def test_campo_com_operador_menor_nao_quebra_o_xml(self):
+        # "Fora do requisito — < 20 %" sem escape torna o arquivo INTEIRO
+        # ilegivel, e nenhuma grandeza de "menor e melhor" abria.
+        for campo in ("rtt", "perda", "interf", "ruido"):
+            raiz, txt, _ = self._arvore(campo=campo)
+            self.assertNotIn("— < ", txt)
+            self.assertIsNotNone(raiz)
+
+    def test_pasta_fora_do_requisito_conta_certo(self):
+        raiz, _, _ = self._arvore(campo="sinal")
+        esperado = sum(1 for a in self.am
+                       if a.get("sinal") is not None and a["sinal"] <= -75)
+        for aba in self._abas(raiz):
+            for f in aba.findall(self.NS + "Folder"):
+                nome = f.find(self.NS + "name").text or ""
+                if nome.startswith("Fora do requisito"):
+                    n = sum(1 for _ in f.iter(self.NS + "Placemark"))
+                    self.assertEqual(n, esperado)
+                    return
+        self.assertTrue(esperado == 0, "pasta Fora sumiu tendo pontos ruins")
+
+    def test_fora_do_requisito_comeca_desligada(self):
+        # Ligada por padrão ela cobre os pontos bons e o mapa fica só
+        # vermelho — a leitura honesta é ligar quando se quer triar.
+        _, txt, _ = self._arvore()
+        self.assertIn("<visibility>0</visibility>", txt)
+
+    def test_cor_segue_a_faixa_da_grandeza(self):
+        # MetaGeek/Oscium (-90, -80, -70, -67) mais o -75 Modular, nas
+        # cores do Rajant MeshMapper. Um valor dentro de cada faixa.
+        for v, esperado in ((-95, "5C0000"), (-85, "B70404"),
+                            (-78, "FF0000"), (-72, "F26A00"),
+                            (-69, "DD9F17"), (-60, "3EAD30"),
+                            (-40, "3EAD30")):
+            self.assertEqual(rm.cor_da_leitura(v, "sinal"), esperado,
+                             f"{v} dBm")
+
+    def test_faixas_sao_monotonas(self):
+        # Limites fora de ordem fariam _bucket_cor devolver a cor errada
+        # sem erro nenhum.
+        for campo, faixas in rm.FAIXAS_KML.items():
+            lims = [l for l, _ in faixas]
+            self.assertEqual(lims, sorted(lims), campo)
+
+    def test_sem_medicao_fica_cinza_nao_verde(self):
+        self.assertEqual(rm._bucket_cor(None, rm.FAIXAS_KML["sinal"]), "808080")
+
+    def test_balao_omite_campo_sem_medicao(self):
+        b = rm._balao_amostra({"radio": "CA-1", "sinal": -70, "snr": None})
+        self.assertIn("RSSI", b)
+        self.assertNotIn("SNR", b, "campo sem medição virou linha na tabela")
+
+    def test_balao_marca_amostra_vinda_do_cache(self):
+        b = rm._balao_amostra({"radio": "CA-1", "sinal": -70, "fonte": "cache"})
+        self.assertIn("cache do exporter", b)
+
+    def test_balao_marca_valor_fora_do_requisito(self):
+        self.assertIn("(fora)", rm._balao_amostra({"radio": "x", "sinal": -80}))
+        self.assertNotIn("(fora)", rm._balao_amostra({"radio": "x", "sinal": -60}))
+
+    def test_sem_barra_de_tempo_e_com_a_hora_no_balao(self):
+        # Com TimeStamp o Google Earth abre a barra de tempo e esconde o
+        # que fica fora do intervalo (o print de campo tinha 9:43 a 10:08).
+        raiz, txt, _ = self._arvore()
+        self.assertEqual(sum(1 for _ in raiz.iter(self.NS + "TimeStamp")), 0)
+        self.assertIn("<small>", txt)       # a hora vai no balão
+
+    def test_campo_invalido_falha_dizendo_o_que_vale(self):
+        with self.assertRaises(ValueError) as c:
+            rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg, campo="vazao")
+        self.assertIn("sinal", str(c.exception))
+
+    def test_survey_sem_posicao_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError) as c:
+            rm.gerar_kml_survey(self.sv, [{"radio": "x", "ts": 1}],
+                                cfg=self.cfg)
+        self.assertIn("georreferenciado", str(c.exception))
+
+    def test_decimacao_preserva_ordem_e_informa_o_passo(self):
+        pts = list(range(100))
+        saida, passo = rm._decimar(pts, 10)
+        self.assertEqual(passo, 10)
+        self.assertLessEqual(len(saida), 10)
+        self.assertEqual(saida, sorted(saida))
+        self.assertEqual(rm._decimar(pts, 0)[1], 1, "teto 0 = sem decimação")
+        self.assertEqual(rm._decimar(pts, 500)[1], 1)
+
+    def test_nome_com_aspas_nao_quebra_o_xml(self):
+        from xml.etree import ElementTree as ET
+        self.sv["nome"] = 'Cava <Norte> & "Sul"'
+        raiz, _, _ = self._arvore()      # levantaria ParseError se escapasse mal
+        self.assertIn("Cava", raiz.find(self.NS + "Document")
+                      .find(self.NS + "name").text)
+
+    def _com_calor(self):
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        cfg.set("relatorio", "kmz_com_calor", "true")
+        return cfg
+
+    def test_trilha_continua_no_arquivo(self):
+        import zipfile, io as _io
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                       campo="sinal")
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn("<name>Trajeto", doc)
+        self.assertIn("<LineString>", doc)
+
+    def test_abre_no_calor_com_a_trilha_desligada(self):
+        # Campo, 28/09/2026: o calor no estilo do KMZ de referência é o
+        # que se lê de relance; a trilha e as leituras ficam para consulta.
+        import zipfile, io as _io
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                       campo="sinal")
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        i = doc.index("<GroundOverlay>")
+        self.assertIn("<LatLonBox>", doc[i:])   # sem georreferência escorrega
+        self.assertNotIn("<visibility>0</visibility>", doc[i:i + 300])
+        t = doc.index(f"<name>{rm.CAMADA_DO_RASTRO}")
+        self.assertIn("<visibility>0</visibility>", doc[t:t + 200])
+        self.assertLess(i, t, "o calor vem antes da trilha na aba")
+        self.assertIn("files/calor_sinal.png", z.namelist())
+        # Ícones dentro do KMZ: sem internet na mina, os do Google não abrem.
+        self.assertIn("files/pt_dot.png", z.namelist())
+        self.assertNotIn("maps.google.com/mapfiles/kml/shapes/placemark_circle",
+                         doc)
+        self.assertIn("<LookAt>", doc)          # abre enquadrado
+
+    def test_calor_so_onde_passou(self):
+        # O que separa "medi aqui" de "acho que la deve dar": fora do raio
+        # das amostras o raster tem de ser TRANSPARENTE.
+        import zipfile, io as _io, numpy as np
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self._com_calor(),
+                                       campo="sinal")
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        png = [n for n in z.namelist() if "calor_" in n][0]
+        img = mpimg.imread(_io.BytesIO(z.read(png)))
+        alfa = img[..., 3]
+        self.assertGreater((alfa < 0.02).mean(), 0.4,
+                           "o calor cobriu quase tudo: virou cobertura")
+        self.assertGreater(alfa.max(), 0.5, "o rastro saiu apagado")
+
+    def test_radio_parado_nao_vira_bola_no_calor(self):
+        # Um BC fixo dá dezenas de amostras no MESMO ponto: virava uma
+        # bola isolada, e como ele enxerga o vizinho de perto, saía verde.
+        # Eram as "bolas espalhadas e desconectadas" — e boa parte do
+        # verde que nao batia com a mina.
+        import zipfile, io as _io, math
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        am = []
+        for k in range(30):        # movel RUIM, andando
+            am.append({"radio": "CA-1", "lat": -27.730 + k*3e-4,
+                       "lon": -50.070, "ts": k*5, "banda": "5.8 GHz",
+                       "sinal": -80.0, "snr": 12.0, "ruido": -92.0})
+        for k in range(30):        # fixo OTIMO, parado num ponto
+            am.append({"radio": "ERB-9", "lat": -27.7255, "lon": -50.0669,
+                       "ts": k*5, "banda": "5.8 GHz",
+                       "sinal": -50.0, "snr": 42.0, "ruido": -95.0})
+        dados, _ = rm.gerar_kml_survey(
+            {"id": 1, "nome": "T", "inicio": 1756000000},
+            am, {"ERB-9": (-27.7255, -50.0669)}, cfg=self._com_calor(),
+            campo="sinal")
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        png = [n for n in z.namelist() if "calor_" in n][0]
+        img = mpimg.imread(_io.BytesIO(z.read(png)))
+        rgb, alfa = img[..., :3], img[..., 3]
+        pintado = alfa > 0.4
+        self.assertTrue(pintado.any(), "nao pintou nada")
+        # Onde o BC PARADO esta, o raster tem de ser transparente: ele nao
+        # percorreu nada. Olhar a media do quadro inteiro nao serve — o
+        # rastro do movel tem area muito maior e afogaria a bola.
+        doc = z.read("doc.kml").decode()
+        import re as _re
+        cx = {t: float(_re.search(rf"<{t}>([-\d.]+)</{t}>", doc).group(1))
+              for t in ("north", "south", "east", "west")}
+        n, m = img.shape[0], img.shape[1]
+        # O PNG vai com norte no topo; não é quadrado.
+        li = int((cx["north"] + 27.7255) / (cx["north"] - cx["south"]) * (n - 1))
+        co = int((-50.0669 - cx["west"]) / (cx["east"] - cx["west"]) * (m - 1))
+        if 0 <= li < n and 0 <= co < m:
+            janela = alfa[max(0, li-6):li+7, max(0, co-6):co+7]
+            self.assertLess(janela.max(), 0.25,
+                            "o radio parado pintou uma bola no mapa "
+                            f"(alfa {janela.max():.2f} na posicao dele)")
+        # E o rastro do movel, a -80 dBm (abaixo do requisito -75), tem de
+        # sair quente.
+        med = rgb[pintado].mean(axis=0)
+        self.assertGreater(med[0], med[1],
+                           f"rastro saiu esverdeado (RGB {med})")
+
+    def test_raio_acompanha_o_espacamento(self):
+        # Raio menor que o vao entre amostras => nucleos nao se encontram
+        # e o rastro vira colar de contas.
+        fonte = inspect.getsource(rm.gerar_kml_survey)
+        self.assertIn("espacamento_tipico(amostras_aba)", fonte)
+        i = fonte.index("espacamento_tipico(amostras_aba)")
+        trecho = fonte[i:i+260]
+        self.assertIn("raio", trecho)
+
+    def test_fita_parte_onde_houve_buraco(self):
+        # A linha tinha saído do padrão por inventar reta entre pontos
+        # distantes. Voltou partida nos buracos de medição: um salto de
+        # 1 km no meio do trajeto vira dois trechos, não uma reta.
+        am = [dict(a) for a in self.am if a["radio"] == "CA-1001"]
+        for a in am[6:]:
+            a["lat"] += 0.01                 # ~1,1 km para o norte
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io, re as _re
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        contornos = _re.findall(r"#lcontorno</styleUrl><LineString>", doc)
+        self.assertEqual(len(contornos), 2)
+
+
+
+
+    def test_todo_estilo_usado_na_rota_existe(self):
+        # styleUrl sem Style faz o Google Earth desenhar linha branca.
+        import re as _re
+        _, txt, _ = self._arvore()
+        usados = set(_re.findall(r"<styleUrl>#([lq][0-9A-F]{6}|lcontorno)"
+                                 r"</styleUrl>", txt))
+        defin = set(_re.findall(r'<Style id="([lq][0-9A-F]{6}|lcontorno)">',
+                                txt))
+        self.assertTrue(usados)
+        self.assertEqual(usados - defin, set())
+
+    def test_estilo_da_zona_saiu_com_a_pasta(self):
+        # "zona" (o poligono) e "sugestao" (o alfinete do local
+        # recomendado) continuaram sendo emitidos depois de a pasta
+        # ZONAS-PROBLEMA sair do laudo: peso morto no arquivo, e um
+        # <Style id> vivo para o que nao existe mais convida a
+        # ressuscitar a pasta por engano.
+        _, txt, _ = self._arvore()
+        for sid in ("zona", "sugestao"):
+            self.assertNotIn(f'<Style id="{sid}">', txt)
+            self.assertNotIn(f"<styleUrl>#{sid}</styleUrl>", txt)
+
+    def test_so_as_cores_usadas_viram_estilo(self):
+        # Os pontos só emitem estilo para as cores que apareceram.
+        import re as _re
+        _, txt, _ = self._arvore()
+        usados = set(_re.findall(r"<styleUrl>#q([0-9A-F]{6})</styleUrl>", txt))
+        defin = set(_re.findall(r'<Style id="q([0-9A-F]{6})">', txt))
+        self.assertEqual(defin - usados, set(), "estilo definido sem uso")
+        # E o gradiente de 40 tons não existe mais em lugar nenhum.
+        self.assertNotRegex(txt, r'<Style id="r[0-9A-F]{6}">')
+
+    def test_rota_funde_trechos_de_mesma_cor(self):
+        # Um Placemark por PAR de pontos dava mais de mil objetos por
+        # radio, pesados de abrir e com emenda visivel entre segmentos.
+        # Conta só as FITAS coloridas — antes o teste passava de carona
+        # no contorno, que sempre tem todos os pontos.
+        import re as _re
+        am = [{"radio": "CA-1", "ts": k, "lat": -27.73 + k * 1e-4,
+               "lon": -50.07, "sinal": -60.0 if k < 10 else -78.0}
+              for k in range(20)]
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        fitas = _re.findall(r"<styleUrl>#l([0-9A-F]{6})</styleUrl><LineString>"
+                            r".*?<coordinates>([^<]*)</coordinates>", doc)
+        self.assertEqual([c for c, _ in fitas], ["3EAD30", "FF0000"],
+                         "20 leituras em duas faixas viraram mais que 2 fitas")
+        # Uma emenda na troca de cor, e cada fita com linha de verdade.
+        a, b = ([tuple(p.split(",")[:2]) for p in xy.split()] for _, xy in fitas)
+        self.assertEqual(a[-1], b[0])
+        self.assertTrue(len(a) >= 2 and len(b) >= 2)
+
+    def test_rota_tem_contorno_escuro(self):
+        # Truque de cartografia: contorno por baixo deixa a linha legivel
+        # tanto sobre satelite claro quanto escuro.
+        _, txt, _ = self._arvore()
+        self.assertIn('<Style id="lcontorno">', txt)
+        self.assertIn("#lcontorno", txt)
+
+    def test_todo_contorno_vem_antes_de_toda_cor(self):
+        # Contorno intercalado por veículo cobria a cor do outro veículo
+        # no cruzamento de pistas.
+        am = self.am + [dict(a, radio="CA-2002", lon=a["lon"] + 2e-4)
+                        for a in self.am if a["radio"] == "CA-1001"]
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io, re as _re
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        seq = _re.findall(r"<styleUrl>#(lcontorno|l[0-9A-F]{6})</styleUrl>",
+                          doc)
+        ult_contorno = max(i for i, x in enumerate(seq) if x == "lcontorno")
+        pri_cor = min(i for i, x in enumerate(seq) if x != "lcontorno")
+        self.assertLess(ult_contorno, pri_cor)
+
+    def test_rota_nao_marca_inicio_nem_fim(self):
+        # Retirados a pedido: com uma dezena de equipamentos, viravam duas
+        # dezenas de alfinetes sem informacao de medicao nenhuma.
+        _, txt, _ = self._arvore()
+        self.assertNotIn("— inicio", txt)
+        self.assertNotIn("— fim", txt)
+        self.assertNotIn("rotaIni", txt)
+        self.assertNotIn("rotaFim", txt)
+
+    def test_cor_da_rota_nao_e_suavizada(self):
+        # Foi pedido explicitamente: cada medicao com a SUA cor. Nem média
+        # móvel nem gradiente contínuo: a cor é a faixa da legenda.
+        fonte = inspect.getsource(rm.gerar_kml_survey)
+        self.assertNotIn("mediana movel", fonte.replace("ó", "o"))
+        self.assertNotIn("cor_continua(", fonte)
+        self.assertIn("trilha_consolidada(", fonte)
+        self.assertIn("_fita_por_amostra(",
+                      inspect.getsource(rm.trilha_consolidada))
+
+    def test_cada_trecho_mostra_a_leitura_mais_proxima(self):
+        # A amostra é dona do caminho até o ponto médio com a vizinha. O
+        # ponto onde a cor troca é exatamente o meio entre as duas
+        # leituras — nenhum trecho mostra média nem cor interpolada.
+        corrida = [{"lat": 0.0, "lon": 0.0, "sinal": -60.0},
+                   {"lat": 0.0, "lon": 0.001, "sinal": -60.0},
+                   {"lat": 0.0, "lon": 0.002, "sinal": -78.0},
+                   {"lat": 0.0, "lon": 0.003, "sinal": -60.0}]
+        f = rm._fita_por_amostra(corrida, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual([c for c, _, _ in f], ["3EAD30", "FF0000", "3EAD30"])
+        self.assertEqual(f[0][1][-1], (0.0, 0.0015))   # meio entre 2ª e 3ª
+        self.assertEqual(f[1][1], [(0.0, 0.0015), (0.0, 0.002), (0.0, 0.0025)])
+        self.assertEqual(f[2][1][0], (0.0, 0.0025))
+        self.assertEqual([v for _, _, v in f], [[-60.0, -60.0], [-78.0], [-60.0]])
+
+    def test_fita_opaca_na_cor_exata_da_faixa(self):
+        # Com alfa, o vermelho do chão da cava tingia o verde e a cor vista
+        # deixava de ser a da faixa. Opaca = ff no alfa do KML (aabbggrr).
+        _, txt, _ = self._arvore()
+        self.assertIn("<width>6</width>", txt)
+        self.assertIn('<Style id="l3EAD30"><LineStyle><color>ff30ad3e</color>',
+                      txt)
+
+    def test_leitura_isolada_nao_some_do_mapa(self):
+        # Uma leitura sozinha entre dois buracos não tem linha a traçar,
+        # mas é medição: sai como ponto na pasta do trajeto.
+        am = [{"radio": "CA-1", "ts": 0, "lat": -27.73, "lon": -50.07,
+               "sinal": -60.0},
+              {"radio": "CA-1", "ts": 500, "lat": -27.70, "lon": -50.07,
+               "sinal": -78.0}]
+        dados, _ = rm.gerar_kml_survey(self.sv, am, cfg=self.cfg,
+                                       campo="sinal")
+        import zipfile, io as _io
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        trajeto = doc[doc.index("<name>Trajeto"):doc.index("<name>Medições")]
+        self.assertEqual(trajeto.count("<Point>"), 2)
+        self.assertIn("#qFF0000", trajeto)
+
+    def test_legenda_vai_na_tela_de_cada_aba(self):
+        # O print do Google Earth colado no slide leva a própria régua.
+        import zipfile, io as _io
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                       campos=["sinal", "snr"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        self.assertEqual(doc.count("<ScreenOverlay>"), 2)
+        self.assertIn("files/legenda_sinal.png", z.namelist())
+        self.assertIn("files/legenda_snr.png", z.namelist())
+
+
+    def test_kml_sem_compressao_quando_pedido(self):
+        dados, nome = rm.gerar_kml_survey(self.sv, self.am, cfg=self.cfg,
+                                          comprimir=False)
+        self.assertTrue(nome.endswith(".kml"))
+        self.assertTrue(dados.startswith(b"<?xml"))
+
+
+
+
+
+
+
+
+class TestConfigSurvey(unittest.TestCase):
+    def test_defaults_entram_junto_com_relatorio(self):
+        # Em arquivo separado o operador nunca descobriria que existem.
+        cfg = rm.configparser.ConfigParser()
+        with mock.patch.object(rm, "CONFIG_FILE",
+                               str(Path(tempfile.mkdtemp()) / "c.ini")):
+            rm.cfg_relatorio(cfg)
+        self.assertTrue(cfg.has_section("survey"))
+        for k in ("max_threads", "timeout_s", "min_intervalo_s",
+                  "falhas_para_pular", "usar_cache_fallback"):
+            self.assertTrue(cfg.has_option("survey", k), k)
+
+
+class TestIdentidadeNoSemanal(unittest.TestCase):
+    """O semanal vira Anglo repintando o template do cliente, no fim da
+    geração. O que se testa aqui é que a pele muda e o conteúdo não."""
+
+    def _deck(self):
+        """Um deck mínimo na paleta do template: capa + um slide de
+        conteúdo com cartão, tabela e botão."""
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from pptx.dml.color import RGBColor
+        from pptx.enum.shapes import MSO_SHAPE
+
+        p = Presentation()
+        p.slide_width, p.slide_height = Inches(13.333), Inches(7.5)
+        vazio = p.slide_masters[0].slide_layouts[6]
+
+        def texto(s, x, y, w, h, txt, cor, tam=12):
+            tb = s.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+            r = tb.text_frame.paragraphs[0].add_run(); r.text = txt
+            r.font.name = "Calibri"; r.font.size = Pt(tam)
+            r.font.color.rgb = RGBColor.from_string(cor)
+            return tb
+
+        # capa
+        capa = p.slides.add_slide(vazio)
+        capa.background.fill.solid()
+        capa.background.fill.fore_color.rgb = RGBColor.from_string("0D2052")
+        texto(capa, 0.9, 2.3, 11.5, 0.9, "RELATÓRIO SEMANAL", "FFFFFF", 40)
+        # Subtítulo em tom de corpo: no template ele é A0B0CC, que vira
+        # cinza — e cinza sobre o azul da capa some. Está aqui porque foi
+        # exatamente o que apareceu no arquivo do cliente.
+        texto(capa, 0.9, 3.25, 11.5, 0.45,
+              "Infraestrutura de Telecom | Tecnologia de Mina", "A0B0CC", 16)
+
+        # conteúdo
+        s = p.slides.add_slide(vazio)
+        s.background.fill.solid()
+        s.background.fill.fore_color.rgb = RGBColor.from_string("0D2052")
+        texto(s, 0.55, 0.32, 11.3, 0.6, "1. Dashboard Executivo", "FFFFFF", 28)
+        texto(s, 0.55, 0.92, 11.3, 0.32, "Resumo da semana", "A0B0CC")
+        cart = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.55),
+                                  Inches(1.55), Inches(4.0), Inches(1.5))
+        cart.fill.solid(); cart.fill.fore_color.rgb = RGBColor.from_string("1A2744")
+        cart.line.color.rgb = RGBColor.from_string("2A3A5C")
+        # Rótulo BRANCO em cima do cartão: o cartão clareia, então este
+        # branco tem de virar escuro ou o texto some. É o caso dos 174
+        # runs brancos do template do cliente.
+        texto(s, 0.75, 1.70, 3.6, 0.3, "DISPONIBILIDADE DA MALHA", "FFFFFF", 11)
+        texto(s, 0.75, 2.05, 3.6, 0.85, "99,12%", "C8D0E0", 30)
+        gf = s.shapes.add_table(2, 2, Inches(0.55), Inches(3.3),
+                                Inches(6.0), Inches(0.8))
+        for j, cab in enumerate(("Indicador", "Valor")):
+            cel = gf.table.cell(0, j)
+            cel.fill.solid(); cel.fill.fore_color.rgb = RGBColor.from_string("1A3A7A")
+            r = cel.text_frame.paragraphs[0].add_run(); r.text = cab
+            r.font.color.rgb = RGBColor.from_string("FFFFFF")
+        for j, v in enumerate(("Disponibilidade", "OK")):
+            cel = gf.table.cell(1, j)
+            cel.fill.solid(); cel.fill.fore_color.rgb = RGBColor.from_string("152238")
+            r = cel.text_frame.paragraphs[0].add_run(); r.text = v
+            r.font.color.rgb = RGBColor.from_string("27AE60")
+        bt = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(12.05),
+                                Inches(0.28), Inches(1.05), Inches(0.34))
+        bt.fill.solid(); bt.fill.fore_color.rgb = RGBColor.from_string("1A2744")
+        r = bt.text_frame.paragraphs[0].add_run(); r.text = "◂ MENU"
+        r.font.color.rgb = RGBColor.from_string("FFFFFF")
+        bt.click_action.target_slide = capa
+        return p
+
+    # ── a pele muda ───────────────────────────────────────────
+
+
+
+
+
+    # ── o conteúdo não muda ───────────────────────────────────
+
+
+
+    # ── a marca ───────────────────────────────────────────────
+
+
+
+
+    # ── contraste ─────────────────────────────────────────────
+
+    # ── ligação com a geração ─────────────────────────────────
+
+    def test_pode_ser_desligada(self):
+        cfg = rm.configparser.ConfigParser()
+        with mock.patch.object(rm, "CONFIG_FILE",
+                               str(Path(tempfile.mkdtemp()) / "c.ini")):
+            rm.cfg_relatorio(cfg)
+        self.assertTrue(cfg.has_option("relatorio", "identidade_anglo"))
+        self.assertTrue(cfg.getboolean("relatorio", "identidade_anglo"))
+
+
+def _deck_de_secoes(titulos_e_subtitulos):
+    """Deck com um slide por (título, subtítulo), no leiaute do template:
+    o botão ◂ MENU em 0,28" — ACIMA do título, em 0,32"."""
+    from pptx import Presentation
+    from pptx.util import Inches
+    p = Presentation()
+    p.slide_width, p.slide_height = Inches(13.333), Inches(7.5)
+    vazio = p.slide_masters[0].slide_layouts[6]
+    for titulo, sub in titulos_e_subtitulos:
+        s = p.slides.add_slide(vazio)
+        bt = s.shapes.add_textbox(Inches(12.05), Inches(0.28),
+                                  Inches(1.05), Inches(0.34))
+        bt.text_frame.paragraphs[0].add_run().text = "◂ MENU"
+        t = s.shapes.add_textbox(Inches(0.55), Inches(0.32),
+                                 Inches(11.3), Inches(0.6))
+        t.text_frame.paragraphs[0].add_run().text = titulo
+        u = s.shapes.add_textbox(Inches(0.55), Inches(0.92),
+                                 Inches(11.3), Inches(0.32))
+        u.text_frame.paragraphs[0].add_run().text = sub
+    return p
+
+
+
+
+class TestMeshMapper(unittest.TestCase):
+    """Leitura da captura do MeshMapper (a ferramenta da propria Rajant).
+
+    A fixture e um recorte do arquivo REAL do cliente: 8 pontos, 3 peers
+    por radio. Inventar o formato levaria a um leitor que so funciona
+    contra a minha imaginacao.
+    """
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        self.sv, self.am, self.pr = rm.ler_meshmapper(str(self.EXEMPLO))
+
+    def test_le_pontos_e_vizinhos(self):
+        self.assertEqual(len(self.am), 8)
+        self.assertTrue(self.pr)
+        self.assertEqual(self.sv["movel"], "CA-1006")
+
+    def test_signal_e_rssi_nao_sao_trocados(self):
+        # No arquivo, "rssi" e SNR em dB e "signal" e RSSI em dBm. Trocar
+        # os dois inverteria a escala inteira do relatorio.
+        a = self.am[0]
+        self.assertLess(a["sinal"], -30)      # dBm e negativo e grande
+        self.assertGreater(a["snr"], 0)       # dB e positivo e pequeno
+        self.assertLess(a["snr"], 60)
+
+    def test_ruido_e_recuperado_de_signal_menos_snr(self):
+        # Nao e estimativa: e o piso que o radio usou para calcular o SNR.
+        for a in self.am:
+            if a["sinal"] is None or a["snr"] is None: continue
+            self.assertEqual(a["ruido"], a["sinal"] - a["snr"])
+
+    def test_ponto_sem_enlace_nao_vira_sinal_zero(self):
+        # Type "N/A" com custo INT_MAX significa SEM ROTA. Virar 0 dBm
+        # seria publicar "medi e deu otimo" onde nao houve enlace.
+        falso = {"signal": 0, "rssi": 0, "cost": rm.CUSTO_SEM_ROTA,
+                 "rate": 0, "channel": 0, "freq": 0}
+        a = rm._mm_amostra("X", 1.0, -18.9, -43.4, None, falso, None)
+        self.assertIsNone(a["sinal"])
+        self.assertIsNone(a["custo"])
+        self.assertIsNone(a["ruido"])
+
+    def test_banda_sai_da_frequencia(self):
+        bandas = {a["banda"] for a in self.am if a["banda"]}
+        self.assertTrue(bandas <= {"2.4 GHz", "5.8 GHz"}, bandas)
+
+    def test_timestamp_e_utc(self):
+        # O sufixo "UTC" do CSV e literal; tratar como hora local moveria
+        # o trajeto no tempo.
+        t = rm._mm_ts("2026-09-10 15:59:27 UTC")
+        self.assertAlmostEqual(t, 1789055967.0, delta=1)
+
+    def test_limiares_do_meshmapper_sao_preservados(self):
+        # A regua que a propria ferramenta usou entra no relatorio, em vez
+        # de impormos a nossa e chamarmos de "o que o MeshMapper mostrou".
+        self.assertIn("goodRSSI", self.sv["limiares_mm"])
+
+    def test_campos_sem_medicao_sao_identificados(self):
+        # `ler_meshmapper` devolve a amostra crua; quem anexa o RSSI do
+        # laudo e `cobertura_disponivel`, um passo depois — e os tres
+        # caminhos de geracao (importar_meshmapper, survey_meshmapper.gerar
+        # e a coleta ao vivo) o chamam antes de montar KMZ e PPT.
+        rm.cobertura_disponivel(self.am, self.pr)
+        campos = rm.campos_com_medicao(self.am)
+        # O RSSI do laudo e `sinal_cob` — a melhor ERB/ERM do ponto. E
+        # ele que vira aba e slide; `sinal` (o enlace escolhido) segue
+        # nas amostras, mas nao abre camada propria.
+        self.assertIn("sinal_cob", campos)
+        self.assertNotIn("sinal", campos)
+        self.assertIn("snr", campos)
+        # O MeshMapper nao fornece nenhum destes.
+        for c in ("rtt", "perda", "interf"):
+            self.assertNotIn(c, campos)
+
+    def test_grandeza_sem_medicao_nao_vira_slide(self):
+        fonte = inspect.getsource(rm.ppt_survey_anglo)
+        self.assertIn("if not any(a.get(campo) is not None for a in am_b):",
+                      fonte)
+
+    def test_importa_para_o_banco_e_gera_kmz(self):
+        import tempfile, zipfile, io as _io
+        tmp = tempfile.mkdtemp()
+        con = rm.banco(str(Path(tmp) / "s.db"))
+        try:
+            sid, sv, am, pr = rm.importar_meshmapper(str(self.EXEMPLO), con)
+            self.assertGreater(sid, 0)
+            gravadas = rm.survey_amostras(con, sid)
+            self.assertEqual(len(gravadas), len(am))
+            cfg = rm.configparser.ConfigParser()
+            with mock.patch.object(rm, "CONFIG_FILE",
+                                   str(Path(tmp) / "c.ini")):
+                rm.cfg_relatorio(cfg)
+            dados, nome = rm.gerar_kml_survey(
+                sv, am, cfg=cfg, campos=rm.campos_com_medicao(am))
+            z = zipfile.ZipFile(_io.BytesIO(dados))
+            self.assertIn("doc.kml", z.namelist())
+            self.assertTrue([n for n in z.namelist() if n.endswith(".png")],
+                            "KMZ do MeshMapper saiu sem o raster do calor")
+        finally:
+            con.close()
+
+    def test_le_sem_a_rajant_api(self):
+        # O gerador roda no notebook de quem mediu, sem a biblioteca e
+        # sem rede. Sair com erro no import impediria justamente isso.
+        fonte = inspect.getsource(rm)
+        i = fonte.index("from rajant_api import Breadcrumb")
+        j = fonte.index("def exigir_rajant_api")
+        self.assertNotIn("sys.exit(1)", fonte[i:j])
+
+
+class TestCoberturaDisponivel(unittest.TestCase):
+    """Duas perguntas diferentes que viviam no mesmo numero.
+
+    "existe sinal servivel aqui?"  -> melhor vizinho de INFRAESTRUTURA
+    "a aplicacao funcionou aqui?"  -> enlace que o InstaMesh usou
+
+    No arquivo do cliente elas divergiam muito: enlace entregue com
+    mediana -88 dBm e 81% fora do requisito, contra cobertura de -66 dBm
+    e 100% dentro. Reportar so a primeira leva a conclusao errada de que
+    falta radio na area.
+
+    Aquela apuracao e ANTERIOR ao recorte por banda e misturava 2,4 com
+    5,8 GHz; os -66 dBm sao de 2,4 GHz num ponto cuja amostra e de 5,8.
+    A regra vigente elege dentro da banda da amostra — ver
+    `test_a_eleicao_acontece_dentro_da_banda_da_amostra`.
+    """
+
+    def _dados(self):
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -88.0, "snr": 20.0}]
+        pr = [{"ponto": 1, "nome": "ERB-07", "sinal": -66.0, "snr": 30.0},
+              {"ponto": 1, "nome": "CA-1021", "sinal": -40.0, "snr": 50.0},
+              {"ponto": 1, "nome": "ERM-03", "sinal": -72.0, "snr": 25.0}]
+        return am, pr
+
+    def test_cobertura_usa_infra_e_nao_o_vizinho_mais_forte(self):
+        # O mais forte (-40 dBm) e outro CAMINHAO: some quando ele sai, e
+        # por isso nao caracteriza cobertura da area.
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -66.0)
+        self.assertEqual(am[0]["servidor_cob"], "ERB-07")
+        self.assertTrue(am[0]["cob_e_infra"])
+
+    def test_delta_mostra_o_que_ficou_na_mesa(self):
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        self.assertAlmostEqual(am[0]["delta_cob"], 22.0, places=1)
+
+    def test_sem_infra_cai_para_o_melhor_e_MARCA(self):
+        # Sem ERB/ERM visivel, usa o melhor vizinho qualquer — mas
+        # sinalizado. Silenciar isso apresentaria um caminhao de
+        # passagem como cobertura da area.
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -88.0}]
+        pr = [{"ponto": 1, "nome": "CA-1021", "sinal": -40.0, "snr": 50.0}]
+        r = rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -40.0)
+        self.assertFalse(am[0]["cob_e_infra"])
+        self.assertEqual(r["sem_infra"], 1)
+        self.assertEqual(r["com_infra"], 0)
+
+    def test_ponto_sem_vizinho_nao_inventa_cobertura(self):
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -88.0}]
+        rm.cobertura_disponivel(am, [])
+        self.assertIsNone(am[0].get("sinal_cob"))
+        self.assertIsNone(am[0].get("delta_cob"))
+
+    def test_cobertura_entra_no_resumo(self):
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        r = rm.survey_resumo(am)
+        self.assertIsNotNone(r.get("sinal_cob"))
+        self.assertEqual(r["sinal_cob"]["pct_ok"], 100.0)   # -66 > -75
+        self.assertEqual(r["sinal"]["pct_ok"], 0.0)         # -88 < -75
+
+    def test_cobertura_e_a_primeira_aba_do_kmz(self):
+        # Abrir pelo enlace entregue faz o leitor concluir "falta radio"
+        # onde o problema e outro.
+        # Abre nos enlaces bons pela régua da Rajant (pedido de 28/09/2026,
+        # a partir do KMZ oficial do MeshMapper); logo depois, a cobertura.
+        self.assertEqual(rm.CAMPOS_KMZ[:2], ["enl_bons", "sinal_cob"])
+
+    def test_a_eleicao_acontece_dentro_da_banda_da_amostra(self):
+        # Medido no arquivo de exemplo: o mesmo ponto enxerga ERM-28 a
+        # -71 dBm em 2,4 GHz e ERM-09 a -86 dBm em 5,8 GHz. A amostra e
+        # de 5,8 GHz (a banda do enlace que atendeu) e sem recorte o -71
+        # ia para o mapa de 5,8 GHz — 15 dB, a diferenca entre aprovado e
+        # reprovado. Separar 2,4 e 5,8 em arquivos nao adianta se a
+        # leitura de uma banda entra no mapa da outra.
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -89.0, "banda": "5.8 GHz"}]
+        pr = [{"ponto": 1, "nome": "ERM-28", "sinal": -71.0, "snr": 22.0,
+               "banda": "2.4 GHz"},
+              {"ponto": 1, "nome": "ERM-09", "sinal": -86.0, "snr": 23.0,
+               "banda": "5.8 GHz"}]
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -86.0)
+        self.assertEqual(am[0]["servidor_cob"], "ERM-09")
+        self.assertEqual(am[0]["snr_cob"], 23.0)
+        self.assertAlmostEqual(am[0]["delta_cob"], 3.0, places=1)
+
+    def test_sem_vizinho_na_banda_fica_buraco_e_nao_a_outra_banda(self):
+        # Buraco no mapa se le como "nao medi". Pintado com a medida da
+        # outra banda, se le como medicao — e mente.
+        am = [{"radio": "CA-1", "ts": 1.0, "lat": -18.92, "lon": -43.42,
+               "sinal": -89.0, "banda": "5.8 GHz"}]
+        pr = [{"ponto": 1, "nome": "ERM-28", "sinal": -71.0, "snr": 22.0,
+               "banda": "2.4 GHz"}]
+        r = rm.cobertura_disponivel(am, pr)
+        self.assertIsNone(am[0].get("sinal_cob"))
+        self.assertEqual(r["sem_vizinho_na_banda"], 1)
+
+    def test_amostra_sem_banda_usa_todos_os_vizinhos(self):
+        # A sondagem por API nem sempre traz a banda. Sem ela nao ha o
+        # que recortar, e descartar tudo apagaria o mapa inteiro.
+        am, pr = self._dados()
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -66.0)
+
+    def test_a_banda_do_arquivo_real_e_respeitada(self):
+        # O mesmo, contra o recorte do arquivo do cliente em vez de
+        # fixture inventada.
+        exemplo = (Path(__file__).resolve().parent / "exemplos"
+                   / "meshmapper_exemplo.json")
+        if not exemplo.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        _, am, pr = rm.ler_meshmapper(str(exemplo))
+        rm.cobertura_disponivel(am, pr)
+        for a in am:
+            if a.get("servidor_cob") is None: continue
+            banda = rm._norm_banda(a["banda"])
+            iguais = [p for p in pr
+                      if p.get("nome") == a["servidor_cob"]
+                      and rm._norm_banda(p.get("banda")) == banda]
+            self.assertTrue(iguais, f"{a['servidor_cob']} nao existe em {banda}")
+
+    def test_cobertura_tem_escala_e_faixas_proprias_registradas(self):
+        self.assertIn("sinal_cob", rm.ESCALAS)
+        self.assertIn("sinal_cob", rm.FAIXAS_KML)
+        # Mesma regua do RSSI: e a mesma grandeza, de outra fonte.
+        self.assertEqual(rm.ESCALAS["sinal_cob"]["req"],
+                         rm.ESCALAS["sinal"]["req"])
+        self.assertEqual(rm.FAIXAS_KML["sinal_cob"], rm.FAIXAS_KML["sinal"])
+
+    def test_banco_guarda_as_colunas_de_cobertura(self):
+        import tempfile
+        con = rm.banco(str(Path(tempfile.mkdtemp()) / "s.db"))
+        try:
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(amostra)")}
+            for c in ("sinal_cob", "snr_cob", "servidor_cob", "delta_cob"):
+                self.assertIn(c, cols)
+        finally:
+            con.close()
+
+    def test_varios_arquivos_nao_cruzam_vizinhos(self):
+        # Os numeros de ponto se repetem entre capturas: cruza-los ligaria
+        # o vizinho de uma ao trajeto de outra.
+        fonte = inspect.getsource(rm.importar_meshmapper_varios)
+        self.assertIn("cobertura_disponivel(am_i, pr_i)", fonte)
+
+
+class TestValorDoPixel(unittest.TestCase):
+    """Como o raster escolhe o valor de cada pixel.
+
+    A regra e vizinho mais proximo, nao media. Medido contra o arquivo do
+    cliente: as amostras cruas davam 81% fora do requisito, o vizinho
+    mais proximo 92% (area, nao tempo — sao grandezas diferentes) e a
+    media ponderada dizia 100%, porque APAGAVA as poucas leituras boas ao
+    promedia-las com as vizinhas ruins.
+    """
+
+    def _bb(self, pts, raio):
+        import math
+        las = [p["lat"] for p in pts]; los = [p["lon"] for p in pts]
+        dlat = raio / 111320.0
+        dlon = raio / (111320.0 * math.cos(math.radians(sum(las)/len(las))))
+        return {"sul": min(las)-dlat, "norte": max(las)+dlat,
+                "oeste": min(los)-dlon, "leste": max(los)+dlon}
+
+    def _linha(self, valores, passo=0.0002):
+        return [{"lat": -18.92 + i*passo, "lon": -43.42, "ts": float(i),
+                 "sinal": v, "radio": "CA-1"} for i, v in enumerate(valores)]
+
+    def test_todo_pixel_e_uma_leitura_real(self):
+        # O que separa mapa de laudo: nenhum pixel pode mostrar um valor
+        # que nao foi medido em lugar nenhum.
+        import numpy as np
+        pts = self._linha([-50.0, -90.0, -55.0, -85.0, -60.0])
+        v, a = rm._calor_da_rota(pts, "sinal", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["sinal"])
+        self.assertIsNotNone(v)
+        no_mapa = set(np.round(v[np.isfinite(v)], 3))
+        medidos = {round(float(p["sinal"]), 3) for p in pts}
+        self.assertEqual(no_mapa - medidos, set(),
+                         "o raster inventou valor que nao foi medido")
+
+    def test_leitura_boa_isolada_nao_e_apagada(self):
+        # Era o defeito da media: uma leitura otima cercada de ruins
+        # sumia. E justamente o ponto que interessa achar num survey.
+        import numpy as np
+        pts = self._linha([-90.0, -90.0, -45.0, -90.0, -90.0])
+        v, a = rm._calor_da_rota(pts, "sinal", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["sinal"])
+        self.assertGreater(np.nanmax(v), -50.0,
+                           "a leitura boa foi apagada pela vizinhanca")
+
+    def test_mesmo_lugar_medido_duas_vezes_fica_a_pior(self):
+        # Passar duas vezes no mesmo ponto: a operacao enfrenta as duas
+        # leituras, e e a ruim que para o caminhao.
+        import numpy as np
+        pts = [{"lat": -18.92, "lon": -43.42, "ts": 1.0, "sinal": -50.0,
+                "radio": "CA-1"},
+               {"lat": -18.92, "lon": -43.42, "ts": 99.0, "sinal": -92.0,
+                "radio": "CA-1"},
+               {"lat": -18.9203, "lon": -43.42, "ts": 2.0, "sinal": -70.0,
+                "radio": "CA-1"}]
+        v, a = rm._calor_da_rota(pts, "sinal", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["sinal"])
+        # No pixel do ponto repetido tem de estar a leitura RUIM.
+        i = np.unravel_index(np.nanargmin(v), v.shape)
+        self.assertAlmostEqual(float(v[i]), -92.0, places=1)
+
+    def test_pior_respeita_o_sentido_da_grandeza(self):
+        # Em ruido, latencia, perda e interferencia o pior e o MAIOR.
+        import numpy as np
+        pts = [{"lat": -18.92, "lon": -43.42, "ts": 1.0, "rtt": 10.0,
+                "radio": "CA-1"},
+               {"lat": -18.92, "lon": -43.42, "ts": 99.0, "rtt": 180.0,
+                "radio": "CA-1"},
+               {"lat": -18.9203, "lon": -43.42, "ts": 2.0, "rtt": 30.0,
+                "radio": "CA-1"}]
+        v, a = rm._calor_da_rota(pts, "rtt", self._bb(pts, 40.0), 40.0,
+                                 n=200, esc=rm.ESCALAS["rtt"])
+        self.assertAlmostEqual(float(np.nanmax(v)), 180.0, places=1)
+
+    def test_empate_e_na_resolucao_da_grade(self):
+        # Com tolerancia grande, o empate disparava entre amostras
+        # CONSECUTIVAS e o mapa inteiro pendia para o lado ruim: 95,8% da
+        # area fora do requisito contra 91,9% pelo vizinho puro. Isso nao
+        # e ser conservador, e distorcer.
+        fonte = inspect.getsource(rm._calor_da_rota)
+        self.assertIn("tol = max(px, py)", fonte)
+
+    def test_nao_usa_media_ponderada(self):
+        fonte = inspect.getsource(rm._calor_da_rota)
+        self.assertNotIn("soma[i0:i1", fonte)
+        self.assertIn("dmin", fonte)
+
+
+class TestGeradorMeshMapper(unittest.TestCase):
+    """A ferramenta separada: varios arquivos, juntos ou separados."""
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        import importlib
+        self.sm = importlib.import_module("survey_meshmapper")
+        self.tmp = tempfile.mkdtemp()
+
+    def test_junta_varios_num_relatorio_so(self):
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            sid, sv, am, pr, org = rm.importar_meshmapper_varios(
+                [str(self.EXEMPLO), str(self.EXEMPLO)], con)
+            self.assertEqual(len(org), 2)
+            # 5 + 5: o exemplo tem 8 leituras, 3 delas com a posição
+            # exatamente repetida (equipamento parado) — ficam fora.
+            self.assertEqual(len(am), 10)
+            self.assertTrue(all(o["ok"] for o in org))
+        finally:
+            con.close()
+
+    def test_arquivo_ruim_nao_derruba_os_outros(self):
+        # Relatorio que engole arquivo ilegivel em silencio e pior que
+        # relatorio que falta: a falha entra na lista de origens.
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            sid, sv, am, pr, org = rm.importar_meshmapper_varios(
+                [str(self.EXEMPLO), str(Path(self.tmp) / "nao_existe.kmz")], con)
+            self.assertEqual(len(am), 5)
+            ruins = [o for o in org if not o["ok"]]
+            self.assertEqual(len(ruins), 1)
+            self.assertIn("nao encontrado", ruins[0]["erro"])
+        finally:
+            con.close()
+
+    def test_todos_ruins_falha_com_motivo(self):
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            with self.assertRaises(RuntimeError):
+                rm.importar_meshmapper_varios(
+                    [str(Path(self.tmp) / "x.kmz")], con)
+        finally:
+            con.close()
+
+    def test_amostra_guarda_de_qual_arquivo_veio(self):
+        con = rm.banco(str(Path(self.tmp) / "s.db"))
+        try:
+            _, _, am, _, _ = rm.importar_meshmapper_varios(
+                [str(self.EXEMPLO)], con)
+            self.assertTrue(all(a.get("arquivo") for a in am))
+        finally:
+            con.close()
+
+    def test_modo_separado_nao_sobrescreve(self):
+        # Duas capturas do MESMO veiculo na MESMA hora produzem nomes de
+        # saida iguais. Sem subpasta, uma sobrescrevia a outra em
+        # silencio: a contagem dizia 6 relatorios e o disco tinha 3.
+        import shutil
+        a = Path(self.tmp) / "cap_a.json"
+        b = Path(self.tmp) / "cap_b.json"
+        shutil.copy(self.EXEMPLO, a); shutil.copy(self.EXEMPLO, b)
+        saida = Path(self.tmp) / "out"
+        feitos = self.sm.gerar([str(a), str(b)], str(saida), juntar=False,
+                               fazer_ppt=False, fazer_excel=False,
+                               aviso=lambda t: None)
+        self.assertEqual(len(feitos), len({str(f) for f in feitos}),
+                         "dois arquivos gravaram no mesmo caminho")
+        self.assertTrue(all(f.exists() for f in feitos))
+
+    def test_sem_arquivo_reclama_em_vez_de_estourar(self):
+        with self.assertRaises(RuntimeError):
+            self.sm.gerar([], self.tmp, aviso=lambda t: None)
+
+    def test_sem_argumento_abre_a_janela(self):
+        # O duplo clique no .exe caia no erro de uso do argparse e a
+        # janela do console fechava na hora.
+        fonte = inspect.getsource(self.sm.main)
+        self.assertIn("if not a.arquivos:", fonte)
+        self.assertIn("interface()", fonte)
+
+    def test_gera_com_o_tkinter_bloqueado(self):
+        # A geracao tem de rodar SEM interface: e assim na linha de
+        # comando e num servidor sem tcl/tk.
+        #
+        # Em SUBPROCESSO de proposito. A primeira versao bloqueava o
+        # tkinter no sys.modules deste processo, e isso quebrava QUATRO
+        # testes de matplotlib depois — ele resolve o backend olhando o
+        # sys.modules e guardava o estado corrompido para o resto da
+        # sessao. O sintoma (ValueError em gridspec) nao lembrava nem de
+        # longe a causa.
+        import subprocess, textwrap
+        saida = Path(self.tmp) / "sem_tk"
+        codigo = textwrap.dedent(f"""
+            import sys
+            sys.modules["tkinter"] = None
+            sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+            import survey_meshmapper as sm
+            f = sm.gerar([{str(self.EXEMPLO)!r}], {str(saida)!r},
+                         fazer_ppt=False, fazer_excel=False,
+                         aviso=lambda t: None)
+            assert f, "nao gerou nada"
+            assert all(x.exists() for x in f), "arquivo prometido nao existe"
+            print("OK", len(f))
+        """)
+        r = subprocess.run([sys.executable, "-c", codigo],
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0,
+                         f"gerar falhou sem tkinter:\n{r.stdout}\n{r.stderr}")
+        self.assertIn("OK", r.stdout)
+
+    def test_interface_avisa_quando_falta_tkinter(self):
+        # Sem tcl/tk, a janela nao abre — mas o programa tem de dizer o
+        # que fazer, nao morrer com stack trace.
+        with mock.patch.dict(sys.modules, {"tkinter": None}):
+            self.assertEqual(self.sm.interface(), 1)
+
+    def test_spec_do_exe_nao_exclui_tkinter(self):
+        # Herdar o exclude do spec do rajant_monitor geraria um .exe que
+        # abre e fecha na hora, com o erro so no console que ninguem ve.
+        spec = Path(__file__).resolve().parent / "build" / "survey_meshmapper.spec"
+        if not spec.exists():
+            self.skipTest("spec ausente")
+        txt = spec.read_text(encoding="utf-8")
+        i = txt.index("excludes=[")
+        j = txt.index("]", i)
+        self.assertNotIn("tkinter", txt[i:j])
+
+
+
+
+
+
+
+
+class TestZeroDeVizinhoNaoEMedicao(unittest.TestCase):
+    """O MeshMapper usa 0 para "conheco este vizinho mas ainda nao medi".
+
+    A limpeza existia para o enlace servidor e NAO para a lista de
+    vizinhos. Medido no arquivo real do CA-1006: o ERB-11 L2 aparecia com
+    0 dBm em tres leituras, ganhava a eleicao de `cobertura_disponivel`
+    (que escolhe por `max(sinal)`) e pintava tres pontos do trajeto de
+    verde maximo, com "87 dB disponiveis e nao usados" no laudo.
+    """
+
+    def _json(self, sinal_viz, snr_viz=0):
+        return {"bcc_version": "11.29.1",
+                "configuration": {"interval": 1,
+                                  "crumbMeta": {"name": "CA-1", "serialStr": "S1"}},
+                "points": [{"unixTimeStamp": 1789148756000,
+                            "gpsLat": -18.92, "gpsLong": -43.42, "gpsAlt": 800.0,
+                            "numActivePeers": 2,
+                            "traceInfo": {"path": {"name": "ERB-01", "signal": -88,
+                                                   "rssi": 20, "cost": 5000,
+                                                   "frequency": 5785, "channel": 157}},
+                            "wlanPeers": {"wlan0": [
+                                {"name": "ERB-11 L2", "signal": sinal_viz,
+                                 "rssi": snr_viz, "cost": 4000,
+                                 "frequency": 5785, "channel": 157,
+                                 "ipaddr": "10.0.0.1", "mac": "aa:bb",
+                                 "serialNumber": "S9"}]}}]}
+
+    def test_vizinho_com_zero_vira_ausencia_e_nao_sinal_perfeito(self):
+        sv, am, pr = rm._mm_do_json(self._json(0), "t")
+        self.assertIsNone(pr[0]["sinal"])
+        self.assertIsNone(pr[0]["snr"])
+        self.assertIsNone(pr[0]["ruido"])
+
+    def test_zero_nao_ganha_a_eleicao_da_cobertura(self):
+        sv, am, pr = rm._mm_do_json(self._json(0), "t")
+        rm.cobertura_disponivel(am, pr)
+        # Sem vizinho medido, nao ha cobertura a declarar — e nunca 0 dBm.
+        self.assertIsNone(am[0].get("sinal_cob"))
+        self.assertIsNone(am[0].get("delta_cob"))
+
+    def test_vizinho_medido_de_verdade_continua_passando(self):
+        sv, am, pr = rm._mm_do_json(self._json(-66, 30), "t")
+        self.assertEqual(pr[0]["sinal"], -66)
+        rm.cobertura_disponivel(am, pr)
+        self.assertEqual(am[0]["sinal_cob"], -66)
+        self.assertAlmostEqual(am[0]["delta_cob"], 22.0, places=1)
+
+    def test_custo_int_max_do_vizinho_tambem_e_ausencia(self):
+        d = self._json(-66, 30)
+        d["points"][0]["wlanPeers"]["wlan0"][0]["cost"] = rm.CUSTO_SEM_ROTA
+        sv, am, pr = rm._mm_do_json(d, "t")
+        self.assertIsNone(pr[0]["custo"])
+
+    def test_peer_sabe_quem_o_capturou(self):
+        # Sem isso, juntar duas capturas daria a cada radio a vizinhanca
+        # da outra: os numeros de ponto se repetem entre arquivos.
+        sv, am, pr = rm._mm_do_json(self._json(-66, 30), "t")
+        self.assertEqual(pr[0]["movel"], "CA-1")
+
+
+class TestCapturaParada(unittest.TestCase):
+    """Captura feita de um ponto fixo nao e trajeto.
+
+    O MeshMapper ligado numa repetidora produz um arquivo com a MESMA
+    estrutura do de um veiculo. A diferenca e o significado: 115 leituras
+    empilhadas dentro de 0,5 m sao uma janela de TEMPO num lugar, nao um
+    percurso. Rastro de calor disso sai como uma mancha de um pixel
+    pintada com a escala de area — parece mapa e nao e.
+    """
+
+    def _am(self, n, passo_graus):
+        return [{"radio": "R", "ts": 1789148756.0 + i, "sinal": -70.0,
+                 "snr": 25.0, "banda": "5.8 GHz",
+                 "lat": -18.894 + i * passo_graus, "lon": -43.4309}
+                for i in range(n)]
+
+    def test_radio_imovel_e_reconhecido_como_parado(self):
+        # ~0,5 m de oscilacao de GPS, que foi o medido na ERM-12 real.
+        am = self._am(115, 0.000002)
+        self.assertTrue(rm.captura_parada(am))
+        self.assertLess(rm.extensao_da_captura(am)["raio_m"], rm.RAIO_PARADO_M)
+
+    def test_veiculo_andando_nao_e_parado(self):
+        am = self._am(55, 0.00005)          # ~300 m de trajeto
+        self.assertFalse(rm.captura_parada(am))
+
+    def test_raio_e_a_maior_distancia_e_nao_o_desvio(self):
+        # Ida e volta tem desvio pequeno e mesmo assim cobriu distancia.
+        am = self._am(20, 0.0001) + self._am(20, 0.0001)[::-1]
+        self.assertGreater(rm.extensao_da_captura(am)["raio_m"], 50)
+
+    def test_sem_posicao_nao_inventa_extensao(self):
+        self.assertIsNone(rm.extensao_da_captura(
+            [{"radio": "R", "lat": None, "lon": None}]))
+        self.assertFalse(rm.captura_parada([]))
+
+    def test_nada_em_deslocamento_nao_gera_rastro_de_calor(self):
+        # A regressao concreta: `moveis or amostras_aba` fazia a captura
+        # parada cair de volta no conjunto inteiro e pintar tudo. Vale
+        # para a fita e para o calor, pedido ou não.
+        import zipfile, io as _io
+        am = [{"radio": "ERM-12", "ts": 100.0 + k, "lat": -18.92 + k * 1e-7,
+               "lon": -43.42, "sinal": -70.0, "banda": "5.8 GHz"}
+              for k in range(40)]
+        self.assertEqual(rm._amostras_do_rastro(am), [])
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        cfg.set("relatorio", "kmz_com_calor", "true")
+        dados, _ = rm.gerar_kml_survey({"nome": "p", "inicio": 100.0}, am,
+                                       cfg=cfg, campo="sinal")
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertNotIn("<name>Trajeto", doc,
+                         "captura parada voltou a virar rabisco no mapa")
+        self.assertNotIn("<GroundOverlay>", doc,
+                         "captura parada voltou a virar mancha de um pixel")
+
+
+class TestCensoDeVizinhos(unittest.TestCase):
+    """O produto de uma captura parada: quem fala com aquele radio."""
+
+    def _peers(self):
+        # CA-9 e forte porem passageiro; ERB-1 e fraco porem permanente.
+        p = []
+        for ponto in range(1, 11):
+            p.append({"movel": "ERM-12", "ponto": ponto, "ts": 100.0 + ponto,
+                      "nome": "ERB-1", "sinal": -93.0, "snr": 16.0,
+                      "custo": 5000.0, "banda": "5.8 GHz", "canal": 157,
+                      "wlan": "wlan0", "ip": "10.0.0.1", "mac": "a", "serie": "S1"})
+            if ponto <= 3:
+                p.append({"movel": "ERM-12", "ponto": ponto, "ts": 100.0 + ponto,
+                          "nome": "CA-9", "sinal": -58.0, "snr": 38.0,
+                          "custo": 6000.0, "banda": "2.4 GHz", "canal": 6,
+                          "wlan": "wlan2", "ip": "10.0.0.2", "mac": "b", "serie": "S2"})
+        return p
+
+    def test_uma_linha_por_vizinho_e_nao_por_leitura(self):
+        c = rm.censo_vizinhos(self._peers(), 10)
+        self.assertEqual(len(c), 2)
+        self.assertEqual({x["nome"] for x in c}, {"ERB-1", "CA-9"})
+
+    def test_presenca_separa_o_permanente_do_passageiro(self):
+        c = {x["nome"]: x for x in rm.censo_vizinhos(self._peers(), 10)}
+        # A mediana sozinha diria que o CA-9 e o melhor vizinho. A
+        # presenca mostra que ele esteve em 30% dos pontos e foi embora.
+        self.assertEqual(c["CA-9"]["presenca"], 30.0)
+        self.assertEqual(c["ERB-1"]["presenca"], 100.0)
+
+    def test_ordena_do_sinal_mais_forte_para_o_mais_fraco(self):
+        c = rm.censo_vizinhos(self._peers(), 10)
+        self.assertEqual(c[0]["nome"], "CA-9")
+
+    def test_infra_e_marcada_pelo_padrao(self):
+        c = {x["nome"]: x for x in rm.censo_vizinhos(self._peers(), 10)}
+        self.assertTrue(c["ERB-1"]["infra"])
+        self.assertFalse(c["CA-9"]["infra"])
+
+    def test_vizinho_sem_leitura_valida_nao_recebe_percentual(self):
+        # 0% se leria como "medi e reprovou", que e o oposto de "nao medi".
+        c = rm.censo_vizinhos([{"movel": "E", "ponto": 1, "nome": "X",
+                                "sinal": None, "snr": None, "custo": None}], 1)
+        self.assertIsNone(c[0]["sinal"])
+        self.assertIsNone(c[0]["pct_ok"])
+
+    def test_sem_leitura_vai_para_o_fim_da_lista(self):
+        pr = self._peers() + [{"movel": "ERM-12", "ponto": 1, "nome": "Z",
+                               "sinal": None, "snr": None, "custo": None}]
+        self.assertEqual(rm.censo_vizinhos(pr, 10)[-1]["nome"], "Z")
+
+    def test_resumo_conta_infra_moveis_e_quem_passa_do_requisito(self):
+        r = rm.resumo_do_censo(rm.censo_vizinhos(self._peers(), 10))
+        self.assertEqual(r["vizinhos"], 2)
+        self.assertEqual(r["infra"], 1)
+        self.assertEqual(r["moveis"], 1)
+        self.assertEqual(r["acima_req"], 1)      # so o CA-9, a -58 dBm
+        self.assertEqual(r["constantes"], 1)     # so o ERB-1, em 100%
+
+    def test_sitio_so_leva_os_peers_da_propria_captura(self):
+        # Juntar duas capturas dava a cada radio a vizinhanca da outra.
+        am = [{"radio": "ERM-12", "ts": 1.0 + i, "lat": -18.894, "lon": -43.43}
+              for i in range(10)]
+        pr = self._peers() + [{"movel": "OUTRO", "ponto": 1, "nome": "INTRUSO",
+                               "sinal": -50.0, "snr": 40.0, "custo": 1.0}]
+        s = rm.sitios_parados(am, pr)
+        self.assertEqual(len(s), 1)
+        self.assertNotIn("INTRUSO", {c["nome"] for c in s[0]["censo"]})
+
+
+class TestKmlDePontosFixos(unittest.TestCase):
+    """O mapa so desenha o que tem posicao medida.
+
+    Um BreadCrumb NAO reporta onde estao os vizinhos dele — conferido nos
+    arquivos reais do CA-1006 e da ERM-12: os campos de um peer sao
+    channel, cost, encap, filtered, frequency, ipaddr, mac, name, rssi,
+    serialNumber e signal. Desenhar o vizinho num lugar qualquer seria
+    inventar geometria que ninguem mediu.
+    """
+
+    def _sitio(self, nome, lat, lon, viz):
+        censo = [{"nome": n, "infra": True, "sinal": s, "snr": 20.0,
+                  "presenca": 100.0, "bandas": ["5.8 GHz"], "canais": [157],
+                  "interfaces": ["wlan0"], "ip": None, "mac": None,
+                  "serie": None, "leituras": 1, "pontos": 1, "n_sinal": 1,
+                  "sinal_p10": s, "sinal_p90": s, "sinal_min": s,
+                  "sinal_max": s, "custo": 1.0, "pct_ok": 100.0,
+                  "inicio": 1.0, "fim": 2.0} for n, s in viz]
+        return {"nome": nome, "lat": lat, "lon": lon, "raio_m": 0.5,
+                "pontos": 100, "censo": censo,
+                "resumo": rm.resumo_do_censo(censo),
+                "inicio": 1789148756.0, "fim": 1789148870.0}
+
+    def _kml(self, sitios):
+        import zipfile, io
+        dados, nome = rm.gerar_kml_pontos_fixos(sitios)
+        return zipfile.ZipFile(io.BytesIO(dados)).read("doc.kml").decode()
+
+    def test_o_kml_e_xml_valido(self):
+        # `&harr;` derrubava o documento inteiro: KML e XML, e XML so
+        # conhece as cinco entidades predefinidas. Fora de CDATA nao vale.
+        from xml.dom.minidom import parseString
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)]),
+                         self._sitio("B", -18.90, -43.44, [("A", -84.0)])])
+        parseString(kml)
+
+    def test_vizinho_sem_captura_propria_nao_vira_ponto(self):
+        kml = self._kml([self._sitio("A", -18.89, -43.43,
+                                     [("SEM-POSICAO", -60.0)])])
+        self.assertNotIn("<name>SEM-POSICAO</name>", kml)
+        self.assertIn("nao no mapa", kml)      # declarado, nao escondido
+
+    def test_enlace_entre_dois_capturados_e_desenhado(self):
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)]),
+                         self._sitio("B", -18.90, -43.44, [("A", -70.0)])])
+        self.assertIn("<LineString>", kml)
+        self.assertIn("A ↔ B", kml)
+
+    def test_enlace_assimetrico_fica_com_a_PIOR_das_duas_pontas(self):
+        # E a ponta ruim que limita o enlace e decide se falta radio.
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)]),
+                         self._sitio("B", -18.90, -43.44, [("A", -84.0)])])
+        self.assertIn("RSSI -84 dBm", kml)
+        self.assertNotIn("RSSI -70 dBm", kml)
+
+    def test_um_sitio_so_nao_inventa_enlace(self):
+        kml = self._kml([self._sitio("A", -18.89, -43.43, [("B", -70.0)])])
+        self.assertNotIn("<LineString>", kml)
+
+    def test_sem_posicao_nenhuma_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            rm.gerar_kml_pontos_fixos([])
+
+
+class TestSaidasDaCapturaParada(unittest.TestCase):
+    """Ponta a ponta: o que sai quando o arquivo e de uma repetidora."""
+
+    def _kmz(self, destino, parado=True):
+        """Escreve um .kmz do MeshMapper de mentira e devolve o caminho."""
+        import json as _json, zipfile
+        passo = 0.000002 if parado else 0.00005
+        pontos = []
+        for i in range(12):
+            pontos.append({
+                "unixTimeStamp": 1789148756000 + i * 1000,
+                "gpsLat": -18.894 + i * passo, "gpsLong": -43.4309,
+                "gpsAlt": 890.0, "numActivePeers": 2,
+                "traceInfo": {"path": {"name": "ERB-01", "signal": -80,
+                                       "rssi": 22, "cost": 5000,
+                                       "frequency": 5785, "channel": 157}},
+                "wlanPeers": {"wlan0": [
+                    {"name": "ERB-07", "signal": -70, "rssi": 30,
+                     "cost": 4000, "frequency": 5785, "channel": 157,
+                     "ipaddr": "10.0.0.7", "mac": "a", "serialNumber": "S7"},
+                    {"name": "CA-1010", "signal": -67, "rssi": 29,
+                     "cost": 8000, "frequency": 2437, "channel": 6,
+                     "ipaddr": "10.0.0.8", "mac": "b", "serialNumber": "S8"}]}})
+        d = {"bcc_version": "11.29.1",
+             "configuration": {"interval": 1,
+                               "crumbMeta": {"name": "ERM-12", "serialStr": "S0"}},
+             "points": pontos}
+        alvo = destino / ("parado.kmz" if parado else "andando.kmz")
+        with zipfile.ZipFile(alvo, "w") as z:
+            z.writestr("data.json", _json.dumps(d))
+        return str(alvo)
+
+    def test_repetidora_nunca_gera_rastro_de_calor(self):
+        # A regra que nao depende de chave nenhuma: 115 leituras
+        # empilhadas em meio metro NAO viram mapa de area.
+        import tempfile, shutil, sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            arq = self._kmz(tmp, parado=True)
+            feitos = sm.gerar([arq], str(tmp / "out"), aviso=lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertFalse(any(n.startswith("Survey_2") and n.endswith(".kmz")
+                                 for n in nomes),
+                             f"captura parada gerou rastro de calor: {nomes}")
+            # Sem a chave, tambem nao sai o KMZ de vizinhanca: o laudo do
+            # dia a dia e o de trajeto.
+            self.assertFalse(any(n.startswith("Vizinhanca_") for n in nomes),
+                             f"vizinhanca saiu sem a chave: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_vizinhanca_sai_quando_a_chave_esta_ligada(self):
+        import tempfile, shutil, sys as _sys, configparser
+        from unittest import mock
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            arq = self._kmz(tmp, parado=True)
+            cfg = rm.cfg_relatorio(configparser.ConfigParser())
+            cfg.set("relatorio", "vizinhanca", "true")
+            with mock.patch.object(rm, "carregar_config", lambda *a, **k: cfg):
+                feitos = sm.gerar([arq], str(tmp / "out"),
+                                  aviso=lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertTrue(any(n.startswith("Vizinhanca_") for n in nomes),
+                            f"sem KMZ de vizinhanca: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_veiculo_continua_gerando_o_rastro(self):
+        import tempfile, shutil, sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            arq = self._kmz(tmp, parado=False)
+            feitos = sm.gerar([arq], str(tmp / "out"), aviso=lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertTrue(any(n.endswith(".kmz") and "Vizinhanca" not in n
+                                for n in nomes), f"sem rastro: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_planilha_declara_que_a_captura_foi_parada(self):
+        import tempfile, shutil, io as _io
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            import configparser
+            sv, am, pr = rm.ler_meshmapper(self._kmz(tmp, parado=True))
+            sv["cobertura"] = rm.cobertura_disponivel(am, pr)
+            # O tipo de captura fica no Resumo SEMPRE: e o que impede ler
+            # um laudo de ponto fixo como se fosse de area.
+            dados, _ = rm.excel_do_meshmapper(sv, am, pr)
+            wb = load_workbook(_io.BytesIO(dados))
+            texto = " ".join(str(c.value) for c in
+                             wb["Resumo"]["B"][:20] if c.value)
+            self.assertIn("PARADA", texto)
+            self.assertNotIn("Censo de Vizinhos", wb.sheetnames)
+            cfg = rm.cfg_relatorio(configparser.ConfigParser())
+            cfg.set("relatorio", "vizinhanca", "true")
+            dados, _ = rm.excel_do_meshmapper(sv, am, pr, cfg)
+            self.assertIn("Censo de Vizinhos",
+                          load_workbook(_io.BytesIO(dados)).sheetnames)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestCamposDescartados(BaseParser):
+    """Campos que o rádio mandava e o parser jogava fora.
+
+    Os três primeiros são o que permite medir sinal na posição certa em
+    vez de na posição de antes. Conferidos contra `bcapi-ref/proto/`.
+    """
+
+    def test_gpstime_e_lido(self):
+        # Gps.proto: GPSPositionReport.gpsTime = 1 (float).
+        self.assertEqual(self.s["gps_time"], 143025.0)
+
+    def test_gpstime_vira_segundos_do_dia(self):
+        # 14:30:25 = 14*3600 + 30*60 + 25
+        self.assertEqual(self.s["gps_time_s"], 52225.0)
+
+    def test_gpsquality_e_lido(self):
+        # NMEA GGA: 0 inválido, 1 GPS, 2 DGPS, 4/5 RTK.
+        self.assertEqual(self.s["gps_qual"], 1.0)
+
+    def test_sem_gpstime_fica_none_nao_zero(self):
+        st = STATE.replace("    gpsTime: 143025.0\n", "")
+        d = rm.parse_state(st)["sistema"]
+        self.assertIsNone(d["gps_time"])
+        self.assertIsNone(d["gps_time_s"])
+
+
+class TestGpsTimeParaSegundos(unittest.TestCase):
+    """`Gps.proto` declara `optional float gpsTime = 1;` e NÃO diz a
+    unidade. Por isso a conversão discrimina em vez de supor — e devolve
+    None no que não encaixa, em vez de inventar uma hora."""
+
+    def test_hora_nmea_hhmmss(self):
+        self.assertEqual(rm.gps_time_para_segundos(174551.25), 63951.25)
+        self.assertEqual(rm.gps_time_para_segundos(235959.99), 86399.99)
+
+    def test_epoca_unix_e_reconhecida(self):
+        # Improvável num float de 32 bits, mas reconhecida em vez de
+        # virar hora absurda.
+        self.assertEqual(rm.gps_time_para_segundos(1789148756.0), 63956.0)
+
+    def test_valor_sem_unidade_conhecida_nao_vira_hora(self):
+        for v in (999999.0, 126000.0, 246000.0):
+            self.assertIsNone(rm.gps_time_para_segundos(v), f"aceitou {v}")
+
+    def test_ausencia_e_zero_nao_viram_medida(self):
+        for v in (None, 0, 0.0, "", "abc"):
+            self.assertIsNone(rm.gps_time_para_segundos(v), f"aceitou {v!r}")
+
+    def test_comparar_o_bruto_dispensa_a_conversao(self):
+        # O uso principal — "a posição mudou?" — compara o valor bruto e
+        # funciona em qualquer formato. Se esta invariante cair, a captura
+        # passa a depender de adivinhar a unidade.
+        a = rm.parse_state(STATE)["sistema"]["gps_time"]
+        b = rm.parse_state(STATE.replace("gpsTime: 143025.0",
+                                         "gpsTime: 143026.0"))["sistema"]["gps_time"]
+        self.assertNotEqual(a, b)
+
+
+class TestIdentidadeDoVizinho(unittest.TestCase):
+    """State.Peer NÃO tem name nem serialNumber — conferido no
+    `State.proto`: mac, enabled, cost, rate, rssi, signal, age, stats,
+    encapId, ipv4Address. Quem fecha o nome é o `encapId`, que é a parte
+    numérica do número de série.
+
+    Verificado nos 40 vizinhos da captura real da ERM-12: 40 de 40.
+    """
+
+    ST = """
+manufacturer {
+  model: "ES1-2450CS"
+  serial: 113345
+}
+wireless {
+  name: "wlan0"
+  channel: 157
+  noise: -109
+  peer {
+    mac: "aa"
+    enabled: true
+    cost: 8523
+    rate: 650
+    rssi: 21
+    signal: -88
+    age: 3
+    encapId: 97128
+    ipv4Address: "10.188.97.170"
+  }
+}
+"""
+
+    def test_encapid_do_vizinho_e_lido(self):
+        d = rm.parse_state(self.ST)
+        self.assertEqual(d["radios"][0]["peers"][0]["encap"], 97128)
+
+    def test_serial_numerico_do_proprio_radio_e_lido(self):
+        d = rm.parse_state(self.ST)["sistema"]
+        self.assertEqual(d["serial_num"], 113345)
+        self.assertEqual(d["modelo_fab"], "ES1-2450CS")
+
+    def test_sem_encapid_fica_none_nao_zero(self):
+        st = self.ST.replace("    encapId: 97128\n", "")
+        self.assertIsNone(rm.parse_state(st)["radios"][0]["peers"][0]["encap"])
+
+    def test_coleta_filtrada_nao_traz_manufacturer(self):
+        # `manufacturer` é o campo 190 do State, fora de gps/wireless/
+        # system. Numa coleta filtrada ele não vem — e o certo é None,
+        # não 0: serial 0 seria um rádio existente e errado.
+        st = self.ST[self.ST.index("wireless {"):]
+        d = rm.parse_state(st)["sistema"]
+        self.assertIsNone(d["serial_num"])
+        self.assertIsNone(d["modelo_fab"])
+
+    def test_encapid_bate_com_o_serial_no_arquivo_real(self):
+        # A prova que sustenta a chave. Se um firmware mudar isso, este
+        # teste cai antes de o relatório sair com nome trocado.
+        exemplo = (Path(__file__).resolve().parent / "exemplos"
+                   / "meshmapper_repetidora.json")
+        if not exemplo.exists():
+            self.skipTest("exemplos/meshmapper_repetidora.json ausente")
+        d = json.loads(exemplo.read_text(encoding="utf-8"))
+        vistos = {}
+        for p in d["points"]:
+            for lst in p["wlanPeers"].values():
+                for q in lst:
+                    vistos[q["serialNumber"]] = q["encap"]
+        self.assertGreater(len(vistos), 10)
+        for ser, enc in vistos.items():
+            self.assertTrue(ser.endswith(str(enc)),
+                            f"encap {enc} nao e sufixo de {ser}")
+
+
+class TestSlideDeMetodologia(unittest.TestCase):
+    """Como o número saiu, antes de discuti-lo.
+
+    Duas coisas não se adivinham olhando o mapa: de ONDE vem a cor (a
+    melhor ERB/ERM do ponto, não o enlace que atendeu) e QUAL é a régua.
+    Sem isso o leitor confere a cor contra a própria intuição.
+    """
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        import tempfile, sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        self.tmp = Path(tempfile.mkdtemp())
+        feitos = sm.gerar([str(self.EXEMPLO)], str(self.tmp),
+                          aviso=lambda t: None)
+        from pptx import Presentation
+        self.p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _slide(self, titulo):
+        for s in self.p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame and sh.text_frame.text.strip().startswith(titulo):
+                    return s
+        return None
+
+    def test_existe_e_vem_logo_apos_o_sumario(self):
+        titulos = []
+        for s in self.p.slides:
+            t = [sh.text_frame.text.strip().split("\n")[0]
+                 for sh in s.shapes
+                 if sh.has_text_frame and sh.text_frame.text.strip()]
+            titulos.append(t[0] if t else "")
+        self.assertIn("Metodologia", titulos)
+        self.assertEqual(titulos.index("Metodologia"),
+                         titulos.index("Sumário") + 1)
+
+    def test_declara_de_onde_vem_a_cor(self):
+        s = self._slide("Metodologia")
+        texto = " ".join(c.text for sh in s.shapes if sh.has_table
+                         for r in sh.table.rows for c in r.cells)
+        # A ficha diz QUAL enlace define o número, sem depender de uma
+        # frase específica: o que não pode faltar é o critério.
+        self.assertIn("ERB/ERM", texto)
+        self.assertIn("maior intensidade", texto)
+
+    def test_declara_o_que_nao_foi_medido(self):
+        # Latência e perda ausentes precisam ser ditas, senão o leitor
+        # supõe que foram medidas e deram bem.
+        s = self._slide("Metodologia")
+        texto = " ".join(c.text for sh in s.shapes if sh.has_table
+                         for r in sh.table.rows for c in r.cells)
+        self.assertIn("latência", texto.lower())
+        self.assertIn("perda", texto.lower())
+
+    def test_a_regua_mostra_as_cores_de_verdade(self):
+        # As amostras de cor do slide têm de ser as MESMAS do raster e da
+        # legenda do KMZ. Uma régua desenhada à mão divergiria na
+        # primeira vez que as faixas mudassem.
+        s = self._slide("Metodologia")
+        cores = []
+        for sh in s.shapes:
+            try:
+                if (sh.fill.type is not None
+                        and sh.fill.fore_color.rgb is not None
+                        and sh.width < 400000 and sh.height < 250000):
+                    cores.append(str(sh.fill.fore_color.rgb).upper())
+            except Exception:
+                pass
+        # Melhor em cima, como na legenda do mapa.
+        self.assertEqual(cores,
+                         [c.upper() for _, c in
+                          reversed(rm.FAIXAS_KML["sinal"])])
+
+    def test_ping_pong_saiu_dos_cartoes(self):
+        for s in self.p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame:
+                    self.assertNotIn("Ping-pong", sh.text_frame.text)
+
+    def test_moldura_manda_ligar_pastas_que_existem_no_kmz(self):
+        # A moldura dizia "camada: Rotas" (pasta extinta) e cortava o título
+        # do slide para nomear a aba ("Noise Floor" no slide, "Ruído" no
+        # Google Earth). Cada moldura tem de apontar a aba e a camada com o
+        # nome exato do painel de camadas.
+        import zipfile, re as _re
+        from xml.etree import ElementTree as ET
+        NS = "{http://www.opengis.net/kml/2.2}"
+        pastas = {}
+        for k in self.tmp.glob("*.kmz"):
+            banda = "5.8 GHz" if "58GHz" in k.name else "2.4 GHz"
+            raiz = ET.fromstring(zipfile.ZipFile(k).read("doc.kml"))
+            for gr in raiz.find(NS + "Document").findall(NS + "Folder"):
+                for f in gr.findall(NS + "Folder"):
+                    sub = ([g.find(NS + "name").text for g in f.findall(NS + "Folder")]
+                           + [g.find(NS + "name").text
+                              for g in f.findall(NS + "GroundOverlay")])
+                    pastas[(banda, f.find(NS + "name").text)] = sub
+        molduras = 0
+        for s in self.p.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame and "COLAR AQUI" in sh.text_frame.text:
+                    m = _re.search(r"aba: (.+?)\s+·\s+camada: (.+?)\s+·\s+(\S+ GHz)",
+                                   sh.text_frame.text)
+                    self.assertIsNotNone(m, sh.text_frame.text)
+                    aba, camada, banda = m.groups()
+                    self.assertIn((banda, aba), pastas,
+                                  f"aba '{aba}' não existe no KMZ de {banda}")
+                    self.assertTrue(any(n.startswith(camada)
+                                        for n in pastas[(banda, aba)]),
+                                    f"camada '{camada}' não existe em '{aba}'")
+                    molduras += 1
+        self.assertGreaterEqual(molduras, 4)
+
+    def test_metodologia_cita_a_fonte_da_regua(self):
+        s = self._slide("Metodologia")
+        texto = " ".join(sh.text_frame.text for sh in s.shapes
+                         if sh.has_text_frame)
+        self.assertIn("MetaGeek", texto)
+        self.assertIn("Rajant MeshMapper", texto)
+
+    def test_barra_do_slide_e_a_regua_do_mapa(self):
+        # A barra ao lado do print era um gradiente de 28 tons e escrevia
+        # "requisito ≥ -75" com o requisito sendo > -75.
+        s = self._slide("Intensidade de Sinal (RSSI)")
+        self.assertIsNotNone(s)
+        textos = [sh.text_frame.text for sh in s.shapes if sh.has_text_frame]
+        self.assertIn("requisito > -75 dBm", textos)
+        self.assertFalse([t for t in textos if "≥ -75" in t])
+        cores = []
+        for sh in s.shapes:
+            try:
+                if (sh.fill.type is not None and sh.height < 300000
+                        and sh.fill.fore_color.rgb is not None):
+                    cores.append(str(sh.fill.fore_color.rgb).upper())
+            except Exception:
+                pass
+        rotulos = rm._faixas_rotuladas("sinal_cob")
+        self.assertEqual([c for c in cores if c in {x[1] for x in rotulos}],
+                         [c for _, c, _ in rotulos])
+        for rng, _c, _k in rotulos:
+            self.assertIn(rng, textos)
+
+
+class TestCustoDoCaminho(unittest.TestCase):
+    """Trace Path Cost: o custo do caminho até o destino do trace, a métrica
+    pela qual o próprio MeshMapper pinta o trajeto."""
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def setUp(self):
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        self.sv, self.am, self.pr = rm.ler_meshmapper(str(self.EXEMPLO))
+
+    def _json(self, pontos, cfg=None):
+        import tempfile, json as _j, os
+        base = _j.load(open(self.EXEMPLO))
+        base["points"] = pontos
+        if cfg: base["configuration"].update(cfg)
+        cam = os.path.join(tempfile.mkdtemp(), "data.json")
+        _j.dump(base, open(cam, "w"))
+        return cam
+
+    def test_caminho_e_enlace_sao_campos_distintos(self):
+        # No arquivo, `cost` é o caminho inteiro e `hopcost` o primeiro
+        # salto. `custo` tem de ser o do ENLACE, como na coleta ao vivo —
+        # antes a mesma coluna "Custo" mudava de sentido com a origem.
+        self.assertEqual(self.am[0]["custo_caminho"], 17952)
+        self.assertEqual(self.am[0]["custo"], 17951)
+        self.assertEqual(self.am[-1]["custo_caminho"], 20308)
+
+    def test_sem_rota_e_medicao_e_nao_zero(self):
+        import json as _j
+        pts = _j.load(open(self.EXEMPLO))["points"][:3]
+        pts[1]["traceInfo"]["path"] = {"type": "N/A", "cost": 2147483647}
+        pts[2]["traceInfo"]["path"]["cost"] = 0
+        _, am, _ = rm.ler_meshmapper(self._json(pts))
+        self.assertEqual(am[1]["custo_caminho"], 2147483647)
+        self.assertTrue(rm.sem_rota(am[1]["custo_caminho"], "custo_caminho"))
+        # Sem rota é a PIOR medição, no vermelho, como no MeshMapper.
+        self.assertEqual(rm.cor_da_leitura(am[1]["custo_caminho"],
+                                           "custo_caminho"), "FF0000")
+        self.assertEqual(rm.fmt_leitura(am[1]["custo_caminho"],
+                                        "custo_caminho"), "sem rota")
+        # 0 não é custo de rota nenhuma — vira None, nunca "medido 0".
+        self.assertIsNone(am[2]["custo_caminho"])
+
+    def test_regua_e_a_do_proprio_meshmapper(self):
+        lim = self.sv["limiares_mm"]
+        self.assertEqual([l for l, _ in rm.FAIXAS_KML["custo_caminho"][:2]],
+                         [lim["greatPath"], lim["goodPath"]])
+        self.assertEqual([c for _, c in rm.FAIXAS_KML["custo_caminho"]],
+                         ["3EAD30", "F26A00", "FF0000"])
+
+    def test_fronteiras(self):
+        for v, cor in ((1, "3EAD30"), (10000, "3EAD30"), (10001, "F26A00"),
+                       (20000, "F26A00"), (20001, "FF0000"),
+                       (43816, "FF0000")):
+            self.assertEqual(rm.cor_da_leitura(v, "custo_caminho"), cor, v)
+        self.assertEqual(rm.limite_de("custo_caminho")[:2], ("<=", 20000.0))
+        self.assertTrue(rm.atende(20000, "<=", 20000.0))
+
+    def test_nenhuma_faixa_mistura_dentro_e_fora(self):
+        op, lim = rm.limite_de("custo_caminho")[:2]
+        baixo = rm.limites_na_faixa_de_baixo("custo_caminho")
+        por = {}
+        for v in list(range(1, 40001)) + [2147483647]:
+            k = rm._faixa_idx(v, rm.FAIXAS_KML["custo_caminho"], baixo)
+            por.setdefault(k, set()).add(rm.atende(v, op, lim))
+        self.assertTrue(all(len(r) == 1 for r in por.values()), por)
+
+    def test_mediana_e_pior_5_nao_se_deixam_levar_pelo_sem_rota(self):
+        # Com um ponto sem rota, a MÉDIA do custo vira dez dígitos. O laudo
+        # escreve "Mediana", e o pior 5% de um custo é o de CIMA.
+        am = [{"radio": "x", "custo_caminho": v}
+              for v in [12000] * 10 + [18000] * 8 + [2147483647]]
+        r = rm.survey_resumo(am)["custo_caminho"]
+        self.assertEqual(r["mediana"], 12000)
+        self.assertGreater(r["med"], 1e8)              # a média, intacta
+        self.assertEqual(r["pior5"], 2147483647)
+        self.assertEqual(rm.fmt_leitura(r["pior5"], "custo_caminho"),
+                         "sem rota")
+
+    def test_pior_5_segue_o_sentido_da_grandeza(self):
+        am = [{"radio": "x", "sinal": float(v), "rtt": float(v + 200)}
+              for v in range(-100, -40)]
+        r = rm.survey_resumo(am)
+        self.assertEqual(r["sinal"]["pior5"], -97.0)    # os menores
+        self.assertEqual(r["rtt"]["pior5"], 157.0)      # os maiores
+
+    def test_coleta_ao_vivo_nao_inventa_caminho(self):
+        # Sem trace (sessão sem acesso direto, rádio que recusa, ou
+        # desligado na tela), o campo existe e é None, e a grandeza não
+        # entra no laudo — nunca como zero.
+        import coleta_rajant as col
+        c = col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
+        s = {"sistema": {"gps_lat": -18.9, "gps_lon": -43.4, "gps_time": 1.0},
+             "radios": [], "_trace": None}
+        am, _ = c._amostra("10.0.0.1", s, 0.0)
+        self.assertIsNone(am["custo_caminho"])
+        self.assertNotIn("custo_caminho", rm.campos_com_medicao(
+            [{"custo_caminho": None, "sinal": -70}]))
+
+    def test_destino_do_trace_vai_para_o_laudo(self):
+        import json as _j
+        pts = _j.load(open(self.EXEMPLO))["points"]
+        for p in pts:
+            p["traceInfo"]["host"] = "10.188.96.11"
+        sv, _, _ = rm.ler_meshmapper(self._json(pts))
+        self.assertEqual(sv["destino_trace"], "10.188.96.11")
+
+    def test_kmz_tem_aba_legenda_e_pasta_de_referencia(self):
+        import zipfile, io as _io
+        rm.cobertura_disponivel(self.am, self.pr)
+        dados, _ = rm.gerar_kml_survey(self.sv, self.am, campos=["custo_caminho"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        self.assertIn("<name>Custo do caminho</name>", doc)
+        self.assertIn("files/legenda_custo_caminho.png", z.namelist())
+        # Não é requisito do contrato: a pasta diz de quem é a régua.
+        self.assertIn("Fora da referência — ≤ 20000 (2)", doc)
+        self.assertNotIn("Fora do requisito", doc)
+
+    def _por_grandeza(self):
+        import io as _io
+        from openpyxl import load_workbook
+        rm.cobertura_disponivel(self.am, self.pr)
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        dados, _ = rm.excel_do_meshmapper(self.sv, self.am, self.pr, cfg)
+        ws = load_workbook(_io.BytesIO(dados))["Por Grandeza"]
+        return {r[0]: r for r in ws.iter_rows(min_row=5, values_only=True)
+                if r and r[0]}
+
+    def test_excel_mediana_nao_sai_mais_vazia(self):
+        # A coluna lia `r.get("mediana")`, chave que o resumo não tinha.
+        linhas = self._por_grandeza()
+        self.assertEqual(linhas["Custo do caminho"][3], 18088)
+        self.assertIsNotNone(linhas["SNR"][3])
+
+    def test_excel_nao_diz_nao_medido_para_o_que_foi_medido(self):
+        # O ruído estava no mapa e a aba dizia "não medido, 0 amostras".
+        linhas = self._por_grandeza()
+        self.assertEqual(linhas["Ruído"][2], 8)
+        self.assertNotEqual(linhas["Ruído"][3], "não medido")
+        self.assertEqual(linhas["Latência"][3], "não medido")
+
+    def test_balao_mostra_o_rssi_que_pinta_o_ponto(self):
+        b = rm._balao_amostra({"radio": "CA-1", "sinal": -89.0,
+                               "sinal_cob": -72.0, "servidor_cob": "ERM-09",
+                               "custo_caminho": 2147483647})
+        self.assertLess(b.index("melhor ERB/ERM: ERM-09"),
+                        b.index("RSSI do enlace"))
+        self.assertIn("sem rota", b)
+
+
+class TestDescartarParados(unittest.TestCase):
+    """Uma leitura por parada (campo, 28/09/2026: "as leituras de
+    equipamentos parados contaminam as análises")."""
+
+    K = 1 / 111000.0
+
+    def _l(self, radio, t, x_m, y_m=0.0, vel=None, **kw):
+        return dict({"radio": radio, "ts": 1000.0 + t, "lat": y_m * self.K,
+                     "lon": x_m * self.K, "vel": vel, "sinal": -60}, **kw)
+
+    def test_carregadeira_parada_com_gps_oscilando_fica_com_uma(self):
+        am = [self._l("PC-01", 10 * k, (k % 3) * 2.5, (k % 2) * 3, vel=0.4)
+              for k in range(20)]
+        fica, _, n = rm.descartar_parados(am)
+        self.assertEqual((len(fica), n), (1, 19))
+        self.assertIs(fica[0], am[0])        # a primeira, leitura real
+
+    def test_caminhao_devagar_nao_perde_leitura(self):
+        # 18 km/h, uma leitura por segundo: 5 m entre elas, e andando.
+        am = [self._l("CA-1", k, 5.0 * k, vel=18.0) for k in range(20)]
+        self.assertEqual(len(rm.descartar_parados(am)[0]), 20)
+
+    def test_sem_velocidade_ela_sai_do_deslocamento(self):
+        # MeshMapper não traz velocidade: 5 m/s pelo próprio deslocamento.
+        andando = [self._l("CA-1", k, 5.0 * k) for k in range(20)]
+        self.assertEqual(len(rm.descartar_parados(andando)[0]), 20)
+        parado = [self._l("CA-1", k, 0.3 * (k % 2)) for k in range(20)]
+        self.assertEqual(len(rm.descartar_parados(parado)[0]), 1)
+
+    def test_voltar_ao_mesmo_lugar_depois_conta_de_novo(self):
+        am = ([self._l("CA-1", 0, 0, vel=0)]
+              + [self._l("CA-1", k, 15.0 * k, vel=40) for k in range(1, 8)]
+              + [self._l("CA-1", 100, 0.5, vel=0)])
+        fica, _, _ = rm.descartar_parados(am)
+        self.assertEqual(len(fica), 9)
+
+    def test_radios_diferentes_no_mesmo_lugar_nao_se_descartam(self):
+        am = [self._l("CA-1", 0, 0, vel=0), self._l("CA-2", 1, 0, vel=0)]
+        self.assertEqual(len(rm.descartar_parados(am)[0]), 2)
+
+    def test_vizinhos_da_descartada_saem_e_os_outros_mudam_de_ponto(self):
+        am = [self._l("CA-1", 0, 0, vel=0), self._l("CA-1", 10, 1, vel=0),
+              self._l("CA-1", 20, 50, vel=30)]
+        pr = [{"ponto": 1, "nome": "ERB-01"}, {"ponto": 2, "nome": "ERB-01"},
+              {"ponto": 3, "nome": "ERM-02"}]
+        fica, viz, n = rm.descartar_parados(am, pr)
+        self.assertEqual(n, 1)
+        self.assertEqual([(v["ponto"], v["nome"]) for v in viz],
+                         [(1, "ERB-01"), (2, "ERM-02")])
+        self.assertEqual(pr[2]["ponto"], 3)  # a lista de entrada não muda
+
+    def test_balao_diz_a_unidade_certa_da_velocidade(self):
+        # gpsSpeedKph: o balão dizia "m/s" num valor em km/h.
+        fonte = inspect.getsource(rm._balao_amostra)
+        self.assertIn('("vel", "Velocidade", "km/h", 1)', fonte)
+
+
+class TestEnlacesRajant(unittest.TestCase):
+    """O pino do MeshMapper: enlaces bons (custo E SNR na régua da Rajant)
+    por ponto. Conferido contra o KMZ oficial de 28/09/2026: 25 laranja,
+    12 amarelo e 4 vermelho, os mesmos que o gerador daqui conta."""
+
+    def test_regra_de_enlace_nas_fronteiras(self):
+        c = rm.classe_enlace
+        self.assertEqual(c(5000, 30), "otimo")
+        self.assertEqual(c(5001, 30), "bom")
+        self.assertEqual(c(5000, 29), "bom")
+        self.assertEqual(c(10000, 20), "bom")
+        self.assertEqual(c(9198, 36), "bom")        # ERM-24 PTP, 28/09
+        self.assertEqual(c(11355, 34), "ruim")      # a mesma, outro ponto
+        self.assertEqual(c(10000, 19), "ruim")
+        self.assertEqual(c(None, 40), "ruim")
+        self.assertEqual(c(9000, 25, {"goodCost": 8000}), "ruim")
+
+    def _captura(self, tmp):
+        """data.json no formato do MeshMapper: 4 pontos com 0, 1, 2 e 3
+        enlaces bons (o último com 1 ótimo)."""
+        import json as _j
+        def par(custo, snr, n):
+            return {"name": n, "cost": custo, "rssi": snr, "signal": -60,
+                    "frequency": 5785, "channel": 157}
+        pontos = []
+        for k, viz in enumerate((
+                [par(11355, 34, "A")],
+                [par(9198, 36, "A"), par(40000, 15, "B")],
+                [par(9198, 36, "A"), par(9900, 22, "B")],
+                [par(4000, 31, "A"), par(9000, 22, "B"), par(7000, 25, "C")])):
+            pontos.append({"gpsLat": -18.9 + k * 1e-3, "gpsLong": -43.43,
+                           "unixTimeStamp": 1790598443622 + k * 5000,
+                           "wlanPeers": {"wlan0": viz}, "numActivePeers": len(viz),
+                           "traceInfo": {"host": "10.188.96.11",
+                                         "path": {"cost": 12932, "hopcost": 11977}}})
+        d = {"bcc_version": "11.29.1",
+             "configuration": {"goodCost": 10000, "greatCost": 5000,
+                               "goodRSSI": 20, "greatRSSI": 30,
+                               "crumbMeta": {"name": "CA-1024"}},
+             "points": pontos}
+        arq = Path(tmp) / "data.json"
+        arq.write_text(_j.dumps(d), encoding="utf-8")
+        return arq
+
+    def test_pinos_do_meshmapper(self):
+        import tempfile
+        sv, am, pr = rm.ler_meshmapper(str(self._captura(tempfile.mkdtemp())))
+        self.assertEqual([rm.pino_da_leitura(a) for a in am],
+                         ["pin0", "pin1", "pin2", "est1"])
+        self.assertEqual([a["enl_bons"] for a in am], [0, 1, 2, 3])
+        self.assertEqual(am[3]["enl_lista"][0][0], "A")     # o ótimo primeiro
+        self.assertEqual(rm.pino_da_leitura({"enl_total": 0}), "pinx")
+        self.assertIsNone(rm.pino_da_leitura({}))
+
+    def test_um_pino_por_trecho_e_leitura_real(self):
+        K = 1 / 111000.0
+        am = [{"radio": f"CA-{k % 3}", "ts": k, "lat": 0.0, "lon": (k % 6) * K,
+               "enl_bons": k % 4, "enl_otimos": 0, "enl_total": 5}
+              for k in range(30)]
+        am += [{"radio": "CA-9", "ts": 100, "lat": 0.0, "lon": 500 * K,
+                "enl_bons": 2, "enl_otimos": 0, "enl_total": 5}]
+        pinos = rm.pinos_por_trecho(am)
+        self.assertEqual(len(pinos), 2)
+        rep_, n = pinos[0]
+        self.assertEqual(n, 30)
+        self.assertIn(rep_, am)                    # uma leitura que aconteceu
+        self.assertEqual(rep_["enl_bons"], 1)      # 0,1,2,3…: meio, lado pior
+
+    def test_aba_principal_tem_calor_pinos_e_linha_do_custo(self):
+        import zipfile, io as _io
+        K = 1 / 111000.0
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": -18.9, "banda": "5.8 GHz",
+               "lon": -43.43 + 40 * k * K, "enl_bons": k % 4, "enl_otimos": 0,
+               "enl_total": 6, "custo_caminho": 8000 + 3000 * k, "sinal_cob": -70}
+              for k in range(12)]
+        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 0}, am,
+                                       campos=["enl_bons", "sinal_cob"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        doc = z.read("doc.kml").decode()
+        a0 = doc.index("<name>Enlaces bons (Rajant)</name>")
+        aba = doc[a0:doc.index("<name>RSSI", a0)]
+        self.assertIn("<GroundOverlay>", aba)
+        self.assertIn("<name>Pinos (", aba)
+        self.assertIn(f"<name>{rm.CAMADA_DO_RASTRO} — custo do caminho", aba)
+        t = aba.index(f"<name>{rm.CAMADA_DO_RASTRO} — custo do caminho")
+        self.assertIn("<visibility>1</visibility>", aba[t:t + 200])
+        self.assertIn("#l3EAD30", aba)                 # a linha é do custo
+        self.assertNotIn("<name>Medições", aba)        # os pinos já são elas
+        for n in ("pin0", "pin1", "pin2", "pin3", "est1", "pinx"):
+            self.assertIn(f"files/{n}.png", z.namelist())
+        self.assertIn('<Style id="pin1">', doc)
+        self.assertIn('<hotSpot x="0.5" y="0" xunits="fraction"', doc)   # a ponta
+
+    def test_enlaces_vao_para_o_banco(self):
+        con = rm.banco(":memory:")
+        sid = rm.survey_criar(con, "t", 0.0, None, ["CA-1"])
+        rm.amostras_gravar(con, sid, [{"radio": "CA-1", "ts": 1.0, "lat": 0.0,
+                                       "lon": 0.0, "enl_bons": 2,
+                                       "enl_otimos": 1, "enl_total": 7}])
+        a = rm.survey_amostras(con, sid)[0]
+        self.assertEqual((a["enl_bons"], a["enl_otimos"], a["enl_total"]), (2, 1, 7))
+
+
+class TestCalorPorFaixas(unittest.TestCase):
+    """O mapa de calor no estilo do KMZ de referência (28/09/2026)."""
+
+    K = 1 / 111000.0
+
+    def _png(self, am, campo="sinal"):
+        import io as _io, numpy as np
+        from PIL import Image
+        png, caixa, n = rm.calor_por_faixas(am, campo)
+        return np.array(Image.open(_io.BytesIO(png)).convert("RGBA")), caixa
+
+    def _px(self, img, caixa, lat, lon):
+        n, s_, l, o = caixa
+        return img[int((n - lat) / (n - s_) * (img.shape[0] - 1)),
+                   int((lon - o) / (l - o) * (img.shape[1] - 1))]
+
+    def test_trecho_entre_leituras_do_mesmo_veiculo_e_continuo(self):
+        # Leituras a 100 m, mais que o dobro do raio: sem o trecho, o meio
+        # ficava transparente e o mapa saía em contas soltas.
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": 0.0,
+               "lon": 100 * k * self.K, "sinal": -60} for k in range(6)]
+        img, cx = self._png(am)
+        meio = self._px(img, cx, 0.0, 150 * self.K)
+        self.assertGreater(meio[3], 150)
+        self.assertEqual(tuple(meio[:3]), (0x3E, 0xAD, 0x30))   # a cor exata
+
+    def test_buraco_de_medicao_fica_transparente(self):
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": 0.0,
+               "lon": 20 * k * self.K, "sinal": -60} for k in range(5)]
+        am += [{"radio": "CA-1", "ts": 5000.0 + 10 * k, "lat": 0.0,
+                "lon": (600 + 20 * k) * self.K, "sinal": -60} for k in range(5)]
+        img, cx = self._png(am)
+        self.assertLess(self._px(img, cx, 0.0, 340 * self.K)[3], 30)
+
+    def test_empate_vai_para_a_faixa_pior(self):
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0, "sinal": -60},
+              {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "sinal": -85}]
+        img, cx = self._png(am)
+        self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xB7, 0x04, 0x04))
+        # No custo, menor é melhor: a pior é a do índice MAIOR.
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0, "custo_caminho": 9000},
+              {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "custo_caminho": 25000}]
+        img, cx = self._png(am, "custo_caminho")
+        self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xFF, 0x00, 0x00))
+
+    def test_so_leitura_sem_valor_fica_cinza(self):
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0,
+               "custo_caminho": None}]
+        img, cx = self._png(am, "custo_caminho")
+        px = self._px(img, cx, 0.0, 0.0)
+        self.assertEqual(tuple(px[:3]), (0x80, 0x80, 0x80))
+        self.assertLess(px[3], 200)            # mais transparente que o medido
+
+    def test_erb_fica_fora_do_calor_e_vira_quadrado(self):
+        import zipfile, io as _io
+        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": -27.73, "banda": "5.8 GHz",
+               "lon": -50.07 + 20 * k * self.K, "sinal": -60} for k in range(10)]
+        am += [{"radio": "ERM-05", "ts": 0.0, "lat": -27.74, "lon": -50.05,
+                "sinal": -85, "banda": "5.8 GHz", "servidor": "eth0udp1"}]
+        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 0}, am,
+                                       campos=["sinal"])
+        doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn("<name>ERB/ERM (1)</name>", doc)
+        self.assertIn("<name>ERM-05</name>", doc)
+        self.assertIn("#fxB70404", doc)                 # cor da mediana
+        self.assertIn("Sai por", doc)
+        self.assertIn("10 leituras de 1 equipamentos", doc)
+
+    def test_linha_do_requisito_na_fronteira_certa_da_legenda(self):
+        # Legenda do RSSI, melhor em cima: ≥-67, -70..-68, -74..-71 atendem;
+        # a linha vem antes de -80..-75.
+        self.assertEqual(rm._requisito_entre("sinal_cob"), 3)
+        self.assertEqual(rm._requisito_entre("custo_caminho"), 2)
+        self.assertEqual(rm._requisito_entre("snr"), 2)
+
+
+class TestTrilhaConsolidada(unittest.TestCase):
+    """Uma linha por caminho, não uma por veículo (campo, 26/09/2026: 29
+    rádios nas mesmas estradas viravam uma faixa larga e salpicada)."""
+
+    K = 1 / 111000.0       # ~1 m em grau, perto do equador
+
+    def _veiculo(self, radio, lado_m, vals, passo_m=10.0, lat0=0.0, t0=0):
+        return [{"radio": radio, "ts": t0 + k, "lat": lat0 + lado_m * self.K,
+                 "lon": k * passo_m * self.K, "sinal": v}
+                for k, v in enumerate(vals)]
+
+    def test_dois_veiculos_na_mesma_pista_viram_uma_linha(self):
+        am = (self._veiculo("CA-1", -3, [-60] * 30)
+              + self._veiculo("CA-2", +4, [-60] * 30, t0=100))
+        pecas, cadeias, soltas = rm.trilha_consolidada(
+            am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 1)
+        self.assertEqual(soltas, [])
+        self.assertEqual([c for c, _, _ in pecas], ["3EAD30"])
+        # No meio da pista, não na de um nem na do outro.
+        lat_m = [la / self.K for la, _ in cadeias[0]]
+        self.assertTrue(all(-3 <= y <= 4 for y in lat_m), lat_m)
+        self.assertTrue(all(-1 < y < 2.5 for y in lat_m[1:-1]), lat_m)
+
+    def test_pistas_separadas_ficam_separadas(self):
+        am = (self._veiculo("CA-1", 0, [-60] * 20)
+              + self._veiculo("CA-2", 60, [-60] * 20, t0=100))
+        _, cadeias, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 2)
+
+    def test_mediana_do_lado_pior_e_sempre_uma_leitura_real(self):
+        self.assertEqual(rm._valor_da_celula([-60, -80], "sinal"), -80)
+        self.assertEqual(rm._valor_da_celula([-60, -70, -80], "sinal"), -70)
+        self.assertEqual(rm._valor_da_celula([9000, 21000], "custo_caminho"), 21000)
+        self.assertEqual(rm._valor_da_celula([None, -65, None], "sinal"), -65)
+        self.assertIsNone(rm._valor_da_celula([None, None], "sinal"))
+
+    def test_cores_de_dois_veiculos_no_mesmo_ponto_nao_se_salpicam(self):
+        # Um bom e um ruim no mesmo lugar: antes, cada um pintava sua linha
+        # e a de cima escondia a de baixo. Agora o trecho tem UMA cor, a
+        # do lado pior do meio.
+        am = (self._veiculo("CA-1", -2, [-60] * 20)
+              + self._veiculo("CA-2", +2, [-78] * 20, t0=100))
+        pecas, _, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual({c for c, _, _ in pecas}, {"FF0000"})
+
+    def test_veiculo_rapido_nao_cria_cruzamento_falso(self):
+        # Um passa a cada 10 m, outro a cada 30 m pulando grupo: sem tirar
+        # o atalho, cada pulo virava triângulo e o trecho se partia.
+        am = (self._veiculo("CA-1", 0, [-60] * 40, passo_m=10)
+              + self._veiculo("CA-2", 1, [-60] * 13, passo_m=30, t0=200))
+        _, cadeias, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 1)
+
+    def test_trecho_sem_nenhum_valor_fica_cinza_e_com_valor_nao(self):
+        vals = [-60] * 10 + [None] * 10 + [-60] * 10
+        am = self._veiculo("CA-1", 0, vals, passo_m=15)
+        # Um segundo veículo mede o miolo: ali o trecho deixa de ser cinza.
+        pecas, _, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertIn(rm.COR_SEM_VALOR, [c for c, _, _ in pecas])
+        am2 = am + self._veiculo("CA-2", 1, [-60] * 30, passo_m=15, t0=300)
+        pecas2, _, _ = rm.trilha_consolidada(am2, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertNotIn(rm.COR_SEM_VALOR, [c for c, _, _ in pecas2])
+
+    def test_buraco_de_medicao_nao_vira_reta(self):
+        am = self._veiculo("CA-1", 0, [-60] * 10)
+        am += [dict(a, ts=a["ts"] + 5000, lon=a["lon"] + 1000 * self.K)
+               for a in self._veiculo("CA-1", 0, [-60] * 10)]
+        _, cadeias, _ = rm.trilha_consolidada(am, "sinal", rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(cadeias), 2)
+
+
+class TestReguaOficial(unittest.TestCase):
+    """A régua de cor de cada grandeza é rastreável a uma fonte, e a cor
+    de uma leitura nunca discorda da contagem de reprovados.
+
+    O rádio reporta dBm e dB INTEIROS. O valor exato de cada limite é,
+    por isso, uma das leituras mais comuns — e é justamente ali que uma
+    régua mal amarrada pinta de "atende" o que o Sumário conta como
+    reprovado.
+    """
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+
+    def test_cinza_da_leitura_sem_valor_esta_na_legenda(self):
+        # Campo, 26/09/2026: "o cinza aí é o quê?" — o mapa pintava cinza a
+        # leitura sem custo do caminho e a legenda não dizia.
+        am = []
+        for k in range(6):
+            am.append({"radio": "CA-1006", "ts": 1000 + k, "lat": -18.9 + k * 1e-4,
+                       "lon": -43.4, "sinal": -60, "sinal_cob": -60, "snr": 30,
+                       "custo_caminho": 9000 if k < 3 else None})
+        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 1000, "fim": 1006},
+                                       am, campos=["custo_caminho"])
+        import zipfile, io
+        doc = zipfile.ZipFile(io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn(f"#l{rm.COR_SEM_VALOR}", doc)
+        self.assertIn("sem trace neste trecho", doc)
+        import tempfile, os
+        from unittest import mock as _m
+        ditos = []
+        orig = rm._legenda_de_faixas_png
+        with tempfile.TemporaryDirectory() as d:
+            with _m.patch("matplotlib.axes.Axes.text",
+                          side_effect=lambda *a, **k: ditos.append(a[2])):
+                orig(os.path.join(d, "l.png"), "custo_caminho")
+        self.assertIn("sem trace neste trecho", ditos)
+    def test_snr_e_a_regua_oficial_da_rajant(self):
+        # Limites e cores lidos do próprio MeshMapper: goodRSSI e
+        # greatRSSI no data.json (em dB de SNR), FF0000/F26A00/3EAD30 nos
+        # LineStyle do doc.kml que ele gera.
+        if not self.EXEMPLO.exists():
+            self.skipTest("fixture do MeshMapper ausente")
+        sv, _, _ = rm.ler_meshmapper(str(self.EXEMPLO))
+        lim = sv["limiares_mm"]
+        self.assertEqual(rm.FAIXAS_KML["snr"],
+                         [(lim["goodRSSI"], "FF0000"),
+                          (lim["greatRSSI"], "F26A00"), (999, "3EAD30")])
+
+    def test_rssi_usa_os_cortes_da_convencao_e_o_do_requisito(self):
+        lims = [l for l, _ in rm.FAIXAS_KML["sinal"][:-1]]
+        self.assertEqual(lims, [-90, -80, -75, -70, -67])
+        self.assertEqual(rm.FAIXAS_KML["sinal_cob"], rm.FAIXAS_KML["sinal"])
+
+    def test_as_cores_sao_as_da_rajant(self):
+        rajant = {"FF0000", "F26A00", "3EAD30", "DD9F17", "B70404"}
+        for campo in ("sinal", "sinal_cob", "snr", "ruido"):
+            fora = {c for _, c in rm.FAIXAS_KML[campo]} - rajant - {"5C0000"}
+            self.assertFalse(fora, f"{campo}: cor sem origem {fora}")
+
+    def _requisito(self, campo):
+        return rm.limite_de(campo)
+
+    def test_nenhuma_faixa_mistura_aprovado_e_reprovado(self):
+        # A regra central: dentro de uma faixa, todo inteiro tem o MESMO
+        # resultado no requisito. Assim a cor nunca contradiz o Sumário.
+        for campo, faixa_de_valores in (("sinal", range(-110, -30)),
+                                        ("sinal_cob", range(-110, -30)),
+                                        ("snr", range(0, 60)),
+                                        ("ruido", range(-120, -60))):
+            op, lim = self._requisito(campo)[:2]
+            por_faixa = {}
+            for v in faixa_de_valores:
+                k = rm._faixa_idx(v, rm.FAIXAS_KML[campo],
+                                  rm.limites_na_faixa_de_baixo(campo))
+                por_faixa.setdefault(k, set()).add(rm.atende(v, op, lim))
+            misturadas = {k: r for k, r in por_faixa.items() if len(r) > 1}
+            self.assertFalse(misturadas, f"{campo}: faixa com aprovado e "
+                                         f"reprovado {misturadas}")
+
+    def test_o_valor_exato_do_requisito_cai_no_vermelho(self):
+        # RSSI > -75 e SNR > 20: o limite exato é reprovado.
+        self.assertEqual(rm.cor_da_leitura(-75, "sinal_cob"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(-74, "sinal_cob"), "F26A00")
+        self.assertEqual(rm.cor_da_leitura(20, "snr"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(21, "snr"), "F26A00")
+
+    def test_nos_demais_limites_vale_a_convencao(self):
+        # -67 é o mínimo de "muito bom" na MetaGeek: -67 é muito bom.
+        # -90 já é inutilizável. SNR 30 é "great" na Rajant.
+        self.assertEqual(rm.cor_da_leitura(-67, "sinal"), "3EAD30")
+        self.assertEqual(rm.cor_da_leitura(-68, "sinal"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(-70, "sinal"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(-80, "sinal"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(-81, "sinal"), "B70404")
+        self.assertEqual(rm.cor_da_leitura(-90, "sinal"), "5C0000")
+        self.assertEqual(rm.cor_da_leitura(30, "snr"), "3EAD30")
+        self.assertEqual(rm.cor_da_leitura(29, "snr"), "F26A00")
+
+    def test_mudar_o_operador_muda_a_faixa_junto(self):
+        # Se o requisito da Modular for >= 20, o SNR 20 passa a laranja —
+        # exatamente como o MeshMapper pinta —, sem mexer em faixa nenhuma.
+        orig = rm.REQUISITOS["snr"]
+        rm.REQUISITOS["snr"] = (">=", 20.0, "dB", "SNR")
+        try:
+            self.assertEqual(rm.cor_da_leitura(20, "snr"), "F26A00")
+            self.assertTrue(rm.atende(20, ">=", 20.0))
+        finally:
+            rm.REQUISITOS["snr"] = orig
+        self.assertEqual(rm.cor_da_leitura(20, "snr"), "FF0000")
+
+    def test_ruido_derivado_bate_com_a_regua_de_snr(self):
+        # Sobre ruído N, um sinal de -75 (mínimo Modular) chega com
+        # SNR = -75 - N. A cor do ruído tem de ser a cor desse SNR.
+        for n in range(-120, -70):
+            self.assertEqual(rm.cor_da_leitura(n, "ruido"),
+                             rm.cor_da_leitura(-75 - n, "snr"), f"ruído {n}")
+
+    def test_rotulo_diz_exatamente_quais_inteiros_a_faixa_tem(self):
+        import re as _re
+        for campo in ("sinal", "snr", "ruido"):
+            faixas = rm.FAIXAS_KML[campo]
+            baixo = rm.limites_na_faixa_de_baixo(campo)
+            rot = rm._faixas_rotuladas(campo)
+
+            def contem(txt, v):
+                m = _re.fullmatch(r"(-?\d+) a (-?\d+)", txt)
+                if m: return int(m.group(1)) <= v <= int(m.group(2))
+                m = _re.fullmatch(r"(≤|≥) (-?\d+)", txt)
+                if m: return v <= int(m.group(2)) if m.group(1) == "≤" \
+                    else v >= int(m.group(2))
+                return v == int(txt)
+
+            for v in range(-130, 80):
+                k = rm._faixa_idx(v, faixas, baixo)
+                donos = [i for i, (r, _c, _k) in enumerate(rot) if contem(r, v)]
+                self.assertEqual(donos, [k], f"{campo} {v}: rótulos {donos}, "
+                                             f"cor da faixa {k}")
+
+    def test_distribuicao_conta_com_a_mesma_regua(self):
+        am = [{"sinal_cob": v} for v in (-75, -75, -74, -67, -90, -80)]
+        rot, pct, _un = rm.distribuicao(am, "sinal_cob")
+        self.assertEqual(rot, [r for r, _c, _k in
+                               rm._faixas_rotuladas("sinal_cob")])
+        # -90 | - | -80,-75,-75 | -74 | - | -67
+        self.assertEqual(pct, [16.7, 0.0, 50.0, 16.7, 0.0, 16.7])
+
+    def test_legenda_cita_a_fonte(self):
+        import tempfile, os
+        for campo in ("sinal_cob", "snr", "ruido"):
+            self.assertTrue(rm.FONTE_FAIXAS.get(campo), campo)
+        cam = os.path.join(tempfile.mkdtemp(), "l.png")
+        rm._legenda_de_faixas_png(cam, "sinal_cob")
+        self.assertGreater(os.path.getsize(cam), 1000)
+
+
+class TestCorBateComALegenda(unittest.TestCase):
+    """A cor do raster tem de ser a MESMA da legenda, valor por valor.
+
+    Antes o raster interpolava um gradiente contínuo de 256 tons entre
+    `lo` e `hi`, enquanto a legenda do balão listava as faixas de
+    `FAIXAS_KML`. As duas réguas não coincidem em ponto nenhum: um pixel
+    de −78 dBm caía em 34% do gradiente e saía laranja, mas a legenda diz
+    que −80 a −75 é vermelho. Quem conferisse cor contra legenda
+    encontrava outra coisa — e num laudo de aprovação isso basta para
+    invalidar a leitura.
+    """
+
+    def _pinta(self, campo, valores):
+        import tempfile, os
+        import numpy as np
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        v = np.array([valores], dtype=float)
+        cam = os.path.join(tempfile.mkdtemp(), "t.png")
+        rm._png_calor(v, np.ones_like(v), rm._cmap_rf(),
+                      float(rm.ESCALAS[campo]["lo"]),
+                      float(rm.ESCALAS[campo]["hi"]), cam,
+                      faixas=rm.FAIXAS_KML[campo],
+                      na_de_baixo=rm.limites_na_faixa_de_baixo(campo))
+        img = mpimg.imread(cam)[::-1]
+        return ["".join(f"{int(round(c * 255)):02X}" for c in img[0, j][:3])
+                for j in range(len(valores))]
+
+    def test_cada_faixa_de_rssi_sai_na_cor_da_legenda(self):
+        vals = [-95.0, -85.0, -78.0, -72.0, -69.0, -62.0, -45.0]
+        obtido = self._pinta("sinal", vals)
+        for v, cor in zip(vals, obtido):
+            esperado = rm.cor_da_leitura(v, "sinal")
+            self.assertEqual(cor.upper(), esperado.upper(),
+                             f"{v:g} dBm saiu {cor}, legenda diz {esperado}")
+
+    def test_vale_para_as_grandezas_de_sentido_invertido(self):
+        # Ruído: quanto MAIS NEGATIVO, melhor. Se o degrau usasse o
+        # sentido errado, o mapa sairia espelhado.
+        for campo, vals in (("ruido", [-110.0, -100.0, -90.0, -60.0]),
+                            ("snr", [5.0, 18.0, 22.0, 28.0, 35.0, 50.0])):
+            for v, cor in zip(vals, self._pinta(campo, vals)):
+                esperado = rm.cor_da_leitura(v, campo)
+                self.assertEqual(cor.upper(), esperado.upper(),
+                                 f"{campo} {v:g} saiu {cor}, "
+                                 f"legenda diz {esperado}")
+
+    def test_o_valor_exato_de_cada_limite_concorda(self):
+        # O rádio reporta inteiro: o valor exato de cada limite é comum. O
+        # raster tem de pôr cada um na MESMA faixa da linha e da legenda,
+        # senão a borda de cada faixa vira uma linha de cor errada.
+        for campo in ("sinal", "sinal_cob", "snr", "ruido", "rtt",
+                      "perda", "interf"):
+            lims = [float(l) for l, _ in rm.FAIXAS_KML[campo][:-1]]
+            for v, cor in zip(lims, self._pinta(campo, lims)):
+                self.assertEqual(cor.upper(), rm.cor_da_leitura(v, campo),
+                                 f"{campo}: limite {v:g} divergiu")
+
+    def test_sem_medicao_fica_transparente(self):
+        import numpy as np, tempfile, os
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        v = np.array([[-70.0, np.nan]])
+        alfa = np.array([[1.0, 1.0]])
+        cam = os.path.join(tempfile.mkdtemp(), "t.png")
+        rm._png_calor(v, alfa, rm._cmap_rf(), -90.0, -55.0, cam,
+                      faixas=rm.FAIXAS_KML["sinal"])
+        img = mpimg.imread(cam)[::-1]
+        self.assertGreater(img[0, 0][3], 0.9)
+        self.assertLess(img[0, 1][3], 0.01, "pixel sem medição ficou opaco")
+
+    def test_o_kmz_real_usa_os_degraus(self):
+        # A prova de ponta a ponta: o raster dentro do arquivo só pode ter
+        # as cores da tabela, e mais nenhuma.
+        import tempfile, shutil, zipfile, io as _io
+        import numpy as np
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.image as mpimg
+        am = [{"radio": "CA-1", "ts": 100.0 + i,
+               "lat": -18.90 + i * 0.0004, "lon": -43.43,
+               "sinal": -60.0 - i * 1.5, "banda": "5.8 GHz"}
+              for i in range(24)]
+        sv = {"nome": "t", "inicio": 100.0, "fim": 124.0}
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"])
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        png = [n for n in z.namelist() if "calor_" in n][0]
+        img = mpimg.imread(_io.BytesIO(z.read(png)))
+        vis = img[img[..., 3] > 0.5][:, :3]
+        self.assertGreater(len(vis), 100, "raster saiu vazio")
+        achadas = {tuple(np.round(c * 255).astype(int)) for c in vis}
+        paleta = {tuple(int(cor[i:i+2], 16) for i in (0, 2, 4))
+                  for _, cor in rm.FAIXAS_KML["sinal"]}
+        fora = achadas - paleta
+        self.assertFalse(fora, f"cores fora da legenda no raster: "
+                               f"{sorted(fora)[:6]}")
+
+
+class TestLaudoDeTrajeto(unittest.TestCase):
+    """O laudo que se usa todo dia, e só ele.
+
+    RSSI, SNR e ruído por banda, coloridos pela MELHOR ERB/ERM visível em
+    cada ponto. Latência, perda e interferência não saem porque o
+    MeshMapper não as mede — e página vazia com escala e requisito lê-se
+    como "medi e deu tudo fora", que é o oposto.
+
+    As abas de vizinhança respondem outra pergunta; misturadas com estas,
+    confundem. Ficaram atrás de [relatorio] vizinhanca, desligada.
+    """
+
+    EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
+
+    def _gerar(self, destino, cfg=None):
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        from unittest import mock
+        if cfg is None:
+            return sm.gerar([str(self.EXEMPLO)], str(destino),
+                            aviso=lambda t: None)
+        with mock.patch.object(rm, "carregar_config", lambda *a, **k: cfg):
+            return sm.gerar([str(self.EXEMPLO)], str(destino),
+                            aviso=lambda t: None)
+
+    def test_um_kmz_por_banda(self):
+        # 2,4 e 5,8 GHz sao malhas diferentes no mesmo terreno: num
+        # arquivo so, a banda boa tapa a ruim e o mapa deixa de dizer qual
+        # das duas esta servindo.
+        import tempfile, shutil
+        _sv, am, _pr = rm.ler_meshmapper(str(self.EXEMPLO))
+        bandas = sorted({rm._norm_banda(a.get("banda")) for a in am
+                         if a.get("banda")})
+        self.assertTrue(bandas, "o exemplo perdeu a banda")
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            nomes = [f.name for f in self._gerar(tmp) if f.suffix == ".kmz"]
+            self.assertEqual(len(nomes), len(bandas),
+                             f"{len(bandas)} banda(s), {len(nomes)} arquivo(s)")
+            for b in bandas:
+                suf = b.replace(" ", "").replace(".", "")
+                self.assertTrue(any(suf in n for n in nomes),
+                                f"{b} sem arquivo proprio: {nomes}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_duas_bandas_dao_dois_arquivos(self):
+        # A regra com as duas bandas presentes, que o exemplo de 8 pontos
+        # nao tem: sem isso o teste acima passaria com um arquivo so.
+        import tempfile, shutil
+        am = [{"radio": "CA-1", "ts": 100.0 + i,
+               "lat": -18.90 + i * 0.0004, "lon": -43.43,
+               "sinal": -70.0, "snr": 25.0,
+               "banda": "2.4 GHz" if i % 2 else "5.8 GHz"}
+              for i in range(20)]
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            import sys as _s
+            _s.path.insert(0, str(Path(__file__).resolve().parent))
+            import survey_meshmapper as sm
+            feitos = sm._kmz_por_banda(sv, am, [], tmp, None, ["sinal"],
+                                       lambda t: None)
+            nomes = [f.name for f in feitos]
+            self.assertEqual(len(nomes), 2, nomes)
+            self.assertTrue(any("24GHz" in n for n in nomes), nomes)
+            self.assertTrue(any("58GHz" in n for n in nomes), nomes)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_cor_vem_da_melhor_erb_ou_erm_do_ponto(self):
+        # UMA aba de RSSI, e ela é a do melhor ERB/ERM do ponto. Havia
+        # duas — "Cobertura disponível" e "RSSI" —, a mesma grandeza em
+        # dBm por dois critérios, e quem abria não sabia qual valia.
+        import tempfile, shutil, zipfile
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            kmz = [f for f in self._gerar(tmp) if f.suffix == ".kmz"][0]
+            kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+            # O rótulo sai de ESCALAS: afirmá-lo literal aqui envelheceria
+            # na primeira vez que ele mudasse.
+            rot = rm.ESCALAS["sinal_cob"]["rot"]
+            self.assertIn("ERB/ERM", rot,
+                          "o rótulo parou de dizer de onde vem o número")
+            self.assertIn(f"<name>{rot}</name>", kml)
+            self.assertNotIn("<name>Cobertura disponível</name>", kml,
+                             "a aba redundante voltou")
+            # É a primeira: é a pergunta do laudo.
+            i = kml.index(f"<name>{rot}</name>")
+            for outra in ("SNR", "Ruído"):
+                j = kml.find(f"<name>{outra}</name>")
+                if j > -1:
+                    self.assertLess(i, j, f"{outra} veio antes do RSSI")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_zonas_problema_sairam_do_laudo(self):
+        # Elas sugeriam coordenada para avaliar rádio, que é decisão de
+        # projeto de RF e não conclusão de medição.
+        import tempfile, shutil, zipfile
+        from pptx import Presentation
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            feitos = self._gerar(tmp)
+            for kmz in (f for f in feitos if f.suffix == ".kmz"):
+                kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+                self.assertNotIn("ZONAS-PROBLEMA", kml)
+            p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+            for s in p.slides:
+                for sh in s.shapes:
+                    if sh.has_text_frame:
+                        self.assertNotIn("Zonas-Problema", sh.text_frame.text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_deck_termina_com_diagnostico_e_conclusoes_em_branco(self):
+        # O deck entrega o que foi MEDIDO; a leitura daquilo é de quem
+        # conhece a operação. As páginas entram estruturadas e vazias.
+        import tempfile, shutil
+        from pptx import Presentation
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            p = Presentation([f for f in self._gerar(tmp)
+                              if f.suffix == ".pptx"][0])
+            tit = []
+            for s in p.slides:
+                t = [sh.text_frame.text.strip().split("\n")[0]
+                     for sh in s.shapes
+                     if sh.has_text_frame and sh.text_frame.text.strip()]
+                tit.append(t[0] if t else "")
+            self.assertEqual(tit[-2:], ["Diagnóstico", "Conclusões e Ações"])
+            # A tabela de ações tem de sair VAZIA: preenchida por mim
+            # seria conclusão inventada.
+            s = list(p.slides)[-1]
+            tab = [sh.table for sh in s.shapes if sh.has_table][0]
+            corpo = [[c.text for c in r.cells] for r in list(tab.rows)[1:]]
+            self.assertTrue(corpo, "tabela de ações não foi criada")
+            for lin in corpo:
+                self.assertEqual([c for c in lin[1:] if c.strip()], [],
+                                 f"linha veio preenchida: {lin}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_sem_vizinhanca_no_laudo_padrao(self):
+        import tempfile, shutil, zipfile
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            feitos = self._gerar(tmp)
+            nomes = [f.name for f in feitos]
+            self.assertFalse(any(n.startswith("Vizinhanca_") for n in nomes),
+                             nomes)
+            xls = [f for f in feitos if f.suffix == ".xlsx"][0]
+            abas = load_workbook(xls).sheetnames
+            for proibida in ("Censo de Vizinhos", "Por Repetidora", "Vizinhos"):
+                self.assertNotIn(proibida, abas)
+            for kmz in (f for f in feitos if f.suffix == ".kmz"):
+                kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+                self.assertNotIn("Por repetidora", kml)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_latencia_e_perda_nao_viram_pagina_vazia(self):
+        # O MeshMapper nao mede. Pagina com escala e grafico vazio le-se
+        # como "medi e deu tudo fora".
+        import tempfile, shutil, zipfile
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            for kmz in (f for f in self._gerar(tmp) if f.suffix == ".kmz"):
+                kml = zipfile.ZipFile(kmz).read("doc.kml").decode()
+                for ausente in ("Latência", "Packet Loss", "Interferência"):
+                    self.assertNotIn(f"<name>{ausente}", kml)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_chave_devolve_a_vizinhanca(self):
+        import tempfile, shutil, configparser
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cfg = rm.cfg_relatorio(configparser.ConfigParser())
+            cfg.set("relatorio", "vizinhanca", "true")
+            xls = [f for f in self._gerar(tmp, cfg) if f.suffix == ".xlsx"][0]
+            self.assertIn("Censo de Vizinhos", load_workbook(xls).sheetnames)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestPegadaPorRepetidora(unittest.TestCase):
+    """A pegada MEDIDA de cada ERB/ERM.
+
+    A camada de cobertura disponível mistura as repetidoras — ela é o
+    MELHOR vizinho de cada ponto. Não dá para perguntar "até onde a
+    ERM-28 alcança". Esta responde, e sem estimar nada: a posição é a do
+    veículo e o sinal é o dele para aquela repetidora, da mesma leitura.
+    """
+
+    def _dados(self, n=12):
+        am = [{"radio": "CA-1", "ts": 100.0 + i, "lat": -18.90 + i * 0.0005,
+               "lon": -43.43, "sinal": -88.0, "banda": "5.8 GHz"}
+              for i in range(n)]
+        pr = []
+        for i in range(1, n + 1):
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "ERB-07",
+                       "sinal": -70.0 - i, "snr": 30.0, "custo": 5000.0,
+                       "banda": "5.8 GHz", "canal": 157})
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "CA-9",
+                       "sinal": -50.0, "snr": 40.0, "custo": 900.0,
+                       "banda": "2.4 GHz", "canal": 6})
+        return am, pr
+
+    def test_so_infraestrutura_ganha_pegada(self):
+        # Caminhão dá sinal ótimo e vai embora: não caracteriza cobertura.
+        d = rm.amostras_por_repetidora(*self._dados())
+        self.assertIn("ERB-07", d)
+        self.assertNotIn("CA-9", d)
+
+    def test_posicao_e_do_veiculo_e_sinal_e_do_enlace(self):
+        am, pr = self._dados()
+        d = rm.amostras_por_repetidora(am, pr)
+        prim = d["ERB-07"][0]
+        self.assertEqual(prim["lat"], am[0]["lat"])
+        self.assertEqual(prim["lon"], am[0]["lon"])
+        self.assertEqual(prim["sinal"], -71.0)       # o do vizinho
+        self.assertEqual(prim["radio"], "CA-1")      # quem mediu
+
+    def test_repetidora_pouco_ouvida_nao_vira_mapa(self):
+        # Poucos pontos viram bolha solta, que se lê como "medi esta
+        # área" onde o certo é "passei perto uma vez".
+        am, pr = self._dados()
+        pr = [p for p in pr if p["nome"] != "ERB-07" or p["ponto"] <= 3]
+        self.assertNotIn("ERB-07", rm.amostras_por_repetidora(am, pr))
+        self.assertIn("ERB-07",
+                      rm.amostras_por_repetidora(am, pr, min_pontos=3))
+
+    def test_duas_bandas_no_mesmo_ponto_contam_uma_vez(self):
+        # A mesma repetidora em 2.4 e 5.8 GHz é UM equipamento. Fica o
+        # melhor do ponto; somar os dois contaria em dobro.
+        #
+        # Testa NAS DUAS ORDENS de propósito: guardando por ponto num
+        # dicionário, o último a chegar vence sozinho. Com o pior vindo
+        # depois, um teste de ordem única passa mesmo sem a regra — foi
+        # o que aconteceu, e o mutante sobreviveu.
+        for pior_primeiro in (True, False):
+            am, pr = self._dados()
+            extra = {"movel": "CA-1", "ponto": 1, "nome": "ERB-07",
+                     "sinal": -60.0, "snr": 35.0, "custo": 4000.0,
+                     "banda": "2.4 GHz", "canal": 6}
+            if pior_primeiro:
+                pr.append(extra)                      # -71 e depois -60
+            else:
+                # -60 antes do -71 do _dados(): só a regra segura o melhor
+                pr.insert(0, extra)
+            d = rm.amostras_por_repetidora(am, pr)
+            do_ponto1 = [a for a in d["ERB-07"] if a["ts"] == 100.0]
+            self.assertEqual(len(do_ponto1), 1,
+                             f"contou em dobro (pior_primeiro={pior_primeiro})")
+            self.assertEqual(do_ponto1[0]["sinal"], -60.0,
+                             f"nao ficou o melhor (pior_primeiro={pior_primeiro})")
+
+    def test_vizinho_sem_amostra_correspondente_e_ignorado(self):
+        am, pr = self._dados()
+        pr.append({"movel": "CA-1", "ponto": 999, "nome": "ERB-07",
+                   "sinal": -40.0, "snr": 45.0, "custo": 10.0})
+        d = rm.amostras_por_repetidora(am, pr)
+        self.assertNotIn(-40.0, [a["sinal"] for a in d["ERB-07"]])
+
+    def test_kmz_ganha_uma_pasta_por_repetidora(self):
+        import zipfile, io as _io
+        am, pr = self._dados(20)
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"], peers=pr)
+        kml = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertIn("Por repetidora", kml)
+        self.assertIn("ERB-07", kml)
+
+    def test_sem_peers_o_kmz_sai_como_antes(self):
+        # A sondagem por API devolve só o enlace que atendeu; sem a
+        # vizinhança não há o que desenhar, e inventar pasta vazia seria
+        # pior que não ter.
+        import zipfile, io as _io
+        am, _ = self._dados(20)
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        dados, _n = rm.gerar_kml_survey(sv, am, campos=["sinal"])
+        kml = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
+        self.assertNotIn("Por repetidora", kml)
+
+    def test_cada_repetidora_tem_seu_proprio_raster(self):
+        # Todos os rasters se chamariam calor_sinal.png e um
+        # sobrescreveria o outro dentro do zip: sobraria um mapa só,
+        # repetido em todas as pastas.
+        import zipfile, io as _io
+        am = [{"radio": "CA-1", "ts": 100.0 + i, "lat": -18.90 + i * 0.0005,
+               "lon": -43.43, "sinal": -88.0, "banda": "5.8 GHz"}
+              for i in range(20)]
+        pr = []
+        for i in range(1, 21):
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "ERB-07",
+                       "sinal": -60.0, "snr": 30.0, "banda": "5.8 GHz"})
+            pr.append({"movel": "CA-1", "ponto": i, "nome": "ERB-02",
+                       "sinal": -80.0, "snr": 18.0, "banda": "5.8 GHz"})
+        sv = {"nome": "t", "inicio": 100.0, "fim": 120.0}
+        dados, _ = rm.gerar_kml_survey(sv, am, campos=["sinal"], peers=pr)
+        z = zipfile.ZipFile(_io.BytesIO(dados))
+        pngs = [n for n in z.namelist() if "calor_sinal_" in n]
+        self.assertEqual(len(pngs), len(set(pngs)))
+        self.assertGreaterEqual(len(pngs), 2, f"rasters colidiram: {pngs}")
+        # -60 dBm e -80 dBm caem em cores diferentes da escala: se as
+        # imagens saírem iguais, o sufixo voltou a colidir.
+        self.assertNotEqual(z.read(pngs[0]), z.read(pngs[1]))
+
+    def test_planilha_ganha_a_aba(self):
+        import io as _io
+        from openpyxl import load_workbook
+        am, pr = self._dados(12)
+        sv = {"nome": "t", "movel": "CA-1", "inicio": 100.0, "fim": 112.0}
+        # Recurso OPCIONAL desde que o laudo do dia a dia foi enxugado:
+        # sem a chave, as abas de vizinhanca nao entram.
+        import configparser
+        cfg = rm.cfg_relatorio(configparser.ConfigParser())
+        cfg.set("relatorio", "vizinhanca", "true")
+        dados, _ = rm.excel_do_meshmapper(sv, am, pr, cfg)
+        wb = load_workbook(_io.BytesIO(dados))
+        self.assertIn("Por Repetidora", wb.sheetnames)
+        ws = wb["Por Repetidora"]
+        linhas = [r[0] for r in ws.iter_rows(min_row=5, max_col=1,
+                                             values_only=True) if r[0]]
+        self.assertIn("ERB-07", linhas)
+        self.assertNotIn("CA-9", linhas)
+
+
+def _rajant_falsa(frota, t0, latencia=0.0, gps_hz=10.0):
+    """Fábrica de BreadCrumb falso para testar coleta sem rádio.
+
+    `frota`: {ip: (nome, vel_kmh ou None para sem GPS, rumo_graus)}.
+    A posição avança com o tempo real, e `gpsTime` só anda a `gps_hz` —
+    é assim que se reproduz o piso do módulo, que é o que separa
+    "medi aqui" de "medi com a posição de antes".
+    """
+    import math, time as _t
+
+    def _nmea(v, casas):
+        h = ("S" if v < 0 else "N") if casas == 2 else ("W" if v < 0 else "E")
+        v = abs(v); d = int(v)
+        return f"{d:0{casas}d}{(v - d) * 60:07.4f}{h}"
+
+    def _state(ip):
+        nome, vel, rumo = frota[ip]
+        if vel is None:
+            g = ""
+        else:
+            dt = _t.time() - t0[0]
+            d = (vel / 3.6) * dt
+            lat = -18.894 + (d * math.cos(math.radians(rumo))) / 111320.0
+            lon = -43.431 + ((d * math.sin(math.radians(rumo)))
+                             / (111320.0 * math.cos(math.radians(18.9))))
+            gt = 143025.0 + int(dt * gps_hz) / gps_hz
+            g = (f'gps {{\n  gpsSwitch {{\n    enabled: true\n  }}\n'
+                 f'  gpsPos {{\n    gpsTime: {gt}\n'
+                 f'    gpsLat: "{_nmea(lat, 2)}"\n'
+                 f'    gpsLong: "{_nmea(lon, 3)}"\n'
+                 f'    gpsQuality: 1.0\n    gpsSatsInView: 11\n  }}\n'
+                 f'  gpsVel {{\n    gpsSpeedKph: {vel}\n  }}\n}}\n')
+        ps = ""
+        for oip, (on, _v, _r) in frota.items():
+            if oip == ip: continue
+            sig = -60 - (abs(hash(ip + oip)) % 35)
+            ps += (f'  peer {{\n    ipv4Address: "{oip}"\n'
+                   f'    signal: {sig}\n    rssi: {max(5, sig + 100)}\n'
+                   f'    cost: 5000\n    rate: 650\n'
+                   f'    encapId: {90000 + abs(hash(oip)) % 9999}\n  }}\n')
+        return (f'configuration {{\n  saved {{\n    general {{\n'
+                f'      name: "{nome}"\n    }}\n  }}\n}}\n'
+                f'{g}wireless {{\n  name: "wlan0"\n  channel: 157\n'
+                f'  noise: -95\n{ps}}}\n')
+
+    class FakeBC:
+        def __init__(self, host, port=None, role=None, password=None):
+            self.h = host
+        def reachable(self):   return self.h in frota
+        def authenticate(self): return True
+        def get_state(self, *a, **k):
+            # `latencia` pode ser por IP: é assim que se reproduz o rádio
+            # lento, atrás de bancada, no meio de uma frota que responde.
+            lat_ = (latencia.get(self.h, 0.0) if isinstance(latencia, dict)
+                    else latencia)
+            if lat_: _t.sleep(lat_)
+            return _state(self.h)
+    return FakeBC
+
+
+def _carregar_bcapi_real():
+    """A rajant-api DE VERDADE, se instalada, carregada ao lado do stub.
+
+    O resto da suíte roda com o stub do topo deste arquivo (sem rede, sem
+    biblioteca). Os testes do protocolo precisam das mensagens reais —
+    Message_pb2, Common_pb2, State_pb2 — e as trocam de lugar só enquanto
+    rodam. Sem a biblioteca na máquina, são pulados.
+    """
+    import importlib
+    stub = sys.modules.pop('rajant_api', None)
+    try:
+        real = importlib.import_module('rajant_api')
+        for sub in ('Message_pb2', 'Common_pb2', 'State_pb2'):
+            importlib.import_module('rajant_api.' + sub)
+        return real
+    except Exception:
+        for k in [k for k in sys.modules if k.startswith('rajant_api')]:
+            sys.modules.pop(k, None)
+        return None
+    finally:
+        if stub is not None:
+            sys.modules['rajant_api'] = stub
+
+
+_BCAPI_REAL = _carregar_bcapi_real()
+
+
+def _tem_bcapi():
+    return _BCAPI_REAL is not None
+
+
+class _ComBCAPIReal:
+    """Põe a rajant-api real no lugar do stub durante o teste."""
+
+    def setUp(self):
+        self._stub = sys.modules.get('rajant_api')
+        sys.modules['rajant_api'] = _BCAPI_REAL
+        self._modo = dict(rm._BC_MODO)
+        rm._BC_MODO.update({"direto": None, "filtro": None,
+                            "falhas_direto": 0})
+
+    def tearDown(self):
+        sys.modules['rajant_api'] = self._stub
+        rm._BC_MODO.clear(); rm._BC_MODO.update(self._modo)
+
+
+class _RadioBCAPI:
+    """Rádio falso que fala o protocolo REAL da BCAPI.
+
+    Mensagens da própria rajant-api (Message_pb2), cabeçalho de 8 bytes
+    `>ibbbb` e corpo em deflate cru — o enquadramento do código da
+    biblioteca. A resposta sai em PEDAÇOS pequenos, como pelo TLS: é o que
+    quebra o `recv(65535)` único da biblioteca e o que a leitura inteira
+    tem de aguentar.
+
+    `filtro_ok`: entende stateFilterPath no formato "gps". `recusa`: texto
+    do FAILURE ao TRACE. `fragmentos`: em quantas partes vem a saída.
+
+    Por padrão responde ao TRACE como o rádio 10.188.99.4 respondeu em
+    campo: TEXTO do `imtrace` em gzip, sem `compression` nem `content`, e
+    só depois de algumas respostas FAILED/UNAVAILABLE (`prontos_apos`).
+    `formato="proto"` devolve a mensagem `Trace` binária do Common.proto.
+    """
+
+    def __init__(self, nome="CA-1006", peers=3, filtro_ok=True, recusa=None,
+                 fragmentos=2, pedaco=700, custo=17952, salto=17951,
+                 saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
+                 prontos_apos=3, encap=128433, sem_custo=False,
+                 senha="", papel="CO", motivo_recusa="authentication failed",
+                 ocupado=0, mudo_no_login=None, parado=False):
+        self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
+        self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
+        self.custo, self.salto, self.saida = custo, salto, saida
+        # Intervalo entre pedaços: pelo TLS os registros chegam espaçados.
+        # Sem ele, o buffer do socket já tinha a mensagem inteira e um recv
+        # único a pegava — o teste passava até com a leitura da biblioteca.
+        self.atraso = atraso
+        self.formato, self.prontos_apos, self.encap = formato, prontos_apos, encap
+        # Rádio cuja saída não traz caminho com custo (o formato real de
+        # "sem rota" em texto ainda não foi visto em campo).
+        self.sem_custo = sem_custo
+        # Login: o rádio só aceita este papel com esta senha, conferindo o
+        # sha384(senha + desafio) como o firmware.
+        self.senha, self.papel, self.motivo_recusa = senha, papel, motivo_recusa
+        self.logins = []                # (papel pedido, aceito?)
+        # Quantos runTask respondem "task TRACE is already running" antes
+        # de aceitar (-1: sempre) — o texto exato do campo.
+        self.ocupado = ocupado
+        # "desafio": conecta e não manda o desafio. "agente": cala diante de
+        # um login com userAgent (o da biblioteca não manda) — o caso de o
+        # login desta ferramenta ter defeito e o da biblioteca não.
+        self.mudo_no_login = mudo_no_login
+        self.parado = parado            # velocidade 0, posição fixa
+        self.conexoes = []              # o lado do rádio, para ver se fechou
+        self.pedidos = []
+        self._pos = 0
+
+    def conectar(self, login=False):
+        """`login=True`: a conexão começa pelo desafio, como no rádio."""
+        import socket, threading
+        a, b = socket.socketpair()
+        a.settimeout(5)
+        self.conexoes.append(b)
+        threading.Thread(target=self._servir, args=(b, login),
+                         daemon=True).start()
+        return a
+
+    def _login(self, sock):
+        """Desafio → resposta → authResult. False: recusado; None: calado."""
+        import os as _os, hashlib, struct, zlib
+        from rajant_api import Message_pb2, Common_pb2
+        if self.mudo_no_login == "desafio":
+            return None
+        desafio = _os.urandom(32)
+        ini = Message_pb2.BCMessage(); ini.sequenceNumber = 0
+        ini.auth.action = ini.auth.LOGIN
+        ini.auth.challengeOrResponse = desafio
+        ini.auth.serial = "ME4-2450R-96692"      # string, como o do campo
+        self._enviar(sock, ini)
+        cab = rm._bc_ler_exato(sock, 8)
+        n, flag = struct.unpack(">ibbbb", cab)[:2]
+        corpo = rm._bc_ler_exato(sock, n)
+        if flag == 2:
+            corpo = zlib.decompress(corpo, -15)
+        m = Message_pb2.BCMessage(); m.ParseFromString(corpo)
+        if self.mudo_no_login == "agente" and m.auth.userAgent:
+            return None
+        certo = hashlib.sha384(
+            (self.senha + desafio.decode("latin1")).encode("latin1")).digest()
+        ok = (m.auth.role == Common_pb2.Role.Value(self.papel)
+              and m.auth.challengeOrResponse == certo)
+        self.logins.append((Common_pb2.Role.Name(m.auth.role), ok))
+        self.cliente = m.auth.userAgent
+        r = Message_pb2.BCMessage(); r.sequenceNumber = m.sequenceNumber
+        r.authResult.status = (r.authResult.SUCCESS if ok
+                               else r.authResult.FAILURE)
+        if not ok and self.motivo_recusa:
+            r.authResult.description = self.motivo_recusa
+        self._enviar(sock, r)
+        return ok
+
+    def estado(self):
+        from rajant_api import State_pb2
+        st = State_pb2.State()
+        st.system.uptime = 1000.0
+        # A tarefa do rádio e as sessões abertas, como no teste de campo
+        # de 10.188.99.9: um TRACE de outra sessão, ainda rodando.
+        t = st.task
+        t.command.action = t.command.TRACE
+        t.command.arguments = "10.188.96.11"
+        t.startTime = "2026-09-26 11:59:18"
+        t.status.state = t.status.RUNNING
+        t.status.id = 3649279092588551
+        t.status.adminSessionID = 0x88b00000dba
+        for sid, idade in ((0x88b00000dba, 17), (0xcf700000202, 2)):
+            a = st.adminSessions.add()
+            a.sessionID, a.address, a.port, a.age = (
+                sid, "10.188.111.248", 52797, idade)
+        st.configuration.saved.general.name = self.nome
+        g = st.gps
+        g.gpsSwitch.enabled = True
+        g.gpsPos.gpsTime = 143025.0 + self._pos
+        g.gpsPos.gpsLat = "1853.6443S"
+        g.gpsPos.gpsLong = "04325.8538W"
+        g.gpsVel.gpsSpeedKph = 0.0 if self.parado else 40.0
+        w = st.wireless.add()
+        w.name, w.channel, w.noise = "wlan0", 157, -95
+        for k in range(self.n_peers):
+            p = w.peer.add()
+            p.mac = bytes([0x84, 0x8d, 0x84, 0x41, k // 256, k % 256])
+            p.ipv4Address = f"10.0.{k // 250}.{k % 250}"
+            p.signal, p.rssi, p.cost = -60 - (k % 30), 30 - (k % 20), 5000 + k
+            p.encapId = 90000 + k
+        return st
+
+    def _trace(self):
+        from rajant_api import Common_pb2
+        t = Common_pb2.Trace()
+        t.host = "10.188.96.11"
+        pa = t.path
+        pa.type = pa.WIRELESS_PEER
+        pa.name, pa.mac = self.saida, bytes.fromhex("848d8441a60d")
+        pa.encapid = self.encap
+        pa.cost, pa.hopCost = self.custo, self.salto
+        pa.signal, pa.rssi, pa.rate = -89, 20, 65
+        pa.channel, pa.freq = 157, 5785
+        return t
+
+    def _texto_imtrace(self):
+        # A linha exata do campo, com os números deste rádio falso.
+        if self.sem_custo:
+            return ("Target IP(s):  10.188.96.11(396)\n"
+                    "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)): "
+                    "no route\x00").encode()
+        return ("Target IP(s):  10.188.96.11(396)\n"
+                "Target MAC(s): 00:00:0C:9F:F1:8C \n"
+                "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)):"
+                f"peer=84:8D:84:41:A6:0D/wlan0wds33/{self.encap} "
+                f"cost={self.custo} hop cost={self.salto} channel=157 "
+                "display channel=157 freq=5785 signal=-89 rssi=20 "
+                "rate=65\x00").encode()
+
+    def _enviar(self, sock, msg):
+        import struct, zlib
+        dados = msg.SerializeToString()
+        c = zlib.compressobj(wbits=-15)
+        dados = c.compress(dados) + c.flush()
+        pacote = struct.pack(">ibbbb", len(dados), 2, 0, 0, 0) + dados
+        import time as _t
+        for i in range(0, len(pacote), self.pedaco):
+            sock.sendall(pacote[i:i + self.pedaco])
+            if self.atraso:
+                _t.sleep(self.atraso)
+
+    def _servir(self, sock, login=False):
+        import struct, zlib, gzip
+        from rajant_api import Message_pb2
+        if login:
+            try:
+                ok = self._login(sock)
+            except Exception:
+                return
+            if ok is None:
+                return                  # calado, com a conexão aberta
+            if not ok:
+                sock.close(); return
+        saida = gzip.compress(self._texto_imtrace() if self.formato == "texto"
+                              else self._trace().SerializeToString())
+        pedidos_saida = [0]
+        tam = max(1, -(-len(saida) // self.fragmentos))
+        partes = [saida[i:i + tam] for i in range(0, len(saida), tam)]
+        while True:
+            try:
+                cab = rm._bc_ler_exato(sock, 8)
+                n, flag = struct.unpack(">ibbbb", cab)[:2]
+                corpo = rm._bc_ler_exato(sock, n)
+            except Exception:
+                return
+            if flag == 2:
+                corpo = zlib.decompress(corpo, -15)
+            m = Message_pb2.BCMessage(); m.ParseFromString(corpo)
+            self.pedidos.append(m)
+            r = Message_pb2.BCMessage(); r.sequenceNumber = m.sequenceNumber
+            if m.HasField("state"):
+                st = self.estado(); self._pos += 1
+                if m.stateFilterPath:
+                    pedidos = set(m.stateFilterPath)
+                    for f, _v in list(st.ListFields()):
+                        if not self.filtro_ok or f.name not in pedidos:
+                            st.ClearField(f.name)
+                r.state.CopyFrom(st)
+            elif m.HasField("runTask"):
+                pedidos_saida[0] = 0          # cada trace monta a saída de novo
+                if self.ocupado:
+                    if self.ocupado > 0:
+                        self.ocupado -= 1
+                    r.runTaskResult.status = r.runTaskResult.FAILURE
+                    r.runTaskResult.description = (
+                        "Cannot run new task TRACE from session[cf700000202,"
+                        "::FFFF:10.188.111.248:52916,41,2s]: task TRACE is "
+                        "already running")
+                    r.runTaskResult.id = 3649279092588551
+                elif self.recusa:
+                    r.runTaskResult.status = r.runTaskResult.FAILURE
+                    r.runTaskResult.description = self.recusa
+                else:
+                    r.runTaskResult.status = r.runTaskResult.SUCCESS
+                    r.runTaskResult.id = 7
+            elif m.HasField("taskOutputRequest"):
+                o = r.taskOutputResponse
+                pedidos_saida[0] += 1
+                if pedidos_saida[0] <= self.prontos_apos:
+                    # Em campo: FAILED e depois UNAVAILABLE enquanto o rádio
+                    # monta a saída.
+                    o.status = (o.FAILED if pedidos_saida[0] == 1
+                                else o.UNAVAILABLE)
+                    self._enviar(sock, r)
+                    continue
+                i = m.taskOutputRequest.position // tam
+                o.data = partes[i]
+                if self.formato == "texto":
+                    o.output.totalSize = len(saida)   # e só isso, como em campo
+                else:
+                    o.output.compression = o.output.GZIP
+                    o.output.content = o.output.PROTO
+                if i + 1 < len(partes):
+                    o.status = o.FRAGMENT
+                    o.position = (i + 1) * tam
+                else:
+                    o.status = o.SUCCESS
+            self._enviar(sock, r)
+
+
+def _bc_de_teste(radio):
+    """Um Breadcrumb DA BIBLIOTECA, ligado ao rádio falso."""
+    from rajant_api import Breadcrumb
+    bc = Breadcrumb(host="10.0.0.1", port=2300, role="co", password="x")
+    bc.connection = radio.conectar()
+    bc.authenticated = True
+    return bc
+
+
+@unittest.skipUnless(_tem_bcapi(), "rajant-api/protobuf ausentes")
+class TestBCAPIDireto(_ComBCAPIReal, unittest.TestCase):
+    """Leitura inteira, filtro de caminho e TRACE, contra o protocolo real."""
+
+    def test_le_a_mensagem_inteira_mesmo_chegando_em_pedacos(self):
+        # 400 vizinhos passam de 16 KB: pelo TLS chegam em vários registros,
+        # e o recv(65535) único da biblioteca pegaria só o primeiro.
+        radio = _RadioBCAPI(peers=400, pedaco=500, atraso=0.003)
+        bc = _bc_de_teste(radio)
+        st = rm.bc_state(bc)
+        self.assertEqual(len(st.wireless[0].peer), 400)
+        self.assertGreater(bc._ultimo_tamanho[1], 16384)
+
+    def test_filtro_pede_so_os_ramos_do_survey(self):
+        radio = _RadioBCAPI()
+        st = rm.estado_da_sessao(_bc_de_teste(radio))
+        self.assertEqual(list(radio.pedidos[-1].stateFilterPath),
+                         list(rm.CAMINHOS_ESTADO))
+        self.assertFalse(st.HasField("configuration"))
+        self.assertTrue(st.HasField("gps"))
+        self.assertIs(rm._BC_MODO["filtro"], True)
+
+    def test_filtro_nao_entendido_volta_ao_state_inteiro(self):
+        # Formato de caminho que o rádio não reconhece: nada volta. A
+        # leitura não pode sair vazia — pede o State inteiro, e para de
+        # tentar o filtro.
+        radio = _RadioBCAPI(filtro_ok=False)
+        bc = _bc_de_teste(radio)
+        st = rm.estado_da_sessao(bc)
+        self.assertTrue(st.HasField("gps"))
+        self.assertIs(rm._BC_MODO["filtro"], False)
+        rm.estado_da_sessao(bc)
+        self.assertFalse(radio.pedidos[-1].stateFilterPath)
+
+    def test_trace_em_fragmentos_comprimidos(self):
+        # Como em campo: saída em texto do imtrace, gzip, pronta só depois
+        # de FAILED e UNAVAILABLE — e aqui ainda partida em 3 fragmentos.
+        radio = _RadioBCAPI(fragmentos=3)
+        t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertEqual(t["custo_caminho"], 17952)
+        self.assertEqual(t["custo_saida"], 17951)
+        self.assertEqual((t["saida"], t["encap"]), ("wlan0wds33", 128433))
+        self.assertEqual((t["sinal"], t["snr"], t["freq"]), (-89, 20, 5785))
+        self.assertEqual(t["tipo"], "WIRELESS_PEER")
+        pedidos = [m.taskOutputRequest.position for m in radio.pedidos
+                   if m.HasField("taskOutputRequest")]
+        self.assertEqual(len(pedidos), 3 + 3)   # 3 "ainda não" + 3 pedaços
+
+    def test_trace_em_mensagem_binaria_tambem_serve(self):
+        # O Common.proto declara a mensagem Trace; firmware que a devolva
+        # em vez do texto tem de dar o mesmo resultado.
+        radio = _RadioBCAPI(formato="proto")
+        t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertEqual((t["custo_caminho"], t["custo_saida"], t["encap"]),
+                         (17952, 17951, 128433))
+        self.assertEqual(t["saida"], "ERM-08 PTP CAM")
+
+    def test_saida_real_do_campo(self):
+        # Os bytes EXATOS que o rádio 10.188.99.4 devolveu em 26/09/2026.
+        import base64
+        b = base64.b64decode(
+            "H4sIAAAAAAAAA22MywqDMBREu/Yr7lIX1TyMxgtZFIvQRaELfyBoqoJVmwSkf9+H"
+            "m0ILw8DMHKbWtjMeTpfQRQhASUyljIsspjTkRRYF9QacD+WHIATfKrGosKIoSwiG"
+            "m7e6MeDnP2v48xjhYoxVMkV5xJdXBCXDXCTrqCeytk6QhDKZcg7N7LwqGBPQz8uW"
+            "Mi4YNL2eJjOqDNrBLaN+fDVXa+6KpTwHN3STHtU+ZWCdG5TgYLU3SshY7J6IMPIm"
+            "+AAAAA==")
+        t = rm.trace_de_bytes(b)
+        self.assertEqual(t["destino"], "10.188.96.11")
+        self.assertEqual((t["custo_caminho"], t["custo_saida"]), (9225, 6352))
+        self.assertEqual((t["saida"], t["encap"], t["mac"]),
+                         ("wlan0wds50", 128433, "84:8d:84:f0:82:75"))
+        self.assertEqual((t["canal"], t["freq"]), (6, 2437))
+        self.assertEqual((t["sinal"], t["snr"], t["taxa"]), (-42, 53, 58.5))
+
+    def test_hop_cost_e_display_channel_nao_se_confundem(self):
+        # "hop cost=" contém "cost=" e "display channel=" contém "channel=".
+        t = rm.trace_de_texto("imtrace to x (1.1.1.1):peer=a/wlan1/5 "
+                              "hop cost=100 cost=900 display channel=11 "
+                              "channel=6 freq=2437 signal=-70 rssi=25 rate=6.5")
+        self.assertEqual((t["custo_caminho"], t["custo_saida"]), (900, 100))
+        self.assertEqual(t["canal"], 6)
+
+    def test_texto_sem_custo_nao_vira_numero(self):
+        # O "sem rota" em texto não foi visto em campo. Sem custo na linha,
+        # não há medição — nunca um zero nem um sem-rota inventado.
+        self.assertIsNone(rm.trace_de_texto(
+            "Target IP(s):  10.188.96.11\nimtrace to ?: no route\x00"))
+        self.assertIsNone(rm.trace_de_texto("qualquer outra coisa"))
+
+    def test_custo_maximo_e_sem_rota_em_int32_e_uint32(self):
+        for v in (2147483647, 4294967295):
+            t = rm.trace_de_texto(f"imtrace to x (1.1.1.1):peer=a/wlan0/1 "
+                                  f"cost={v} hop cost={v}")
+            self.assertEqual(t["custo_caminho"], rm.CUSTO_SEM_ROTA)
+            self.assertIsNone(t["custo_saida"])
+
+    def test_trace_recusado_diz_por_que(self):
+        radio = _RadioBCAPI(recusa="permission denied for role co")
+        with self.assertRaises(rm.TraceIndisponivel) as c:
+            rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertIn("permission denied", str(c.exception))
+
+    def test_so_a_tarefa_trace_e_enviada(self):
+        # A mesma mensagem pede REBOOT, ZEROIZE, CLEAR, KICK. A ação é
+        # constante no código, nunca parâmetro.
+        radio = _RadioBCAPI()
+        rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        acoes = [m.runTask.action for m in radio.pedidos if m.HasField("runTask")]
+        from rajant_api import Common_pb2
+        self.assertEqual(acoes, [Common_pb2.TaskCommand.TRACE])
+        fonte = inspect.getsource(rm.bc_trace).split('"""', 2)[2]
+        for perigosa in ("REBOOT", "ZEROIZE", "CLEAR", "KICK", "INSTALL",
+                         "SNAPSHOT"):
+            self.assertNotIn(perigosa, fonte)
+
+    def test_sessao_nao_conta_resposta_vazia_como_sucesso(self):
+        # get_state() da biblioteca devolve False em vez de levantar; contar
+        # isso como sucesso zerava as falhas e o rádio mudo nunca saía.
+        class Mudo:
+            def __init__(s, host=None, port=None, role=None, password=None): pass
+            def reachable(s): return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return False
+        orig = rm.Breadcrumb
+        rm.Breadcrumb = Mudo
+        try:
+            ses = rm.SessaoRadio("10.0.0.9", porta=2300, role="co", senha="")
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    ses.estado_bruto()
+            self.assertTrue(ses.desistiu)
+        finally:
+            rm.Breadcrumb = orig
+
+
+@unittest.skipUnless(_tem_bcapi(), "rajant-api/protobuf ausentes")
+class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
+    """A coleta ao vivo com o enlace de SAÍDA real, como o MeshMapper."""
+
+    def setUp(self):
+        super().setUp()
+        import coleta_rajant as col
+        from rajant_api import Breadcrumb
+        self.col = col
+        self._orig = rm.Breadcrumb
+        radios = self.radios = {}
+
+        # Só a rede é trocada: o login é o da biblioteca, pelo
+        # rm.autenticar, contra o desafio do rádio falso.
+        class BCFalso(Breadcrumb):
+            def reachable(s): return True
+            def setup_connection_socket(s):
+                s.connection = radios[s.host].conectar(login=True)
+        rm.Breadcrumb = BCFalso
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+        super().tearDown()
+
+    def _rodar(self, radio, segundos=2.0, **kw):
+        return self._rodar_varios({"10.0.0.6": ("CA-1006", radio)},
+                                  segundos, **kw)
+
+    def _rodar_varios(self, frota, segundos=2.0, **kw):
+        """frota: {ip: (nome, _RadioBCAPI)} — lidos ao mesmo tempo, como
+        os 48 trabalhadores fazem na mina."""
+        import time as _t, threading as _th
+        for ip, (_n, r) in frota.items():
+            self.radios[ip] = r
+        avisos = []
+        c = self.col.Coleta({ip: n for ip, (n, _r) in frota.items()},
+                            passo_m=1.0, aviso=avisos.append, **kw)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(segundos); c.parar(); th.join(15)
+        return c, avisos
+
+    def test_amostra_leva_o_enlace_de_saida_e_o_custo_do_caminho(self):
+        # O trace diz a saída por MAC/interface/encap; o nome vem do serial
+        # que a descoberta leu (encap = sufixo do serial).
+        malha = {"10.188.97.80": {"nome": "ERM-08 PTP CAM", "serial": 128433}}
+        c, _ = self._rodar(_RadioBCAPI(), malha=malha)
+        self.assertTrue(c.amostras)
+        a = c.amostras[0]
+        self.assertEqual(a["custo_caminho"], 17952)
+        self.assertEqual(a["custo"], 17951)           # o do enlace de saída
+        self.assertEqual(a["servidor"], "ERM-08 PTP CAM")
+        self.assertEqual((a["sinal"], a["snr"]), (-89, 20))
+        self.assertEqual(a["banda"], "5.8 GHz")
+        # A leitura enxuta não traz `configuration`: o nome é o da
+        # descoberta, não o IP que o parser devolveria.
+        self.assertEqual(a["radio"], "CA-1006")
+        self.assertGreater(c.trace_ok, 0)
+
+    def test_saida_sem_nome_conhecido_fica_com_a_interface(self):
+        # Como o MeshMapper grava (path.name = "wlan0wds33").
+        c, _ = self._rodar(_RadioBCAPI())
+        self.assertEqual(c.amostras[0]["servidor"], "wlan0wds33")
+
+    def test_sem_rota_chega_como_sem_rota(self):
+        c, _ = self._rodar(_RadioBCAPI(custo=2147483647))
+        self.assertTrue(rm.sem_rota(c.amostras[0]["custo_caminho"],
+                                    "custo_caminho"))
+
+    def test_recusa_tira_so_aquele_radio_do_trace(self):
+        c, avisos = self._rodar(_RadioBCAPI(recusa="permission denied"))
+        self.assertTrue(c.amostras, "a recusa do trace parou a coleta")
+        self.assertIsNone(c.amostras[-1]["custo_caminho"])
+        self.assertIn("permission denied", c.trace_sem["10.0.0.6"])
+        self.assertIsNone(c.trace_parado)       # um rádio só não desliga tudo
+        # Uma vez durante a coleta (o resumo do fim repete, de propósito).
+        self.assertEqual(len([l for l in avisos
+                              if l.startswith("trace em")
+                              and "permission denied" in l]), 1)
+        self.assertEqual(len([l for l in avisos if "sem trace nesta" in l]), 1)
+        self.assertTrue([l for l in avisos if l.strip() == "1x  permission denied"])
+        # Recusou uma vez: não se pede mais trace àquele rádio.
+        pedidos = [m for m in self.radios["10.0.0.6"].pedidos
+                   if m.HasField("runTask")]
+        self.assertEqual(len(pedidos), 1)
+
+    def test_um_radio_sem_caminho_nao_desliga_o_trace_dos_outros(self):
+        # O "trace desligado" da primeira coleta com trace: a primeira falha
+        # de qualquer rádio, antes de algum sucesso, desligava de todos.
+        # O rádio bom demora mais a responder: a falha chega ANTES de
+        # qualquer sucesso, como no campo.
+        c, avisos = self._rodar_varios({
+            "10.0.0.6": ("CA-1006", _RadioBCAPI(prontos_apos=12)),
+            "10.0.0.7": ("CA-1007", _RadioBCAPI(sem_custo=True))},
+            segundos=6.0)
+        self.assertIsNone(c.trace_parado)
+        bons = [a for a in c.amostras if a["radio"] == "CA-1006"]
+        self.assertTrue(bons and all(a["custo_caminho"] == 17952 for a in bons))
+        self.assertIn("10.0.0.7", c.trace_sem)
+        self.assertIn("no route", c.trace_sem["10.0.0.7"])
+        # O que o rádio disse aparece na tela, para aprender o formato.
+        self.assertTrue([l for l in avisos if "no route" in l])
+
+    def test_coleta_toda_so_desliga_quando_nenhum_consegue(self):
+        frota = {f"10.0.0.{10 + k}": (f"CA-{k}", _RadioBCAPI(recusa="negado"))
+                 for k in range(5)}
+        c, avisos = self._rodar_varios(frota, segundos=3.0)
+        self.assertIsNotNone(c.trace_parado)
+        self.assertEqual(len([l for l in avisos if "trace desligado" in l]), 1)
+        self.assertTrue(c.amostras)
+
+    def test_desligado_na_tela_nao_pede_trace(self):
+        radio = _RadioBCAPI()
+        c, _ = self._rodar(radio, trace_destino=None)
+        self.assertTrue(c.amostras)
+        self.assertFalse([m for m in radio.pedidos if m.HasField("runTask")])
+
+    def test_radio_parado_fica_com_uma_leitura_e_sem_trace_repetido(self):
+        radio = _RadioBCAPI(parado=True)
+        # Parado é relido a cada `parado_s`; 1 s para caber no teste.
+        c, _ = self._rodar(radio, segundos=4.0, parado_s=1.0)
+        self.assertEqual(len(c.amostras), 1)
+        self.assertGreater(c.n_parados, 0)
+        self.assertEqual(c.status()["parados"], c.n_parados)
+        traces = [m for m in radio.pedidos if m.HasField("runTask")]
+        self.assertEqual(len(traces), 1)     # o parado não ocupa a tarefa
+
+    def test_trace_ocupado_nao_tira_o_radio_e_volta_na_leitura_seguinte(self):
+        # Campo, 26/09/2026: "task TRACE is already running" em EH-6001,
+        # CA-1013, CA-1020 e EH-6102, e a v17 tirava cada um do trace na
+        # primeira vez.
+        c, avisos = self._rodar(_RadioBCAPI(ocupado=3), segundos=6.0)
+        self.assertNotIn("10.0.0.6", c.trace_sem)
+        self.assertIsNone(c.trace_parado)
+        self.assertEqual(c.trace_ocupado, 3)
+        self.assertGreater(c.trace_ok, 0)
+        self.assertEqual(c.amostras[-1]["custo_caminho"], 17952)
+        self.assertEqual(len([l for l in avisos if "trace ocupado" in l]), 1)
+        # Motivos agrupados sem a sessão, que muda a cada vez.
+        self.assertEqual(
+            c.trace_motivos,
+            {"Cannot run new task TRACE: task TRACE is already running": 3})
+
+    def test_trace_sempre_ocupado_avisa_uma_vez_e_segue_tentando(self):
+        with mock.patch.object(self.col.Coleta, "OCUPADO_SEGUIDAS", 3):
+            c, avisos = self._rodar(_RadioBCAPI(ocupado=-1), segundos=5.0)
+        self.assertNotIn("10.0.0.6", c.trace_sem)
+        self.assertGreater(c.trace_ocupado, 3)          # seguiu tentando
+        self.assertEqual(len([l for l in avisos if "o tempo todo" in l]), 1)
+        self.assertTrue(c.amostras)
+
+    def test_login_aceita_co_minusculo(self):
+        # A rajant-api só conhece "CO": com "co" o authenticate() dela dava
+        # KeyError, engolido, e a tela dizia "autenticacao falhou" nos 156.
+        radio = _RadioBCAPI(senha="segredo")
+        c, _ = self._rodar(radio, role="co", senha="segredo")
+        self.assertTrue(c.amostras)
+        self.assertEqual(radio.logins[0], ("CO", True))
+        self.assertEqual(radio.cliente, "site_survey")   # visível no rádio
+
+    def test_senha_errada_diz_o_que_o_radio_respondeu(self):
+        self.radios["10.0.0.6"] = _RadioBCAPI(senha="certa")
+        ses = rm.SessaoRadio("10.0.0.6", 2300, "CO", "errada ")
+        with self.assertRaises(PermissionError) as cm:
+            ses.estado_bruto()
+        msg = str(cm.exception)
+        self.assertIn("authentication failed", msg)
+        self.assertIn("confira usuário e senha", msg)
+        self.assertIn("espaço no começo ou no fim", msg)
+
+    def test_login_sem_resposta_diz_em_que_etapa_parou(self):
+        # O arquivo de campo de 10.188.99.5 dizia só "sem resposta do rádio
+        # no login": não dava para separar rede de login.
+        self.radios["10.0.0.6"] = _RadioBCAPI(mudo_no_login="desafio")
+        bc = rm.Breadcrumb(host="10.0.0.6", port=2300, role="CO", password="")
+        etapas = []
+        with self.assertRaises(TimeoutError) as cm:
+            rm.autenticar(bc, etapas=etapas, prazo_s=0.3, reserva=False)
+        self.assertIn("conectou, mas o rádio não mandou o desafio", str(cm.exception))
+        self.assertEqual([n for n, _ in etapas], ["conexão TLS", "parou: desafio"])
+
+    def test_se_o_login_daqui_falha_o_da_biblioteca_entra(self):
+        radio = _RadioBCAPI(mudo_no_login="agente")
+        self.radios["10.0.0.6"] = radio
+        bc = rm.Breadcrumb(host="10.0.0.6", port=2300, role="co", password="")
+        etapas = []
+        self.assertTrue(rm.autenticar(bc, etapas=etapas, prazo_s=0.3))
+        self.assertIn("authenticate() da biblioteca: entrou", [n for n, _ in etapas])
+        self.assertEqual(radio.logins, [("CO", True)])
+        # A sessão que entrou pela reserva lê normalmente.
+        self.assertEqual(rm.bc_state(bc, ["gps"]).configuration.saved.general.name, "")
+        self.assertTrue(rm.bc_state(bc, None).configuration.saved.general.name)
+
+    def test_conexao_da_biblioteca_usa_o_prazo_daqui(self):
+        # A biblioteca conecta com 2 s fixos, aperto de mão TLS incluído.
+        import rajant_api
+        visto = {}
+        class Conn:
+            def __init__(s, soc): visto["prazo"] = soc.gettimeout(); s.soc = soc
+            def connect(s, end): visto["end"] = end
+            def settimeout(s, t): visto["depois"] = t
+        with mock.patch.object(rajant_api, "wrap_socket", Conn):
+            bc = rajant_api.Breadcrumb(host="10.9.9.9", port=2300, role="CO",
+                                       password="")
+            rm._conectar(bc, 5.0)
+            bc.connection.soc.close()
+        self.assertEqual(visto, {"prazo": 5.0, "end": ("10.9.9.9", 2300),
+                                 "depois": 5.0})
+
+    def test_usuario_que_nao_existe_e_dito_antes_de_ir_a_rede(self):
+        self.assertEqual(rm.conferir_papel(" co "), "CO")
+        with self.assertRaises(ValueError) as cm:
+            rm.conferir_papel("operador")
+        self.assertIn("VIEW", str(cm.exception))
+        self.assertIn("CO", str(cm.exception))
+
+    def test_sessao_derrubada_fecha_o_socket(self):
+        # A Breadcrumb não tem close(): soltar a referência deixava a sessão
+        # aberta no rádio, com o TRACE dela ocupando a tarefa.
+        radio = _RadioBCAPI()
+        self.radios["10.0.0.6"] = radio
+        ses = rm.SessaoRadio("10.0.0.6", 2300, "CO", "")
+        ses.estado_bruto()
+        lado_do_radio = radio.conexoes[-1]
+        # Referência viva ao socket, como a de uma leitura que ainda o usa:
+        # sem ela, o coletor de lixo fechava o socket e o teste não via a
+        # diferença.
+        nosso_lado = ses.bc.connection
+        ses.fechar()
+        lado_do_radio.settimeout(2)
+        self.assertEqual(lado_do_radio.recv(1), b"")   # o outro lado fechou
+        self.assertIsNotNone(nosso_lado)
+
+    def test_descreve_a_tarefa_e_a_sessao_dona(self):
+        txt = rm.descrever_tarefa(_RadioBCAPI().estado())
+        self.assertIn("TRACE 10.188.96.11", txt)
+        self.assertIn("RUNNING", txt)
+        self.assertIn("88b00000dba: 10.188.111.248:52797  17 s", txt)
+        self.assertEqual(txt.count("dona da tarefa"), 1)
+
+    def test_diagnostico_espera_o_trace_ocupado(self):
+        import tempfile
+        self.radios["10.0.0.6"] = _RadioBCAPI(ocupado=2)
+        alvo = self.col.testar_trace("10.0.0.6", "10.188.96.11",
+                                     pasta=tempfile.mkdtemp(),
+                                     aviso=lambda t: None)
+        txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("TRACE ocupado", txt)
+        self.assertIn("dona da tarefa", txt)
+        self.assertIn("RESULTADO DO TRACE\nOK", txt)
+        self.assertIn("depois de 2 tentativa(s)", txt)
+
+    def test_diagnostico_de_campo_grava_o_que_o_radio_respondeu(self):
+        import tempfile
+        self.radios["10.0.0.6"] = _RadioBCAPI()
+        pasta = tempfile.mkdtemp()
+        alvo = self.col.testar_trace("10.0.0.6", "10.188.96.11",
+                                     pasta=pasta, aviso=lambda t: None)
+        txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("── ping\nresponde", txt)
+        self.assertIn("autenticação\nok", txt)
+        for etapa in ("conexão TLS", "desafio recebido", "resultado recebido"):
+            self.assertIn(etapa, txt)
+        self.assertIn("filtro 'gps'", txt)
+        self.assertIn("RESULTADO DO TRACE\nOK", txt)
+        self.assertIn("custo_caminho: 17952", txt)
+        self.assertIn("saída (base64)", txt)
+
+
+class TestDescobrirMalha(unittest.TestCase):
+    """Descoberta sem o peso do coletor: sem métrica, sem cache, sem
+    filtro de tag. O app de coleta precisa ver TUDO que responde para o
+    usuário decidir."""
+
+    FROTA = {"10.0.0.1": ("ERB-07", 0.0, 0.0),
+             "10.0.0.2": ("CA-1006", 40.0, 0.0),
+             "10.0.0.3": ("PCP-002", None, 0.0)}   # sem GPS
+
+    def setUp(self):
+        import time as _t
+        self._orig = rm.Breadcrumb
+        rm.Breadcrumb = _rajant_falsa(self.FROTA, [_t.time()])
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    # `incluir_conhecidos=False` nestes: aqui se testa a MECÂNICA de
+    # seguir peers. A lista embutida da mina real entraria junto e
+    # afogaria a malha de três rádios do teste.
+    def test_segue_os_peers_a_partir_do_seed(self):
+        r = rm.descobrir_malha(["10.0.0.1"], incluir_conhecidos=False)
+        self.assertEqual(set(r), set(self.FROTA))
+
+    def test_marca_quem_nao_tem_gps(self):
+        # Quem não sabe onde está não vai para o mapa. Dizer isso na
+        # lista evita o usuário marcar e descobrir no fim que não saiu
+        # ponto nenhum.
+        r = rm.descobrir_malha(["10.0.0.1"], incluir_conhecidos=False)
+        self.assertFalse(r["10.0.0.3"]["tem_gps"])
+        self.assertTrue(r["10.0.0.2"]["tem_gps"])
+
+    def test_radio_que_nao_responde_entra_com_o_motivo(self):
+        r = rm.descobrir_malha(["10.9.9.9"], incluir_conhecidos=False)
+        self.assertIn("10.9.9.9", r)
+        self.assertTrue(r["10.9.9.9"]["erro"])
+
+    def test_sem_seguir_peers_fica_so_no_seed(self):
+        r = rm.descobrir_malha(["10.0.0.1"], seguir_peers=False,
+                               incluir_conhecidos=False)
+        self.assertEqual(set(r), {"10.0.0.1"})
+
+    def test_limite_impede_varredura_sem_fim(self):
+        r = rm.descobrir_malha(["10.0.0.1"], limite=2,
+                               incluir_conhecidos=False)
+        self.assertLessEqual(len(r), 2)
+
+
+class TestMalhaConhecida(unittest.TestCase):
+    """Partir de um seed só não basta.
+
+    `ipv4Address` é OPCIONAL no State.Peer. Um rádio cujos vizinhos só
+    trazem MAC não leva a busca a lugar nenhum — em campo, partindo do
+    10.188.96.140, a descoberta achou UM equipamento numa malha de 150.
+    Por isso cada rádio conhecido é um ponto de partida próprio.
+    """
+
+    # Vizinho SEM ipv4Address: reproduz o caso real.
+    ST = ('configuration {\n  saved {\n    general {\n      name: "%s"\n'
+          '    }\n  }\n}\nwireless {\n  name: "wlan0"\n  channel: 157\n'
+          '  peer {\n    mac: "aa:bb"\n    signal: -70\n    rssi: 25\n  }\n}\n')
+
+    def setUp(self):
+        self._orig = rm.Breadcrumb
+        vivos = dict(list(rm.REDE_CONHECIDA.items())[:5])
+        st = self.ST
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None):
+                s.h = host
+            def reachable(s):    return s.h in vivos
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return st % (vivos[s.h] or s.h)
+        rm.Breadcrumb = F
+        self.vivos = vivos
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def test_a_lista_embutida_tem_a_frota(self):
+        self.assertGreater(len(rm.REDE_CONHECIDA), 100)
+        nomes = [v for v in rm.REDE_CONHECIDA.values() if v]
+        self.assertTrue(any(n.startswith("ERB") for n in nomes))
+        self.assertTrue(any(n.startswith("CA-") for n in nomes))
+
+    def test_seed_sozinho_com_vizinho_sem_ip_nao_expande(self):
+        # A regressão de campo, reproduzida: sem a lista, acha um só.
+        um = next(iter(self.vivos))
+        r = rm.descobrir_malha([um], incluir_conhecidos=False)
+        self.assertEqual(len(r), 1)
+
+    def test_com_a_lista_embutida_acha_todos_os_que_respondem(self):
+        r = rm.descobrir_malha([], incluir_conhecidos=True)
+        resp = {v["nome"] for v in r.values() if not v["erro"]}
+        self.assertEqual(len(resp), len(self.vivos))
+
+    def test_quem_nao_responde_aparece_com_nome_e_motivo(self):
+        # Uma tela com dezenas de linhas de IP cru não diz quais
+        # equipamentos estão fora.
+        r = rm.descobrir_malha([], incluir_conhecidos=True)
+        fora = [v for v in r.values() if v["erro"]]
+        self.assertTrue(fora)
+        com_nome = [v for v in fora if v["nome"] != v["ip"]]
+        self.assertTrue(com_nome, "radio fora do ar perdeu o nome conhecido")
+        self.assertTrue(all(v["erro"] for v in fora))
+
+    def test_conta_vizinhos_com_e_sem_ip_separado(self):
+        # "achei só o seed" e "achei vizinhos mas nenhum tinha IP" sao
+        # problemas diferentes; sem separar, viram o mesmo sintoma.
+        um = next(iter(self.vivos))
+        r = rm.descobrir_malha([um], incluir_conhecidos=False)
+        v = r[um]
+        self.assertEqual(v["vizinhos"], 1)
+        self.assertEqual(v["vizinhos_com_ip"], 0)
+        self.assertGreater(v["bytes_state"], 0)
+
+    def test_sem_partida_nenhuma_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            rm.descobrir_malha([], incluir_conhecidos=False)
+
+
+class TestGetStateDevolveObjeto(unittest.TestCase):
+    """`bc.get_state()` devolve o OBJETO State, não texto.
+
+    Quem converte é o `parse_state`, com `str()`. Medir o tamanho do
+    retorno antes disso estourou em campo com
+
+        TypeError: object of type 'State' has no len()
+
+    e a exceção matou as 156 threads de uma vez: a tela ficou vazia e o
+    traceback saiu no console, que quem usa a janela não vê.
+    """
+
+    class FakeState:
+        """Objeto sem __len__, como o State do protobuf."""
+        def __init__(self, texto): self._t = texto
+        def __str__(self):  return self._t
+
+    def setUp(self):
+        self._orig = rm.Breadcrumb
+        vivos = dict(list(rm.REDE_CONHECIDA.items())[:3])
+        FS = self.FakeState
+        st = ('configuration {\n  saved {\n    general {\n      name: "%s"\n'
+              '    }\n  }\n}\nwireless {\n  name: "wlan0"\n  channel: 157\n'
+              '  peer {\n    ipv4Address: "10.0.0.9"\n    signal: -70\n'
+              '    rssi: 25\n  }\n}\n')
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None):
+                s.h = host
+            def reachable(s):    return s.h in vivos
+            def authenticate(s): return True
+            def get_state(s, *a, **k):
+                return FS(st % (vivos[s.h] or s.h))
+        rm.Breadcrumb = F
+        self.vivos = vivos
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def test_descoberta_lida_com_o_objeto_state(self):
+        r = rm.descobrir_malha(list(self.vivos), incluir_conhecidos=False)
+        resp = [v for v in r.values() if not v.get("erro")]
+        self.assertEqual(len(resp), len(self.vivos),
+                         f"nenhum respondeu: {[v.get('erro') for v in r.values()]}")
+        self.assertTrue(all(v["bytes_state"] > 0 for v in resp))
+
+    def test_falha_interna_vira_linha_na_tela_e_nao_thread_morta(self):
+        # A propriedade que faltava: erro de programação dentro do worker
+        # tem de aparecer como motivo naquele rádio, não sumir.
+        class Explode:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k):
+                class SemNada:
+                    def __str__(s2): raise RuntimeError("boom interno")
+                return SemNada()
+        rm.Breadcrumb = Explode
+        r = rm.descobrir_malha(["10.0.0.1"], incluir_conhecidos=False)
+        self.assertIn("10.0.0.1", r)
+        self.assertTrue(r["10.0.0.1"]["erro"],
+                        "erro interno sumiu em vez de virar motivo")
+
+
+class TestListaDeIpsDeArquivo(unittest.TestCase):
+    """Outra mina, outra lista: a de arquivo continua aceita."""
+
+    def _tmp(self, nome, texto):
+        import tempfile
+        d = Path(tempfile.mkdtemp()); p = d / nome
+        p.write_text(texto, encoding="utf-8")
+        return p
+
+    def test_le_o_cache_do_coletor(self):
+        p = self._tmp("c.json", json.dumps({
+            "10.0.0.1": {"nome": "ERB-07", "falhas": 2},
+            "10.0.0.2": {"nome": "CA-1006", "falhas": 0}}))
+        self.assertEqual(rm.ler_lista_de_ips(p),
+                         {"10.0.0.1": "ERB-07", "10.0.0.2": "CA-1006"})
+
+    def test_le_texto_com_um_ip_por_linha(self):
+        p = self._tmp("c.txt", "# comentario\n10.0.0.1, ERB-07\n10.0.0.2\n\n")
+        self.assertEqual(rm.ler_lista_de_ips(p),
+                         {"10.0.0.1": "ERB-07", "10.0.0.2": "10.0.0.2"})
+
+    def test_arquivo_sem_ip_falha_com_motivo(self):
+        p = self._tmp("c.txt", "nada aqui\noutra linha\n")
+        with self.assertRaises(RuntimeError):
+            rm.ler_lista_de_ips(p)
+
+    def test_arquivo_inexistente_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            rm.ler_lista_de_ips("/nao/existe/lista.json")
+
+
+class TestAgendaPorDeslocamento(unittest.TestCase):
+    """Ler todo mundo a cada N segundos gasta o orçamento em quem está
+    parado: a captura real da ERM-12 tem 1.095 leituras e ZERO metro
+    coberto. Aqui a pergunta é quem já andou o suficiente."""
+
+    def setUp(self):
+        import coleta_rajant as col
+        self.col = col
+        self.ag = col.Agenda(passo_m=15.0, parado_s=30.0)
+
+    def test_radio_nunca_lido_tem_prioridade_maxima(self):
+        self.assertEqual(self.ag.prioridade("novo", 0.0), float("inf"))
+
+    def test_quem_anda_rapido_vence_antes(self):
+        self.ag.registrar("rapido", 0.0, -18.9, -43.4, 40.0)
+        self.ag.registrar("lento", 0.0, -18.9, -43.4, 5.0)
+        # 1,35 s a 40 km/h = 15 m; a 5 km/h seriam quase 11 s.
+        self.assertGreater(self.ag.prioridade("rapido", 1.4), 1.0)
+        self.assertLess(self.ag.prioridade("lento", 1.4), 1.0)
+
+    def test_parado_ainda_e_lido_de_vez_em_quando(self):
+        # Prioridade zero nunca seria eleita, e o censo de vizinhos dele
+        # morreria junto.
+        self.ag.registrar("parado", 0.0, -18.9, -43.4, 0.0)
+        self.assertLess(self.ag.prioridade("parado", 10.0), 1.0)
+        self.assertGreaterEqual(self.ag.prioridade("parado", 31.0), 1.0)
+
+    def test_so_elege_quem_ja_venceu_o_alvo(self):
+        self.ag.registrar("a", 0.0, -18.9, -43.4, 40.0)
+        self.assertEqual(self.ag.eleger(["a"], 0.1, 5), [])
+        self.assertEqual(self.ag.eleger(["a"], 2.0, 5), ["a"])
+
+    def test_orcamento_por_ciclo_e_respeitado(self):
+        for i in range(20):
+            self.ag.registrar(f"r{i}", 0.0, -18.9, -43.4, 40.0)
+        self.assertEqual(len(self.ag.eleger([f"r{i}" for i in range(20)],
+                                            5.0, 6)), 6)
+
+
+class TestColetaAoVivo(unittest.TestCase):
+    """A coleta ponta a ponta, contra uma malha falsa que se move."""
+
+    FROTA = {"10.0.0.10": ("CA-1006", 40.0, 0.0),
+             "10.0.0.90": ("ERB-07", 0.0, 0.0)}
+
+    def setUp(self):
+        import time as _t, coleta_rajant as col
+        self.col = col
+        self.t0 = [_t.time()]
+        self._orig = rm.Breadcrumb
+
+    def tearDown(self):
+        rm.Breadcrumb = self._orig
+
+    def _rodar(self, segundos=3.0, passo_m=15.0, gps_hz=10.0):
+        import time as _t, threading as _th
+        rm.Breadcrumb = _rajant_falsa(self.FROTA, self.t0, latencia=0.01,
+                                      gps_hz=gps_hz)
+        c = self.col.Coleta({ip: v[0] for ip, v in self.FROTA.items()},
+                            passo_m=passo_m, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(segundos); c.parar(); th.join(10)
+        return c
+
+    def test_coleta_amostras_com_posicao_e_vizinhos(self):
+        c = self._rodar()
+        self.assertGreater(len(c.amostras), 0)
+        self.assertGreater(len(c.peers), 0)
+        self.assertTrue(all(a["lat"] is not None for a in c.amostras))
+
+    def test_posicao_repetida_nao_vira_amostra(self):
+        # O caso que enche o arquivo de ponto empilhado: o módulo não
+        # atualizou, a leitura traz a posição velha. A releitura mínima
+        # de 1 s já evita a maior parte com GPS a 1 Hz; com um módulo mais
+        # lento (0,5 Hz) e alvo de 1 m, a coleta ainda pede antes de o GPS
+        # entregar — e o descarte tem de segurar.
+        c = self._rodar(segundos=3.5, passo_m=1.0, gps_hz=0.5)
+        self.assertGreater(c.n_repetidos, 0,
+                           "nenhuma posicao repetida foi descartada")
+        self.assertLess(len(c.amostras), c.n_lidos)
+        # Cada amostra gravada tem um gpsTime diferente da anterior.
+        vistos = {}
+        for a in c.amostras:
+            vistos.setdefault(a["radio"], []).append((a["lat"], a["lon"]))
+        for r, pts in vistos.items():
+            self.assertEqual(len(pts), len(set(pts)),
+                             f"{r} gravou a mesma posicao duas vezes")
+
+    def test_gps_rapido_nao_descarta_nada(self):
+        c = self._rodar(segundos=3.0, passo_m=1.0, gps_hz=20.0)
+        self.assertEqual(c.n_repetidos, 0)
+
+    def test_passo_real_acompanha_o_alvo(self):
+        c = self._rodar(segundos=6.0, passo_m=15.0)
+        passo = c._passo_real()
+        self.assertIsNotNone(passo)
+        # Folga generosa: o que se afirma é que o alvo governa o
+        # espaçamento, não que ele seja exato.
+        self.assertLess(passo, 15.0 * 3)
+
+    def test_radio_parado_nao_domina_as_amostras(self):
+        # A ERB fixa não pode gerar tanta amostra quanto o caminhão: era
+        # exatamente isso que enchia o arquivo sem cobrir metro nenhum.
+        c = self._rodar(segundos=6.0, passo_m=15.0)
+        por = {}
+        for a in c.amostras:
+            por[a["radio"]] = por.get(a["radio"], 0) + 1
+        self.assertGreater(por.get("CA-1006", 0), por.get("ERB-07", 0))
+
+    def test_radio_lento_nao_segura_o_rapido(self):
+        # O buraco de 60-80 m entre bolhas no mapa do cliente: a coleta
+        # andava em LOTES e esperava o mais lento do lote. Um rádio de 3 s
+        # travava todos os outros por 3 s — 33 m de caminhão a 40 km/h
+        # sem leitura. Com trabalhadores independentes, o rápido segue
+        # sendo lido no ritmo dele.
+        import time as _t, threading as _th
+        frota = {"10.0.0.10": ("CA-1006", 40.0, 0.0),
+                 "10.0.0.11": ("CA-1048", 40.0, 90.0),
+                 "10.0.0.66": ("CA-LENTO", 40.0, 180.0)}
+        rm.Breadcrumb = _rajant_falsa(frota, self.t0, gps_hz=10.0,
+                                      latencia={"10.0.0.66": 3.0})
+        c = self.col.Coleta({ip: v[0] for ip, v in frota.items()},
+                            passo_m=5.0, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(4.0); c.parar(); th.join(15)
+        por = {}
+        for a in c.amostras:
+            por[a["radio"]] = por.get(a["radio"], 0) + 1
+        # Em 4 s: o lento cabe ~1 vez; os rápidos, com releitura mínima de
+        # 1 s, ~4 vezes. Em lote, os três andariam juntos no ritmo do lento.
+        self.assertLessEqual(por.get("CA-LENTO", 0), 2)
+        self.assertGreaterEqual(por.get("CA-1006", 0), 3, por)
+        self.assertGreaterEqual(por.get("CA-1048", 0), 3, por)
+
+    def test_sem_gpsvel_a_velocidade_sai_do_deslocamento(self):
+        # `gpsVel` é opcional no Gps.proto. Sem ele, o caminhão caía no
+        # ritmo do rádio parado — uma leitura a cada 30 s, 300 m entre
+        # amostras a 40 km/h.
+        ag = self.col.Agenda(passo_m=10.0, parado_s=30.0)
+        ag.registrar("ca", 0.0, -18.9000, -43.4, None)
+        ag.registrar("ca", 1.0, -18.9001, -43.4, None)     # ~11 m em 1 s
+        self.assertAlmostEqual(ag.ultimo["ca"]["vel"], 40.0, delta=1.5)
+        self.assertGreaterEqual(ag.prioridade("ca", 2.0), 1.0)
+
+    def test_posicao_repetida_nao_zera_a_velocidade_estimada(self):
+        # Registrar a posição velha com o relógio novo faria a velocidade
+        # estimada dar zero, e o caminhão iria para o ritmo de parado.
+        ag = self.col.Agenda(passo_m=10.0, parado_s=30.0)
+        ag.registrar("ca", 0.0, -18.9000, -43.4, None)
+        ag.registrar("ca", 1.0, -18.9001, -43.4, None)
+        ag.adiar("ca", 2.0)                    # leu, GPS sem posição nova
+        self.assertAlmostEqual(ag.ultimo["ca"]["vel"], 40.0, delta=1.5)
+        self.assertEqual(ag.prioridade("ca", 2.5), 0.0)    # releitura mínima
+        self.assertGreaterEqual(ag.prioridade("ca", 3.1), 1.0)
+
+    def test_numero_do_ponto_bate_com_a_posicao_da_amostra(self):
+        # `cobertura_disponivel` casa vizinho e amostra pela POSIÇÃO na
+        # lista. Com leituras terminando em paralelo, um contador à parte
+        # descasaria os dois e o RSSI de um ponto iria para outro.
+        c = self._rodar(segundos=3.0, passo_m=5.0)
+        for p in c.peers:
+            a = c.amostras[p["ponto"] - 1]
+            self.assertEqual((a["lat"], a["lon"], a["radio"]),
+                             (p["lat"], p["lon"], p["movel"]))
+
+    def test_parar_no_meio_preserva_o_que_ja_foi_coletado(self):
+        c = self._rodar(segundos=2.0)
+        n = len(c.amostras)
+        self.assertGreater(n, 0)
+        self.assertIsNotNone(c.fim)
+
+    def test_sem_alvo_nenhum_falha_com_motivo(self):
+        with self.assertRaises(RuntimeError):
+            self.col.Coleta({}, aviso=lambda t: None).rodar(0)
+
+    def test_conecta_com_porta_usuario_e_senha_nos_lugares_certos(self):
+        """A troca de argumentos que zerou uma coleta inteira.
+
+        `SessaoRadio(ip, porta, role, senha, ...)` recebia
+        `(ip, role, senha, porta)`: a porta virava "VIEW", o usuário
+        virava a senha e a senha virava 2300. Toda conexão falhava — 139
+        falhas e zero amostra — e nada acusava, porque o Breadcrumb falso
+        aceitava qualquer coisa sem olhar.
+
+        Agora ele CONFERE. É o que transforma um fake em teste.
+        """
+        import time as _t, threading as _th
+        recebidos = []
+
+        class FakeBC:
+            def __init__(s, host, port=None, role=None, password=None):
+                recebidos.append({"host": host, "port": port,
+                                  "role": role, "password": password})
+                s.h = host
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k):
+                return ('configuration {\n  saved {\n    general {\n'
+                        '      name: "CA-1"\n    }\n  }\n}\n'
+                        'wireless {\n  name: "wlan0"\n  channel: 157\n}\n')
+        rm.Breadcrumb = FakeBC
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, role="co", senha="segredo",
+                            porta=2300, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        self.assertTrue(recebidos, "nem tentou conectar")
+        r = recebidos[0]
+        self.assertEqual(r["host"], "10.0.0.1")
+        self.assertEqual(r["port"], 2300, f"porta errada: {r}")
+        self.assertEqual(r["role"], "co", f"usuario errado: {r}")
+        self.assertEqual(r["password"], "segredo", f"senha errada: {r}")
+
+    def test_radio_descartado_volta_a_ser_tentado(self):
+        """`SessaoRadio` desiste após 3 falhas e nunca mais tenta.
+
+        Para o survey curto de onde ela veio isso está certo; numa coleta
+        de turno, não: um caminhão que passa vinte segundos atrás de uma
+        bancada sairia do levantamento para o resto do dia.
+        """
+        import time as _t, threading as _th
+        estado = {"vivo": False, "tentativas": 0}
+        ST = ('configuration {\n  saved {\n    general {\n      name: "CA-1"\n'
+              '    }\n  }\n}\ngps {\n  gpsSwitch {\n    enabled: true\n  }\n'
+              '  gpsPos {\n    gpsTime: 143025.0\n    gpsLat: "1853.6443S"\n'
+              '    gpsLong: "04325.8538W"\n  }\n}\n'
+              'wireless {\n  name: "wlan0"\n  channel: 157\n}\n')
+
+        class Intermitente:
+            def __init__(s, host, port=None, role=None, password=None):
+                estado["tentativas"] += 1
+            def reachable(s):    return estado["vivo"]
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return ST
+        rm.Breadcrumb = Intermitente
+        # Tempos curtos para o teste não levar minutos. `parado_s` também:
+        # depois de uma falha a agenda só reexamina o rádio a cada
+        # `parado_s`, então sem encurtá-lo o reencontro nunca chega a ser
+        # tentado dentro do teste.
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, reencontro_s=0.3,
+                            parado_s=0.3, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True); th.start()
+        _t.sleep(1.0)
+        self.assertEqual(len(c.amostras), 0, "deveria estar falhando")
+        estado["vivo"] = True          # o caminhão saiu de trás da bancada
+        _t.sleep(2.0)
+        c.parar(); th.join(10)
+        self.assertGreater(len(c.amostras), 0,
+                           "radio descartado nunca mais foi tentado")
+
+    def test_vizinho_sem_signal_nao_vira_0_dbm(self):
+        """O "nunca publicar 0" vazando no caminho AO VIVO.
+
+        `_i()` do parser devolve 0 quando o campo não existe. Um vizinho
+        sem `signal` chegava como 0 dBm e GANHAVA a eleição do melhor
+        sinal — o laudo saiu com "RSSI mediana 0,16 dBm, 100% dentro do
+        requisito", aprovado por uma medida que nunca existiu.
+        """
+        import time as _t, threading as _th
+        ST = ('configuration {\n  saved {\n    general {\n      name: "CA-1"\n'
+              '    }\n  }\n}\ngps {\n  gpsSwitch {\n    enabled: true\n  }\n'
+              '  gpsPos {\n    gpsTime: 143025.0\n    gpsLat: "1853.6443S"\n'
+              '    gpsLong: "04325.8538W"\n  }\n}\n'
+              'wireless {\n  name: "wlan0"\n  channel: 157\n  noise: -95\n'
+              '  peer {\n    ipv4Address: "10.0.0.90"\n    rssi: 27\n'
+              '    signal: -68\n    cost: 5000\n  }\n'
+              # este NÃO tem signal: é o que virava 0 dBm
+              '  peer {\n    ipv4Address: "10.0.0.91"\n    cost: 9000\n  }\n}\n')
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return ST
+        rm.Breadcrumb = F
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        self.assertTrue(c.amostras, "nada foi coletado")
+        self.assertEqual(c.amostras[0]["sinal"], -68,
+                         "o 0 dBm ganhou a eleição do melhor sinal")
+        self.assertFalse([v for v in c.peers if v["sinal"] == 0],
+                         "vizinho sem signal virou 0 dBm")
+
+    def test_vizinho_ganha_nome_e_a_erb_e_reconhecida(self):
+        # O State.Peer não traz nome. Com o IP no lugar do nome, a eleição
+        # da melhor ERB/ERM — que reconhece infraestrutura PELO NOME —
+        # nunca achava nenhuma, e o mapa ao vivo saía com o melhor vizinho
+        # de qualquer tipo. Aqui o caminhão encostado (-45) é mais forte
+        # que a ERB (-70): o laudo tem de ficar com a ERB.
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None,
+                            malha={"10.0.0.2": {"nome": "CA-2", "serial": 2}})
+        d = {"sistema": {"gps_lat": -18.9, "gps_lon": -43.4, "gps_time": 1.0},
+             "radios": [{"freq": 5785, "canal": 157, "ruido": -95, "peers": [
+                 {"ip": "10.0.0.2", "sinal": -45, "snr": 50, "custo": 3000,
+                  "encap": 2},
+                 {"ip": "10.188.96.90", "sinal": -70, "snr": 25,
+                  "custo": 9000, "encap": 90}]}],
+             "_trace": None}
+        am, viz = c._amostra("10.0.0.1", d, 0.0)
+        self.assertEqual({v["nome"] for v in viz}, {"CA-2", "ERB-07"})
+        for v in viz:
+            v["ponto"] = 1
+        rm.cobertura_disponivel([am], viz)
+        self.assertEqual(am["servidor_cob"], "ERB-07")
+        self.assertEqual(am["sinal_cob"], -70)
+        self.assertTrue(am["cob_e_infra"])
+
+    def test_vizinho_so_com_encap_ganha_nome_pelo_serial(self):
+        # ipv4Address é opcional no State.Peer; o encap (sufixo do serial)
+        # sempre vem.
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None,
+                            malha={"10.188.97.80": {"nome": "ERM-08 PTP CAM",
+                                                    "serial": 128433}})
+        self.assertEqual(c._nome_vizinho(None, 128433), "ERM-08 PTP CAM")
+        self.assertIsNone(c._nome_vizinho("10.9.9.9", 1))
+
+    def test_diagnostico_grava_o_arquivo_mesmo_sem_conseguir_autenticar(self):
+        # A rajant-api chama o `ping` do sistema e não trata a falta dele:
+        # o diagnóstico de campo existe para registrar o que deu errado, e
+        # não pode sair sem arquivo justamente quando algo dá errado.
+        import tempfile
+        class SemPing:
+            def __init__(s, host=None, port=None, role=None, password=None): pass
+            def authenticate(s):
+                raise FileNotFoundError("No such file or directory: 'ping'")
+        rm.Breadcrumb = SemPing
+        alvo = self.col.testar_trace("10.0.0.1", pasta=tempfile.mkdtemp(),
+                                     aviso=lambda t: None)
+        txt = alvo.read_text(encoding="utf-8")
+        self.assertIn("autenticação — FALHOU", txt)
+        self.assertIn("ping", txt)
+
+    def test_coleta_traz_snr_e_ruido(self):
+        # Estavam fixos em None: as duas grandezas sumiam do KMZ e do PPT
+        # por falta de dado, não por não existirem no rádio.
+        import time as _t, threading as _th
+        ST = ('configuration {\n  saved {\n    general {\n      name: "CA-1"\n'
+              '    }\n  }\n}\ngps {\n  gpsSwitch {\n    enabled: true\n  }\n'
+              '  gpsPos {\n    gpsTime: 143025.0\n    gpsLat: "1853.6443S"\n'
+              '    gpsLong: "04325.8538W"\n  }\n}\n'
+              'wireless {\n  name: "wlan0"\n  channel: 157\n  noise: -95\n'
+              '  peer {\n    ipv4Address: "10.0.0.90"\n    rssi: 27\n'
+              '    signal: -68\n    cost: 5000\n    rate: 650\n  }\n}\n')
+
+        class F:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s):    return True
+            def authenticate(s): return True
+            def get_state(s, *a, **k): return ST
+        rm.Breadcrumb = F
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        a = c.amostras[0]
+        self.assertEqual(a["ruido"], -95, "ruído do rádio não foi aproveitado")
+        self.assertIsNotNone(a["snr"], "SNR ficou None")
+        self.assertEqual(a["custo"], 5000)
+        # É o que faz SNR e ruído virarem aba no KMZ e slide no PPT.
+        self.assertEqual(set(rm.campos_com_medicao(c.amostras)),
+                         {"snr", "ruido", "enl_bons"})
+        # Custo 5000 e SNR 27: bom (não ótimo: SNR abaixo de 30).
+        self.assertEqual((a["enl_bons"], a["enl_otimos"], a["enl_total"]),
+                         (1, 0, 1))
+        # O RSSI do laudo e `sinal_cob`, e na coleta ao vivo ele nasce do
+        # mesmo passo do arquivo: `cobertura_disponivel` sobre os
+        # vizinhos lidos. Sem esta chamada o mapa sai sem a camada
+        # principal, que foi como o KMZ ficou sem SNR e ruido antes.
+        rm.cobertura_disponivel(c.amostras, c.peers)
+        self.assertIn("sinal_cob", rm.campos_com_medicao(c.amostras))
+        self.assertEqual(c.amostras[0]["sinal_cob"], -68)
+
+    def test_motivo_da_falha_chega_a_tela(self):
+        # Um contador de falhas subindo sem motivo escondeu a troca de
+        # argumentos por quase uma hora.
+        import time as _t, threading as _th
+        linhas = []
+
+        class Recusa:
+            def __init__(s, host, port=None, role=None, password=None): pass
+            def reachable(s): return False
+            def authenticate(s): return False
+            def get_state(s, *a, **k): raise AssertionError("nao deveria chegar")
+        rm.Breadcrumb = Recusa
+        c = self.col.Coleta({"10.0.0.1": "CA-1"}, aviso=linhas.append)
+        th = _th.Thread(target=c.rodar, args=(0,), daemon=True)
+        th.start(); _t.sleep(1.0); c.parar(); th.join(10)
+
+        self.assertGreater(c.n_falhas, 0)
+        texto = " ".join(linhas)
+        self.assertIn("falha em CA-1", texto, f"motivo nao apareceu: {linhas}")
+        self.assertTrue(c.motivos, "nenhum motivo foi registrado")
+
+    def test_relatorios_saem_da_coleta(self):
+        import tempfile, shutil
+        c = self._rodar(segundos=4.0)
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            feitos = self.col.gravar_e_gerar(c, str(tmp), aviso=lambda t: None)
+            self.assertTrue(feitos)
+            self.assertTrue(all(f.exists() for f in feitos))
+            self.assertTrue(any(f.suffix == ".xlsx" for f in feitos))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestJanelaCabeNaTela(unittest.TestCase):
+    """A janela de verdade, medida numa tela de 1366×768 — a do notebook
+    de campo. Na v16 a lista de equipamentos ficou com 1 px: nenhum rádio
+    à vista para marcar. Pulado sem tkinter ou sem tela; em Linux, rode
+    com xvfb-run."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import tkinter  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("sem tkinter")
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            raise unittest.SkipTest("sem tela")
+        if rm.Breadcrumb is None:
+            raise unittest.SkipTest("sem rajant-api, a aba de coleta não monta")
+
+    def _medir(self, escala):
+        import tkinter as tk
+        from tkinter import ttk
+        import site_survey
+        med = {}
+
+        def medir(jan):
+            jan.update()
+            achados = []
+            def anda(w):
+                for c in w.winfo_children():
+                    achados.append(c); anda(c)
+            anda(jan)
+            arv = [w for w in achados if isinstance(w, ttk.Treeview)
+                   and "vizinhos" in w["columns"]][0]
+            for k in range(53):
+                arv.insert("", "end", iid=f"i{k}",
+                           values=("", f"CA-10{k:02d}", f"10.0.0.{k}", "sim", 4, ""))
+            jan.update()
+            alt = arv.winfo_height()
+            med["linhas"] = sum(1 for k in range(53)
+                                if arv.bbox(f"i{k}")
+                                and arv.bbox(f"i{k}")[1] + arv.bbox(f"i{k}")[3] <= alt)
+            med["cortados"] = [
+                b.cget("text") for b in achados if isinstance(b, ttk.Button)
+                and b.winfo_ismapped() and b.winfo_width() < b.winfo_reqwidth()]
+            jan.destroy()
+
+        antes = (tk.Misc.winfo_screenwidth, tk.Misc.winfo_screenheight,
+                 tk.Tk.state, tk.Tk.mainloop, tk.Tk.__init__)
+        init = tk.Tk.__init__
+        def novo(self, *a, **k):
+            init(self, *a, **k)
+            self.tk.call("tk", "scaling", escala * 96 / 72)
+        try:
+            tk.Misc.winfo_screenwidth = lambda self: 1366
+            tk.Misc.winfo_screenheight = lambda self: 768
+            tk.Tk.state = lambda self, *a: "normal"   # sem maximizar
+            tk.Tk.mainloop = medir
+            tk.Tk.__init__ = novo
+            site_survey.main()
+        finally:
+            (tk.Misc.winfo_screenwidth, tk.Misc.winfo_screenheight,
+             tk.Tk.state, tk.Tk.mainloop, tk.Tk.__init__) = antes
+        return med
+
+    def test_lista_de_equipamentos_aparece_em_768(self):
+        for escala in (1.0, 1.25):
+            with self.subTest(escala=escala):
+                m = self._medir(escala)
+                self.assertGreaterEqual(m["linhas"], 6, m)
+
+    def test_nenhum_botao_cortado_em_768(self):
+        for escala in (1.0, 1.25):
+            with self.subTest(escala=escala):
+                self.assertEqual(self._medir(escala)["cortados"], [])
+
+
+class TestJanelaUnica(unittest.TestCase):
+    """A janela junta coleta e arquivos; a lógica fica fora dela."""
+
+    def test_site_survey_importa_sem_abrir_janela(self):
+        # Importar não pode abrir tela nem exigir tkinter: é o que
+        # permite testar o resto sem display.
+        import subprocess, sys as _s
+        r = subprocess.run(
+            [_s.executable, "-c",
+             "import sys; sys.argv=['x'];"
+             "sys.path.insert(0, %r);" % str(Path(__file__).resolve().parent)
+             + "import site_survey; print('ok')"],
+            capture_output=True, text=True, timeout=90)
+        self.assertIn("ok", r.stdout, r.stderr[-600:])
+
+    def test_verificar_nao_abre_janela_e_devolve_codigo(self):
+        # É o que o build usa para PROVAR que o exe funciona. Sem isto, a
+        # única forma de saber era dar duplo clique — e se falhasse, o
+        # console fechava no mesmo instante: virava "não abre", sem pista.
+        import subprocess, sys as _s
+        aqui = str(Path(__file__).resolve().parent)
+        r = subprocess.run(
+            [_s.executable, "site_survey.py", "--verificar"],
+            capture_output=True, text=True, timeout=120, cwd=aqui)
+        self.assertIn("Verificação do site_survey", r.stdout, r.stderr[-500:])
+        # Sem tkinter tem de FALHAR, não passar calado: é exatamente o
+        # caso que fazia o exe fechar sozinho.
+        try:
+            import tkinter  # noqa: F401
+            esperado = 0
+        except ImportError:
+            esperado = 1
+        self.assertEqual(r.returncode, esperado, r.stdout[-500:])
+
+    def test_erro_de_partida_vai_para_arquivo(self):
+        # Console de exe fecha no instante em que o programa termina. Se
+        # o motivo não for para o disco, o usuário fica sem nada.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn("site_survey_erro.txt", fonte)
+        # Congelado, __file__ aponta para o pacote temporário; o arquivo
+        # tem de ir para a pasta do EXE, que é a que o usuário enxerga.
+        self.assertTrue('"frozen"' in fonte or "'frozen'" in fonte,
+                        "erro iria para a pasta errada quando congelado")
+        # Os módulos chamam sys.exit(1) quando falta dependência, e
+        # SystemExit não é Exception: com `except Exception` o processo
+        # morria antes de gravar o arquivo. Foi assim que um
+        # prometheus_client faltando no exe virou "não abre".
+        self.assertIn("except BaseException", fonte,
+                      "sys.exit no import escaparia do tratamento de erro")
+
+    def test_verificar_nunca_espera_tecla(self):
+        # O build roda `--verificar` de dentro do .bat. Um input() ali
+        # penduraria a compilação para sempre, sem ninguém para apertar.
+        import subprocess, sys as _s, tempfile, shutil
+        aqui = Path(__file__).resolve().parent
+        tmp = Path(tempfile.mkdtemp())
+        erro = aqui / "site_survey_erro.txt"
+        if erro.exists(): erro.unlink()
+        try:
+            cod = (
+                "import sys\n"
+                "class _Nao:\n"
+                "    def find_spec(self, n, c=None, a=None):\n"
+                "        if n == 'openpyxl':\n"
+                "            raise ImportError('bloqueado')\n"
+                "        return None\n"
+                "sys.meta_path.insert(0, _Nao())\n"
+                f"sys.path.insert(0, {str(aqui)!r})\n"
+                "sys.argv = ['site_survey', '--verificar']\n"
+                "import site_survey\n")
+            # Sem timeout generoso isto passaria por engano num ambiente
+            # onde stdin já não é tty; o que se testa é que NÃO pendura.
+            r = subprocess.run([_s.executable, "-c", cod],
+                               capture_output=True, text=True, timeout=60,
+                               cwd=str(tmp))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("Pressione ENTER", r.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if erro.exists(): erro.unlink()
+
+    def test_sys_exit_no_import_ainda_grava_o_erro(self):
+        import subprocess, sys as _s, tempfile, shutil
+        aqui = Path(__file__).resolve().parent
+        tmp = Path(tempfile.mkdtemp())
+        # Rodando como script o arquivo vai para a pasta do .py; dentro do
+        # exe, para a pasta do executável (ver _pasta_do_exe). O que se
+        # afirma aqui é que ele é GRAVADO, não onde.
+        erro = aqui / "site_survey_erro.txt"
+        if erro.exists(): erro.unlink()
+        try:
+            # Bloqueia openpyxl, que o motor_survey importa no topo.
+            cod = (
+                "import sys\n"
+                "class _Nao:\n"
+                "    def find_spec(self, n, c=None, a=None):\n"
+                "        if n == 'openpyxl':\n"
+                "            raise ImportError('bloqueado')\n"
+                "        return None\n"
+                "sys.meta_path.insert(0, _Nao())\n"
+                f"sys.path.insert(0, {str(aqui)!r})\n"
+                "import site_survey\n")
+            r = subprocess.run([_s.executable, "-c", cod],
+                               capture_output=True, text=True, timeout=120,
+                               cwd=str(tmp), input="\n")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertTrue(erro.exists(),
+                            f"nao gravou o motivo:\n{(r.stdout+r.stderr)[-400:]}")
+            self.assertIn("pip install", erro.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if erro.exists(): erro.unlink()
+
+    def test_nenhum_exclude_do_spec_quebra_o_programa(self):
+        """Excluir do exe um módulo que é importado no topo quebra tudo.
+
+        Aconteceu de verdade: `prometheus_client` entrou nos excludes
+        porque este exe não expõe /metrics — mas o rajant_monitor o
+        importa no import do módulo e SAI se faltar. O cliente recebeu
+
+            ERRO: pip install prometheus-client
+
+        com o pacote instalado na máquina; ele só não estava DENTRO do
+        exe. E como o console fecha sozinho, o sintoma foi "não abre".
+
+        Aqui cada nome da lista de excludes é bloqueado de verdade e se
+        confere que o site_survey ainda importa.
+        """
+        import ast, subprocess, sys as _s
+        aqui = Path(__file__).resolve().parent
+        spec = (aqui / "build" / "site_survey.spec").read_text(encoding="utf-8")
+        # O .spec não é importável (o PyInstaller injeta Analysis e cia.),
+        # então lê-se a lista pelo AST em vez de executar o arquivo.
+        alvo = None
+        for no in ast.walk(ast.parse(spec)):
+            if isinstance(no, ast.keyword) and no.arg == "excludes":
+                alvo = [e.value for e in no.value.elts
+                        if isinstance(e, ast.Constant)]
+        self.assertTrue(alvo, "não achei a lista de excludes no .spec")
+
+        bloqueio = (
+            "import sys\n"
+            "class _Nao:\n"
+            "    def find_module(self, nome, caminho=None):\n"
+            "        if nome == %r or nome.startswith(%r + '.'):\n"
+            "            raise ImportError('bloqueado pelo teste: ' + nome)\n"
+            "        return None\n"
+            "    def find_spec(self, nome, caminho=None, alvo=None):\n"
+            "        return self.find_module(nome, caminho)\n"
+            "sys.meta_path.insert(0, _Nao())\n"
+            "sys.path.insert(0, %r)\n"
+            "import site_survey\n"
+            "print('IMPORTOU')\n")
+        for nome in alvo:
+            r = subprocess.run(
+                [_s.executable, "-c", bloqueio % (nome, nome, str(aqui))],
+                capture_output=True, text=True, timeout=120, cwd=str(aqui))
+            self.assertIn("IMPORTOU", r.stdout,
+                          f"excluir '{nome}' do exe impede o programa de "
+                          f"abrir:\n{(r.stdout + r.stderr)[-400:]}")
+
+    def test_janela_nasce_cabendo_na_tela(self):
+        # 820 px de altura fixa numa tela de 768 jogou o rodapé — com os
+        # botões de Iniciar e Parar — para fora do monitor, e o programa
+        # ficou sem como ser usado.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn("winfo_screenheight", fonte,
+                      "a janela voltou a ter altura fixa")
+        self.assertNotIn('jan.geometry("1200x820")', fonte)
+        self.assertIn("jan.minsize", fonte)
+
+    def test_rodape_e_reservado_antes_do_notebook_expandir(self):
+        """`pack` serve quem chega primeiro.
+
+        Um Notebook com expand=True empacotado antes do rodapé toma a
+        janela inteira e espreme o resto até sumir. A ordem no código é
+        a garantia — não há como afirmar isso sem display.
+        """
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        for antes, depois, oquê in (
+                ('rod.pack(side="bottom"', 'nb.pack(fill="both", expand=True',
+                 "rodapé (Salvar em / KMZ / PPT / Excel)"),
+                ('txt.pack(side="bottom"', 'nb.pack(fill="both", expand=True',
+                 "registro de andamento"),
+                ('baixo.pack(side="bottom"', 'qd.pack(fill="both", expand=True',
+                 "botões de Iniciar e Parar")):
+            i, j = fonte.find(antes), fonte.find(depois)
+            self.assertGreater(i, -1, f"sumiu: {antes}")
+            self.assertGreater(j, -1, f"sumiu: {depois}")
+            self.assertLess(i, j, f"{oquê} pode ser empurrado para fora da tela")
+
+    def test_controles_da_coleta_ficam_no_bloco_reservado(self):
+        # Se voltarem para `ab_col`, a lista de equipamentos volta a poder
+        # empurrá-los para fora.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn("l3 = ttk.Frame(baixo)", fonte,
+                      "os botões de Iniciar/Parar sairam do bloco reservado")
+        self.assertIn('b_ini = ttk.Button(l3, text="Iniciar coleta"', fonte)
+        self.assertIn("lc = ttk.Frame(l3)", fonte)
+
+    def test_ha_um_unico_gerador_de_executavel(self):
+        # Dois .bat e dois .spec na mesma pasta geravam dois exes, e a
+        # duvida de qual abrir.
+        b = Path(__file__).resolve().parent / "build"
+        specs = sorted(p.name for p in b.glob("*.spec"))
+        self.assertNotIn("survey_meshmapper.spec", specs,
+                         f"voltou a haver dois exes de survey: {specs}")
+        self.assertFalse((b / "gerar_exe_survey.bat").exists())
+
+    def test_a_logica_nao_mora_na_janela(self):
+        # Se a coleta voltar para dentro do arquivo da interface, ela
+        # deixa de ser testável sem display.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("class Coleta", fonte)
+        self.assertNotIn("def descobrir_malha", fonte)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

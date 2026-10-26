@@ -1,0 +1,14 @@
+# Saídas do survey, geradas ao rodar
+surveys.db
+config.ini
+fundo_cache/
+kmz_extraido/
+*.kmz
+!exemplos/*.kmz
+*.xlsx
+*.pptx
+site_survey_erro.txt
+coleta_*.log
+__pycache__/
+build/log_build*.txt
+dist/

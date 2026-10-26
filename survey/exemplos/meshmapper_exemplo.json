@@ -1,0 +1,787 @@
+{
+ "bcc_version": "11.29.1",
+ "configuration": {
+  "interval": 1,
+  "goodCost": 10000,
+  "greatCost": 5000,
+  "goodRSSI": 20,
+  "greatRSSI": 30,
+  "goodPath": 20000,
+  "greatPath": 10000,
+  "crumbMeta": {
+   "serialStr": "ME4-2450R-96716",
+   "name": "CA-1006",
+   "ipv4": "10.188.99.6"
+  }
+ },
+ "points": [
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 17,
+      "cost": 31911,
+      "signal": -76,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 40,
+      "cost": 13147,
+      "signal": -53,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 25,
+      "cost": 7028,
+      "signal": -84,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 16,
+      "cost": 39013,
+      "signal": -93,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 23,
+      "cost": 21020,
+      "signal": -86,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 17952,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -89,
+     "rssi": 20,
+     "rate": 65,
+     "hopcost": 17951
+    }
+   },
+   "unixTimeStamp": 1789055967849,
+   "gpsLat": -18.921034,
+   "gpsLong": -43.420803,
+   "gpsAlt": 849.9,
+   "numActivePeers": 95
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 17,
+      "cost": 31911,
+      "signal": -76,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 40,
+      "cost": 13147,
+      "signal": -53,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 25,
+      "cost": 7028,
+      "signal": -84,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 16,
+      "cost": 39013,
+      "signal": -93,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 23,
+      "cost": 21020,
+      "signal": -86,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 17952,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -89,
+     "rssi": 20,
+     "rate": 65,
+     "hopcost": 17951
+    }
+   },
+   "unixTimeStamp": 1789055968165,
+   "gpsLat": -18.92114,
+   "gpsLong": -43.420803,
+   "gpsAlt": 849.8,
+   "numActivePeers": 95
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 17,
+      "cost": 31911,
+      "signal": -76,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 40,
+      "cost": 13147,
+      "signal": -53,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 25,
+      "cost": 7028,
+      "signal": -84,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 16,
+      "cost": 39013,
+      "signal": -93,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 23,
+      "cost": 21020,
+      "signal": -86,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 17952,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -89,
+     "rssi": 20,
+     "rate": 65,
+     "hopcost": 17951
+    }
+   },
+   "unixTimeStamp": 1789055969925,
+   "gpsLat": -18.92114,
+   "gpsLong": -43.420803,
+   "gpsAlt": 849.8,
+   "numActivePeers": 95
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 18,
+      "cost": 31911,
+      "signal": -75,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 32,
+      "cost": 15741,
+      "signal": -61,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 23,
+      "cost": 8580,
+      "signal": -86,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 17,
+      "cost": 32821,
+      "signal": -92,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 22,
+      "cost": 27347,
+      "signal": -87,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 18088,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -89,
+     "rssi": 20,
+     "rate": 65,
+     "hopcost": 18087
+    }
+   },
+   "unixTimeStamp": 1789055970961,
+   "gpsLat": -18.92114,
+   "gpsLong": -43.420803,
+   "gpsAlt": 849.8,
+   "numActivePeers": 96
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 18,
+      "cost": 31911,
+      "signal": -75,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 32,
+      "cost": 15741,
+      "signal": -61,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 23,
+      "cost": 8580,
+      "signal": -86,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 17,
+      "cost": 32821,
+      "signal": -92,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 22,
+      "cost": 27347,
+      "signal": -87,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 18088,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -89,
+     "rssi": 20,
+     "rate": 65,
+     "hopcost": 18087
+    }
+   },
+   "unixTimeStamp": 1789055972401,
+   "gpsLat": -18.921356,
+   "gpsLong": -43.42086,
+   "gpsAlt": 849.1,
+   "numActivePeers": 96
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 18,
+      "cost": 31911,
+      "signal": -75,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 32,
+      "cost": 15741,
+      "signal": -61,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 23,
+      "cost": 8580,
+      "signal": -86,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 17,
+      "cost": 32821,
+      "signal": -92,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 22,
+      "cost": 27347,
+      "signal": -87,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 18088,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -89,
+     "rssi": 20,
+     "rate": 65,
+     "hopcost": 18087
+    }
+   },
+   "unixTimeStamp": 1789055972900,
+   "gpsLat": -18.921444,
+   "gpsLong": -43.420906,
+   "gpsAlt": 848.3,
+   "numActivePeers": 96
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 18,
+      "cost": 31911,
+      "signal": -75,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 32,
+      "cost": 34647,
+      "signal": -61,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 23,
+      "cost": 9912,
+      "signal": -86,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 17,
+      "cost": 32821,
+      "signal": -92,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 22,
+      "cost": 27347,
+      "signal": -87,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 20308,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -88,
+     "rssi": 21,
+     "rate": 65,
+     "hopcost": 20307
+    }
+   },
+   "unixTimeStamp": 1789055974961,
+   "gpsLat": -18.921444,
+   "gpsLong": -43.420906,
+   "gpsAlt": 848.3,
+   "numActivePeers": 98
+  },
+  {
+   "wlanPeers": {
+    "wlan1": [
+     {
+      "serialNumber": "FE1-2255B-107798",
+      "name": "ERM-08 PTP CAM",
+      "rssi": 18,
+      "cost": 31911,
+      "signal": -75,
+      "ipaddr": "10.188.97.80",
+      "mac": "84:8d:84:41:a6:0b",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 32,
+      "cost": 34647,
+      "signal": -61,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:3f:51",
+      "channel": 6,
+      "frequency": 2437
+     },
+     {
+      "serialNumber": "FE1-2255B-107794",
+      "name": "ERM-28 PTP",
+      "rssi": 22,
+      "cost": 26808,
+      "signal": -71,
+      "ipaddr": "10.188.97.128",
+      "mac": "84:8d:84:41:a5:f3",
+      "channel": 6,
+      "frequency": 2437
+     }
+    ],
+    "wlan0": [
+     {
+      "serialNumber": "ME5-2450CS-115009",
+      "name": "TT-3708",
+      "rssi": 23,
+      "cost": 9912,
+      "signal": -86,
+      "ipaddr": "10.188.99.119",
+      "mac": "84:8d:84:f0:46:a4",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "ME5-2450CS-128434",
+      "name": "CA-1048",
+      "rssi": 17,
+      "cost": 32821,
+      "signal": -92,
+      "ipaddr": "10.188.99.48",
+      "mac": "84:8d:84:f0:8a:7a",
+      "channel": 157,
+      "frequency": 5785
+     },
+     {
+      "serialNumber": "FE1-2455LS-113330",
+      "name": "ERM-09 PTP CAM",
+      "rssi": 22,
+      "cost": 27347,
+      "signal": -87,
+      "ipaddr": "10.188.97.90",
+      "mac": "84:8d:84:42:81:29",
+      "channel": 157,
+      "frequency": 5785
+     }
+    ]
+   },
+   "pathCost": 0,
+   "traceInfo": {
+    "path": {
+     "type": "WIRELESS_PEER",
+     "mac": "84:8d:84:41:a6:0d",
+     "ip": "",
+     "name": "wlan0wds33",
+     "cost": 20308,
+     "encapid": 107798,
+     "channel": 157,
+     "freq": 5785,
+     "signal": -88,
+     "rssi": 21,
+     "rate": 65,
+     "hopcost": 20307
+    }
+   },
+   "unixTimeStamp": 1789055976914,
+   "gpsLat": -18.921558,
+   "gpsLong": -43.42101,
+   "gpsAlt": 846.7,
+   "numActivePeers": 98
+  }
+ ]
+}
