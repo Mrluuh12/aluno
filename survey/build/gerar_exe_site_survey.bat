@@ -66,7 +66,7 @@ echo.
 echo [3/6] Instalando a rajant-api ^(este exe fala com radio^)...
 python -m pip install rajant-api --no-deps >> "%LOG%" 2>&1
 python -m pip install "protobuf==4.23.4" >> "%LOG%" 2>&1
-python -c "import sys; sys.argv=['x']; import rajant_monitor as m; print('   ok: rajant-api ' + ('AUSENTE - a aba de coleta nao vai funcionar' if m.Breadcrumb is None else 'presente'))" > "%TEMP%\ssapi.txt" 2>&1
+python -c "import sys; sys.argv=['x']; import motor_survey as m; print('   ok: rajant-api ' + ('AUSENTE - a aba de coleta nao vai funcionar' if m.Breadcrumb is None else 'presente'))" > "%TEMP%\ssapi.txt" 2>&1
 type "%TEMP%\ssapi.txt"
 type "%TEMP%\ssapi.txt" >> "%LOG%"
 

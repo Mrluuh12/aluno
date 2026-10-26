@@ -415,9 +415,10 @@ class TestPeers(BaseParser):
         # Só o primeiro peer tem SNR > 30 dB.
         self.assertEqual(self.r["good_peers"], 1)
 
-    def test_custo_e_first_hop(self):
-        self.assertEqual(self.r["peers"][0]["custo"], 120)
-        self.assertEqual(self.r["first_hop"], 120)
+    def test_custo_do_vizinho_nao_entra_no_laudo(self):
+        # O laudo não usa custo (26/10/2026): nem do vizinho nem da rota.
+        self.assertNotIn("custo", self.r["peers"][0])
+        self.assertNotIn("first_hop", self.r)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1928,12 +1929,12 @@ class TestMeshMapper(unittest.TestCase):
     def test_ponto_sem_enlace_nao_vira_sinal_zero(self):
         # Type "N/A" com custo INT_MAX significa SEM ROTA. Virar 0 dBm
         # seria publicar "medi e deu otimo" onde nao houve enlace.
-        falso = {"signal": 0, "rssi": 0, "cost": rm.CUSTO_SEM_ROTA,
+        falso = {"signal": 0, "rssi": 0, "cost": 2147483647,
                  "rate": 0, "channel": 0, "freq": 0}
         a = rm._mm_amostra("X", 1.0, -18.9, -43.4, None, falso, None)
         self.assertIsNone(a["sinal"])
-        self.assertIsNone(a["custo"])
         self.assertIsNone(a["ruido"])
+        self.assertFalse([k for k in a if "custo" in k])
 
     def test_banda_sai_da_frequencia(self):
         bandas = {a["banda"] for a in self.am if a["banda"]}
@@ -1944,11 +1945,6 @@ class TestMeshMapper(unittest.TestCase):
         # o trajeto no tempo.
         t = rm._mm_ts("2026-09-10 15:59:27 UTC")
         self.assertAlmostEqual(t, 1789055967.0, delta=1)
-
-    def test_limiares_do_meshmapper_sao_preservados(self):
-        # A regua que a propria ferramenta usou entra no relatorio, em vez
-        # de impormos a nossa e chamarmos de "o que o MeshMapper mostrou".
-        self.assertIn("goodRSSI", self.sv["limiares_mm"])
 
     def test_campos_sem_medicao_sao_identificados(self):
         # `ler_meshmapper` devolve a amostra crua; quem anexa o RSSI do
@@ -2073,9 +2069,11 @@ class TestCoberturaDisponivel(unittest.TestCase):
     def test_cobertura_e_a_primeira_aba_do_kmz(self):
         # Abrir pelo enlace entregue faz o leitor concluir "falta radio"
         # onde o problema e outro.
-        # Abre nos enlaces bons pela régua da Rajant (pedido de 28/09/2026,
-        # a partir do KMZ oficial do MeshMapper); logo depois, a cobertura.
-        self.assertEqual(rm.CAMPOS_KMZ[:2], ["enl_bons", "sinal_cob"])
+        # A aba de enlaces bons (régua de custo da Rajant) saiu do laudo em
+        # 26/10/2026: o mapa abre na cobertura.
+        self.assertEqual(rm.CAMPOS_KMZ[0], "sinal_cob")
+        self.assertNotIn("enl_bons", rm.CAMPOS_KMZ)
+        self.assertFalse([c for c in rm.CAMPOS_KMZ if "custo" in c])
 
     def test_a_eleicao_acontece_dentro_da_banda_da_amostra(self):
         # Medido no arquivo de exemplo: o mesmo ponto enxerga ERM-28 a
@@ -2429,11 +2427,11 @@ class TestZeroDeVizinhoNaoEMedicao(unittest.TestCase):
         self.assertEqual(am[0]["sinal_cob"], -66)
         self.assertAlmostEqual(am[0]["delta_cob"], 22.0, places=1)
 
-    def test_custo_int_max_do_vizinho_tambem_e_ausencia(self):
+    def test_custo_do_vizinho_nao_vai_para_o_laudo(self):
         d = self._json(-66, 30)
-        d["points"][0]["wlanPeers"]["wlan0"][0]["cost"] = rm.CUSTO_SEM_ROTA
+        d["points"][0]["wlanPeers"]["wlan0"][0]["cost"] = 2147483647
         sv, am, pr = rm._mm_do_json(d, "t")
-        self.assertIsNone(pr[0]["custo"])
+        self.assertFalse([k for k in pr[0] if "custo" in k])
 
     def test_peer_sabe_quem_o_capturou(self):
         # Sem isso, juntar duas capturas daria a cada radio a vizinhanca
@@ -2991,7 +2989,7 @@ class TestSlideDeMetodologia(unittest.TestCase):
                                         for n in pastas[(banda, aba)]),
                                     f"camada '{camada}' não existe em '{aba}'")
                     molduras += 1
-        self.assertGreaterEqual(molduras, 4)
+        self.assertGreaterEqual(molduras, 3)
 
     def test_metodologia_cita_a_fonte_da_regua(self):
         s = self._slide("Metodologia")
@@ -3023,9 +3021,10 @@ class TestSlideDeMetodologia(unittest.TestCase):
             self.assertIn(rng, textos)
 
 
-class TestCustoDoCaminho(unittest.TestCase):
-    """Trace Path Cost: o custo do caminho até o destino do trace, a métrica
-    pela qual o próprio MeshMapper pinta o trajeto."""
+class TestSemCusto(unittest.TestCase):
+    """O laudo não usa custo (pedido de 26/10/2026): nem o do caminho, nem
+    o do enlace, nem a aba de enlaces bons pela régua de custo da Rajant.
+    O TRACE fica só para saber por qual vizinho o rádio sai."""
 
     EXEMPLO = Path(__file__).resolve().parent / "exemplos" / "meshmapper_exemplo.json"
 
@@ -3043,85 +3042,12 @@ class TestCustoDoCaminho(unittest.TestCase):
         _j.dump(base, open(cam, "w"))
         return cam
 
-    def test_caminho_e_enlace_sao_campos_distintos(self):
-        # No arquivo, `cost` é o caminho inteiro e `hopcost` o primeiro
-        # salto. `custo` tem de ser o do ENLACE, como na coleta ao vivo —
-        # antes a mesma coluna "Custo" mudava de sentido com a origem.
-        self.assertEqual(self.am[0]["custo_caminho"], 17952)
-        self.assertEqual(self.am[0]["custo"], 17951)
-        self.assertEqual(self.am[-1]["custo_caminho"], 20308)
-
-    def test_sem_rota_e_medicao_e_nao_zero(self):
-        import json as _j
-        pts = _j.load(open(self.EXEMPLO))["points"][:3]
-        pts[1]["traceInfo"]["path"] = {"type": "N/A", "cost": 2147483647}
-        pts[2]["traceInfo"]["path"]["cost"] = 0
-        _, am, _ = rm.ler_meshmapper(self._json(pts))
-        self.assertEqual(am[1]["custo_caminho"], 2147483647)
-        self.assertTrue(rm.sem_rota(am[1]["custo_caminho"], "custo_caminho"))
-        # Sem rota é a PIOR medição, no vermelho, como no MeshMapper.
-        self.assertEqual(rm.cor_da_leitura(am[1]["custo_caminho"],
-                                           "custo_caminho"), "FF0000")
-        self.assertEqual(rm.fmt_leitura(am[1]["custo_caminho"],
-                                        "custo_caminho"), "sem rota")
-        # 0 não é custo de rota nenhuma — vira None, nunca "medido 0".
-        self.assertIsNone(am[2]["custo_caminho"])
-
-    def test_regua_e_a_do_proprio_meshmapper(self):
-        lim = self.sv["limiares_mm"]
-        self.assertEqual([l for l, _ in rm.FAIXAS_KML["custo_caminho"][:2]],
-                         [lim["greatPath"], lim["goodPath"]])
-        self.assertEqual([c for _, c in rm.FAIXAS_KML["custo_caminho"]],
-                         ["3EAD30", "F26A00", "FF0000"])
-
-    def test_fronteiras(self):
-        for v, cor in ((1, "3EAD30"), (10000, "3EAD30"), (10001, "F26A00"),
-                       (20000, "F26A00"), (20001, "FF0000"),
-                       (43816, "FF0000")):
-            self.assertEqual(rm.cor_da_leitura(v, "custo_caminho"), cor, v)
-        self.assertEqual(rm.limite_de("custo_caminho")[:2], ("<=", 20000.0))
-        self.assertTrue(rm.atende(20000, "<=", 20000.0))
-
-    def test_nenhuma_faixa_mistura_dentro_e_fora(self):
-        op, lim = rm.limite_de("custo_caminho")[:2]
-        baixo = rm.limites_na_faixa_de_baixo("custo_caminho")
-        por = {}
-        for v in list(range(1, 40001)) + [2147483647]:
-            k = rm._faixa_idx(v, rm.FAIXAS_KML["custo_caminho"], baixo)
-            por.setdefault(k, set()).add(rm.atende(v, op, lim))
-        self.assertTrue(all(len(r) == 1 for r in por.values()), por)
-
-    def test_mediana_e_pior_5_nao_se_deixam_levar_pelo_sem_rota(self):
-        # Com um ponto sem rota, a MÉDIA do custo vira dez dígitos. O laudo
-        # escreve "Mediana", e o pior 5% de um custo é o de CIMA.
-        am = [{"radio": "x", "custo_caminho": v}
-              for v in [12000] * 10 + [18000] * 8 + [2147483647]]
-        r = rm.survey_resumo(am)["custo_caminho"]
-        self.assertEqual(r["mediana"], 12000)
-        self.assertGreater(r["med"], 1e8)              # a média, intacta
-        self.assertEqual(r["pior5"], 2147483647)
-        self.assertEqual(rm.fmt_leitura(r["pior5"], "custo_caminho"),
-                         "sem rota")
-
-    def test_pior_5_segue_o_sentido_da_grandeza(self):
-        am = [{"radio": "x", "sinal": float(v), "rtt": float(v + 200)}
-              for v in range(-100, -40)]
-        r = rm.survey_resumo(am)
-        self.assertEqual(r["sinal"]["pior5"], -97.0)    # os menores
-        self.assertEqual(r["rtt"]["pior5"], 157.0)      # os maiores
-
-    def test_coleta_ao_vivo_nao_inventa_caminho(self):
-        # Sem trace (sessão sem acesso direto, rádio que recusa, ou
-        # desligado na tela), o campo existe e é None, e a grandeza não
-        # entra no laudo — nunca como zero.
-        import coleta_rajant as col
-        c = col.Coleta({"10.0.0.1": "CA-1"}, aviso=lambda t: None)
-        s = {"sistema": {"gps_lat": -18.9, "gps_lon": -43.4, "gps_time": 1.0},
-             "radios": [], "_trace": None}
-        am, _ = c._amostra("10.0.0.1", s, 0.0)
-        self.assertIsNone(am["custo_caminho"])
-        self.assertNotIn("custo_caminho", rm.campos_com_medicao(
-            [{"custo_caminho": None, "sinal": -70}]))
+    def test_amostra_do_meshmapper_sem_custo(self):
+        for a in self.am:
+            self.assertFalse([k for k in a if "custo" in k or k.startswith("enl_")], a)
+        for p in self.pr:
+            self.assertFalse([k for k in p if "custo" in k], p)
+        self.assertNotIn("limiares_mm", self.sv)
 
     def test_destino_do_trace_vai_para_o_laudo(self):
         import json as _j
@@ -3131,17 +3057,56 @@ class TestCustoDoCaminho(unittest.TestCase):
         sv, _, _ = rm.ler_meshmapper(self._json(pts))
         self.assertEqual(sv["destino_trace"], "10.188.96.11")
 
-    def test_kmz_tem_aba_legenda_e_pasta_de_referencia(self):
-        import zipfile, io as _io
+    def _gerar(self):
+        import tempfile, sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        return sm.gerar([str(self.EXEMPLO)], str(tmp), aviso=lambda t: None)
+
+    PROIBIDOS = ("custo", "enlaces bons", "enlace bom", "path cost", "hop cost")
+
+    def _sem_proibido(self, texto, onde):
+        baixo = texto.lower()
+        for w in self.PROIBIDOS:
+            self.assertNotIn(w, baixo, f"'{w}' em {onde}")
+
+    def test_kmz_nao_fala_de_custo(self):
+        import zipfile
+        kmzs = [f for f in self._gerar() if f.suffix == ".kmz"]
+        self.assertTrue(kmzs)
+        for k in kmzs:
+            z = zipfile.ZipFile(k)
+            self._sem_proibido(z.read("doc.kml").decode("utf-8"), k.name)
+            self.assertFalse([n for n in z.namelist()
+                              if "custo" in n or "enl_" in n or "pino" in n], k.name)
+
+    def test_ppt_nao_fala_de_custo(self):
+        from pptx import Presentation
+        pp = [f for f in self._gerar() if f.suffix == ".pptx"]
+        self.assertTrue(pp)
+        for k, s in enumerate(Presentation(pp[0]).slides, 1):
+            for sh in s.shapes:
+                if sh.has_text_frame:
+                    self._sem_proibido(sh.text_frame.text, f"slide {k}")
+                if getattr(sh, "has_table", False) and sh.has_table:
+                    for lin in sh.table.rows:
+                        for cel in lin.cells:
+                            self._sem_proibido(cel.text, f"tabela do slide {k}")
+
+    def test_excel_nao_fala_de_custo(self):
+        import io as _io
+        from openpyxl import load_workbook
         rm.cobertura_disponivel(self.am, self.pr)
-        dados, _ = rm.gerar_kml_survey(self.sv, self.am, campos=["custo_caminho"])
-        z = zipfile.ZipFile(_io.BytesIO(dados))
-        doc = z.read("doc.kml").decode()
-        self.assertIn("<name>Custo do caminho</name>", doc)
-        self.assertIn("files/legenda_custo_caminho.png", z.namelist())
-        # Não é requisito do contrato: a pasta diz de quem é a régua.
-        self.assertIn("Fora da referência — ≤ 20000 (2)", doc)
-        self.assertNotIn("Fora do requisito", doc)
+        cfg = rm.configparser.ConfigParser(); rm.cfg_relatorio(cfg)
+        dados, _ = rm.excel_do_meshmapper(self.sv, self.am, self.pr, cfg)
+        wb = load_workbook(_io.BytesIO(dados))
+        for ws in wb.worksheets:
+            for lin in ws.iter_rows(values_only=True):
+                for v in lin:
+                    if isinstance(v, str):
+                        self._sem_proibido(v, f"aba {ws.title}")
 
     def _por_grandeza(self):
         import io as _io
@@ -3156,7 +3121,6 @@ class TestCustoDoCaminho(unittest.TestCase):
     def test_excel_mediana_nao_sai_mais_vazia(self):
         # A coluna lia `r.get("mediana")`, chave que o resumo não tinha.
         linhas = self._por_grandeza()
-        self.assertEqual(linhas["Custo do caminho"][3], 18088)
         self.assertIsNotNone(linhas["SNR"][3])
 
     def test_excel_nao_diz_nao_medido_para_o_que_foi_medido(self):
@@ -3168,11 +3132,10 @@ class TestCustoDoCaminho(unittest.TestCase):
 
     def test_balao_mostra_o_rssi_que_pinta_o_ponto(self):
         b = rm._balao_amostra({"radio": "CA-1", "sinal": -89.0,
-                               "sinal_cob": -72.0, "servidor_cob": "ERM-09",
-                               "custo_caminho": 2147483647})
+                               "sinal_cob": -72.0, "servidor_cob": "ERM-09"})
         self.assertLess(b.index("melhor ERB/ERM: ERM-09"),
                         b.index("RSSI do enlace"))
-        self.assertIn("sem rota", b)
+        self.assertNotIn("custo", b.lower())
 
 
 class TestDescartarParados(unittest.TestCase):
@@ -3232,107 +3195,6 @@ class TestDescartarParados(unittest.TestCase):
         self.assertIn('("vel", "Velocidade", "km/h", 1)', fonte)
 
 
-class TestEnlacesRajant(unittest.TestCase):
-    """O pino do MeshMapper: enlaces bons (custo E SNR na régua da Rajant)
-    por ponto. Conferido contra o KMZ oficial de 28/09/2026: 25 laranja,
-    12 amarelo e 4 vermelho, os mesmos que o gerador daqui conta."""
-
-    def test_regra_de_enlace_nas_fronteiras(self):
-        c = rm.classe_enlace
-        self.assertEqual(c(5000, 30), "otimo")
-        self.assertEqual(c(5001, 30), "bom")
-        self.assertEqual(c(5000, 29), "bom")
-        self.assertEqual(c(10000, 20), "bom")
-        self.assertEqual(c(9198, 36), "bom")        # ERM-24 PTP, 28/09
-        self.assertEqual(c(11355, 34), "ruim")      # a mesma, outro ponto
-        self.assertEqual(c(10000, 19), "ruim")
-        self.assertEqual(c(None, 40), "ruim")
-        self.assertEqual(c(9000, 25, {"goodCost": 8000}), "ruim")
-
-    def _captura(self, tmp):
-        """data.json no formato do MeshMapper: 4 pontos com 0, 1, 2 e 3
-        enlaces bons (o último com 1 ótimo)."""
-        import json as _j
-        def par(custo, snr, n):
-            return {"name": n, "cost": custo, "rssi": snr, "signal": -60,
-                    "frequency": 5785, "channel": 157}
-        pontos = []
-        for k, viz in enumerate((
-                [par(11355, 34, "A")],
-                [par(9198, 36, "A"), par(40000, 15, "B")],
-                [par(9198, 36, "A"), par(9900, 22, "B")],
-                [par(4000, 31, "A"), par(9000, 22, "B"), par(7000, 25, "C")])):
-            pontos.append({"gpsLat": -18.9 + k * 1e-3, "gpsLong": -43.43,
-                           "unixTimeStamp": 1790598443622 + k * 5000,
-                           "wlanPeers": {"wlan0": viz}, "numActivePeers": len(viz),
-                           "traceInfo": {"host": "10.188.96.11",
-                                         "path": {"cost": 12932, "hopcost": 11977}}})
-        d = {"bcc_version": "11.29.1",
-             "configuration": {"goodCost": 10000, "greatCost": 5000,
-                               "goodRSSI": 20, "greatRSSI": 30,
-                               "crumbMeta": {"name": "CA-1024"}},
-             "points": pontos}
-        arq = Path(tmp) / "data.json"
-        arq.write_text(_j.dumps(d), encoding="utf-8")
-        return arq
-
-    def test_pinos_do_meshmapper(self):
-        import tempfile
-        sv, am, pr = rm.ler_meshmapper(str(self._captura(tempfile.mkdtemp())))
-        self.assertEqual([rm.pino_da_leitura(a) for a in am],
-                         ["pin0", "pin1", "pin2", "est1"])
-        self.assertEqual([a["enl_bons"] for a in am], [0, 1, 2, 3])
-        self.assertEqual(am[3]["enl_lista"][0][0], "A")     # o ótimo primeiro
-        self.assertEqual(rm.pino_da_leitura({"enl_total": 0}), "pinx")
-        self.assertIsNone(rm.pino_da_leitura({}))
-
-    def test_um_pino_por_trecho_e_leitura_real(self):
-        K = 1 / 111000.0
-        am = [{"radio": f"CA-{k % 3}", "ts": k, "lat": 0.0, "lon": (k % 6) * K,
-               "enl_bons": k % 4, "enl_otimos": 0, "enl_total": 5}
-              for k in range(30)]
-        am += [{"radio": "CA-9", "ts": 100, "lat": 0.0, "lon": 500 * K,
-                "enl_bons": 2, "enl_otimos": 0, "enl_total": 5}]
-        pinos = rm.pinos_por_trecho(am)
-        self.assertEqual(len(pinos), 2)
-        rep_, n = pinos[0]
-        self.assertEqual(n, 30)
-        self.assertIn(rep_, am)                    # uma leitura que aconteceu
-        self.assertEqual(rep_["enl_bons"], 1)      # 0,1,2,3…: meio, lado pior
-
-    def test_aba_principal_tem_calor_pinos_e_linha_do_custo(self):
-        import zipfile, io as _io
-        K = 1 / 111000.0
-        am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": -18.9, "banda": "5.8 GHz",
-               "lon": -43.43 + 40 * k * K, "enl_bons": k % 4, "enl_otimos": 0,
-               "enl_total": 6, "custo_caminho": 8000 + 3000 * k, "sinal_cob": -70}
-              for k in range(12)]
-        dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 0}, am,
-                                       campos=["enl_bons", "sinal_cob"])
-        z = zipfile.ZipFile(_io.BytesIO(dados))
-        doc = z.read("doc.kml").decode()
-        a0 = doc.index("<name>Enlaces bons (Rajant)</name>")
-        aba = doc[a0:doc.index("<name>RSSI", a0)]
-        self.assertIn("<GroundOverlay>", aba)
-        self.assertIn("<name>Pinos (", aba)
-        self.assertIn(f"<name>{rm.CAMADA_DO_RASTRO} — custo do caminho", aba)
-        t = aba.index(f"<name>{rm.CAMADA_DO_RASTRO} — custo do caminho")
-        self.assertIn("<visibility>1</visibility>", aba[t:t + 200])
-        self.assertIn("#l3EAD30", aba)                 # a linha é do custo
-        self.assertNotIn("<name>Medições", aba)        # os pinos já são elas
-        for n in ("pin0", "pin1", "pin2", "pin3", "est1", "pinx"):
-            self.assertIn(f"files/{n}.png", z.namelist())
-        self.assertIn('<Style id="pin1">', doc)
-        self.assertIn('<hotSpot x="0.5" y="0" xunits="fraction"', doc)   # a ponta
-
-    def test_enlaces_vao_para_o_banco(self):
-        con = rm.banco(":memory:")
-        sid = rm.survey_criar(con, "t", 0.0, None, ["CA-1"])
-        rm.amostras_gravar(con, sid, [{"radio": "CA-1", "ts": 1.0, "lat": 0.0,
-                                       "lon": 0.0, "enl_bons": 2,
-                                       "enl_otimos": 1, "enl_total": 7}])
-        a = rm.survey_amostras(con, sid)[0]
-        self.assertEqual((a["enl_bons"], a["enl_otimos"], a["enl_total"]), (2, 1, 7))
 
 
 class TestCalorPorFaixas(unittest.TestCase):
@@ -3374,16 +3236,16 @@ class TestCalorPorFaixas(unittest.TestCase):
               {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "sinal": -85}]
         img, cx = self._png(am)
         self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xB7, 0x04, 0x04))
-        # No custo, menor é melhor: a pior é a do índice MAIOR.
-        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0, "custo_caminho": 9000},
-              {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "custo_caminho": 25000}]
-        img, cx = self._png(am, "custo_caminho")
-        self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xFF, 0x00, 0x00))
+        # Na latência, menor é melhor: a pior é a do índice MAIOR.
+        am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0, "rtt": 15},
+              {"radio": "CA-2", "ts": 0.0, "lat": 0.0, "lon": 0.0, "rtt": 300}]
+        img, cx = self._png(am, "rtt")
+        self.assertEqual(tuple(self._px(img, cx, 0.0, 0.0)[:3]), (0xE7, 0x4C, 0x3C))
 
     def test_so_leitura_sem_valor_fica_cinza(self):
         am = [{"radio": "CA-1", "ts": 0.0, "lat": 0.0, "lon": 0.0,
-               "custo_caminho": None}]
-        img, cx = self._png(am, "custo_caminho")
+               "snr": None}]
+        img, cx = self._png(am, "snr")
         px = self._px(img, cx, 0.0, 0.0)
         self.assertEqual(tuple(px[:3]), (0x80, 0x80, 0x80))
         self.assertLess(px[3], 200)            # mais transparente que o medido
@@ -3407,7 +3269,6 @@ class TestCalorPorFaixas(unittest.TestCase):
         # Legenda do RSSI, melhor em cima: ≥-67, -70..-68, -74..-71 atendem;
         # a linha vem antes de -80..-75.
         self.assertEqual(rm._requisito_entre("sinal_cob"), 3)
-        self.assertEqual(rm._requisito_entre("custo_caminho"), 2)
         self.assertEqual(rm._requisito_entre("snr"), 2)
 
 
@@ -3444,7 +3305,7 @@ class TestTrilhaConsolidada(unittest.TestCase):
     def test_mediana_do_lado_pior_e_sempre_uma_leitura_real(self):
         self.assertEqual(rm._valor_da_celula([-60, -80], "sinal"), -80)
         self.assertEqual(rm._valor_da_celula([-60, -70, -80], "sinal"), -70)
-        self.assertEqual(rm._valor_da_celula([9000, 21000], "custo_caminho"), 21000)
+        self.assertEqual(rm._valor_da_celula([15, 300], "rtt"), 300)
         self.assertEqual(rm._valor_da_celula([None, -65, None], "sinal"), -65)
         self.assertIsNone(rm._valor_da_celula([None, None], "sinal"))
 
@@ -3498,18 +3359,18 @@ class TestReguaOficial(unittest.TestCase):
 
     def test_cinza_da_leitura_sem_valor_esta_na_legenda(self):
         # Campo, 26/09/2026: "o cinza aí é o quê?" — o mapa pintava cinza a
-        # leitura sem custo do caminho e a legenda não dizia.
+        # leitura sem valor e a legenda não dizia.
         am = []
         for k in range(6):
             am.append({"radio": "CA-1006", "ts": 1000 + k, "lat": -18.9 + k * 1e-4,
-                       "lon": -43.4, "sinal": -60, "sinal_cob": -60, "snr": 30,
-                       "custo_caminho": 9000 if k < 3 else None})
+                       "lon": -43.4, "sinal": -60, "sinal_cob": -60,
+                       "snr": 30 if k < 3 else None})
         dados, _ = rm.gerar_kml_survey({"nome": "t", "inicio": 1000, "fim": 1006},
-                                       am, campos=["custo_caminho"])
+                                       am, campos=["snr"])
         import zipfile, io
         doc = zipfile.ZipFile(io.BytesIO(dados)).read("doc.kml").decode()
         self.assertIn(f"#l{rm.COR_SEM_VALOR}", doc)
-        self.assertIn("sem trace neste trecho", doc)
+        self.assertIn("sem medição neste trecho", doc)
         import tempfile, os
         from unittest import mock as _m
         ditos = []
@@ -3517,16 +3378,16 @@ class TestReguaOficial(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with _m.patch("matplotlib.axes.Axes.text",
                           side_effect=lambda *a, **k: ditos.append(a[2])):
-                orig(os.path.join(d, "l.png"), "custo_caminho")
-        self.assertIn("sem trace neste trecho", ditos)
+                orig(os.path.join(d, "l.png"), "snr")
+        self.assertIn("sem medição neste trecho", ditos)
     def test_snr_e_a_regua_oficial_da_rajant(self):
         # Limites e cores lidos do próprio MeshMapper: goodRSSI e
         # greatRSSI no data.json (em dB de SNR), FF0000/F26A00/3EAD30 nos
         # LineStyle do doc.kml que ele gera.
         if not self.EXEMPLO.exists():
             self.skipTest("fixture do MeshMapper ausente")
-        sv, _, _ = rm.ler_meshmapper(str(self.EXEMPLO))
-        lim = sv["limiares_mm"]
+        import json as _json
+        lim = _json.loads(self.EXEMPLO.read_text(encoding="utf-8"))["configuration"]
         self.assertEqual(rm.FAIXAS_KML["snr"],
                          [(lim["goodRSSI"], "FF0000"),
                           (lim["greatRSSI"], "F26A00"), (999, "3EAD30")])
@@ -4196,7 +4057,8 @@ class _RadioBCAPI:
                  saida="ERM-08 PTP CAM", atraso=0.0, formato="texto",
                  prontos_apos=3, encap=128433, sem_custo=False,
                  senha="", papel="CO", motivo_recusa="authentication failed",
-                 ocupado=0, mudo_no_login=None, parado=False):
+                 ocupado=0, mudo_no_login=None, parado=False,
+                 destino_saida="10.188.96.11", id_saida=None):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -4220,6 +4082,9 @@ class _RadioBCAPI:
         # login desta ferramenta ter defeito e o da biblioteca não.
         self.mudo_no_login = mudo_no_login
         self.parado = parado            # velocidade 0, posição fixa
+        # A saída que o rádio devolve pode ser a de um TRACE de outro
+        # cliente (MeshMapper, BC|Commander): outro destino, outra tarefa.
+        self.destino_saida, self.id_saida = destino_saida, id_saida
         self.conexoes = []              # o lado do rádio, para ver se fechou
         self.pedidos = []
         self._pos = 0
@@ -4305,7 +4170,7 @@ class _RadioBCAPI:
     def _trace(self):
         from rajant_api import Common_pb2
         t = Common_pb2.Trace()
-        t.host = "10.188.96.11"
+        t.host = self.destino_saida
         pa = t.path
         pa.type = pa.WIRELESS_PEER
         pa.name, pa.mac = self.saida, bytes.fromhex("848d8441a60d")
@@ -4317,13 +4182,14 @@ class _RadioBCAPI:
 
     def _texto_imtrace(self):
         # A linha exata do campo, com os números deste rádio falso.
+        d = self.destino_saida
         if self.sem_custo:
-            return ("Target IP(s):  10.188.96.11(396)\n"
-                    "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)): "
+            return (f"Target IP(s):  {d}(396)\n"
+                    f"imtrace to 00:00:0C:9F:F1:8C ({d}(396)): "
                     "no route\x00").encode()
-        return ("Target IP(s):  10.188.96.11(396)\n"
+        return (f"Target IP(s):  {d}(396)\n"
                 "Target MAC(s): 00:00:0C:9F:F1:8C \n"
-                "imtrace to 00:00:0C:9F:F1:8C (10.188.96.11(396)):"
+                f"imtrace to 00:00:0C:9F:F1:8C ({d}(396)):"
                 f"peer=84:8D:84:41:A6:0D/wlan0wds33/{self.encap} "
                 f"cost={self.custo} hop cost={self.salto} channel=157 "
                 "display channel=157 freq=5785 signal=-89 rssi=20 "
@@ -4407,6 +4273,8 @@ class _RadioBCAPI:
                     continue
                 i = m.taskOutputRequest.position // tam
                 o.data = partes[i]
+                if self.id_saida is not None:
+                    o.id = self.id_saida
                 if self.formato == "texto":
                     o.output.totalSize = len(saida)   # e só isso, como em campo
                 else:
@@ -4468,9 +4336,9 @@ class TestBCAPIDireto(_ComBCAPIReal, unittest.TestCase):
         # de FAILED e UNAVAILABLE — e aqui ainda partida em 3 fragmentos.
         radio = _RadioBCAPI(fragmentos=3)
         t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
-        self.assertEqual(t["custo_caminho"], 17952)
-        self.assertEqual(t["custo_saida"], 17951)
         self.assertEqual((t["saida"], t["encap"]), ("wlan0wds33", 128433))
+        # Custo não sai do trace: o laudo não usa custo.
+        self.assertFalse([k for k in t if "custo" in k])
         self.assertEqual((t["sinal"], t["snr"], t["freq"]), (-89, 20, 5785))
         self.assertEqual(t["tipo"], "WIRELESS_PEER")
         pedidos = [m.taskOutputRequest.position for m in radio.pedidos
@@ -4482,9 +4350,9 @@ class TestBCAPIDireto(_ComBCAPIReal, unittest.TestCase):
         # em vez do texto tem de dar o mesmo resultado.
         radio = _RadioBCAPI(formato="proto")
         t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
-        self.assertEqual((t["custo_caminho"], t["custo_saida"], t["encap"]),
-                         (17952, 17951, 128433))
+        self.assertEqual(t["encap"], 128433)
         self.assertEqual(t["saida"], "ERM-08 PTP CAM")
+        self.assertFalse([k for k in t if "custo" in k])
 
     def test_saida_real_do_campo(self):
         # Os bytes EXATOS que o rádio 10.188.99.4 devolveu em 26/09/2026.
@@ -4497,33 +4365,59 @@ class TestBCAPIDireto(_ComBCAPIReal, unittest.TestCase):
             "+AAAAA==")
         t = rm.trace_de_bytes(b)
         self.assertEqual(t["destino"], "10.188.96.11")
-        self.assertEqual((t["custo_caminho"], t["custo_saida"]), (9225, 6352))
         self.assertEqual((t["saida"], t["encap"], t["mac"]),
                          ("wlan0wds50", 128433, "84:8d:84:f0:82:75"))
         self.assertEqual((t["canal"], t["freq"]), (6, 2437))
         self.assertEqual((t["sinal"], t["snr"], t["taxa"]), (-42, 53, 58.5))
 
-    def test_hop_cost_e_display_channel_nao_se_confundem(self):
-        # "hop cost=" contém "cost=" e "display channel=" contém "channel=".
+    def test_display_channel_nao_se_confunde_com_channel(self):
+        # "display channel=" contém "channel=".
         t = rm.trace_de_texto("imtrace to x (1.1.1.1):peer=a/wlan1/5 "
                               "hop cost=100 cost=900 display channel=11 "
                               "channel=6 freq=2437 signal=-70 rssi=25 rate=6.5")
-        self.assertEqual((t["custo_caminho"], t["custo_saida"]), (900, 100))
         self.assertEqual(t["canal"], 6)
+        self.assertEqual((t["saida"], t["encap"]), ("wlan1", 5))
 
-    def test_texto_sem_custo_nao_vira_numero(self):
-        # O "sem rota" em texto não foi visto em campo. Sem custo na linha,
-        # não há medição — nunca um zero nem um sem-rota inventado.
+    def test_texto_sem_peer_nao_vira_enlace(self):
+        # O "sem rota" em texto não foi visto em campo. Sem `peer=` na
+        # linha, não há enlace de saída — nunca um vizinho inventado.
         self.assertIsNone(rm.trace_de_texto(
             "Target IP(s):  10.188.96.11\nimtrace to ?: no route\x00"))
         self.assertIsNone(rm.trace_de_texto("qualquer outra coisa"))
 
-    def test_custo_maximo_e_sem_rota_em_int32_e_uint32(self):
+    def test_saida_de_outra_tarefa_e_trace_ocupado(self):
+        # O rádio roda uma tarefa por vez, de qualquer sessão: a saída que
+        # volta pode ser a do TRACE que outro cliente pediu no meio do nosso.
+        radio = _RadioBCAPI(id_saida=99)
+        with self.assertRaises(rm.TraceOcupado) as ctx:
+            rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertIn("tarefa 99", str(ctx.exception))
+
+    def test_saida_para_outro_destino_e_trace_ocupado(self):
+        for formato in ("texto", "proto"):
+            radio = _RadioBCAPI(destino_saida="10.188.96.1", formato=formato)
+            with self.assertRaises(rm.TraceOcupado, msg=formato) as ctx:
+                rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+            self.assertIn("10.188.96.1,", str(ctx.exception))
+
+    def test_trace_binario_sem_rota_nao_vira_enlace(self):
+        radio = _RadioBCAPI(formato="proto", custo=2147483647)
+        with self.assertRaises(rm.TraceIndisponivel) as ctx:
+            rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertNotIsInstance(ctx.exception, rm.TraceOcupado)
+
+    def test_saida_da_nossa_tarefa_e_aceita(self):
+        radio = _RadioBCAPI(id_saida=7)        # o id do runTaskResult
+        t = rm.bc_trace(_bc_de_teste(radio), "10.188.96.11")
+        self.assertEqual(t["destino"], "10.188.96.11")
+
+    def test_sem_rota_nao_vira_enlace_de_saida(self):
+        # O InstaMesh marca "sem rota" com o custo no máximo de int32 (ou
+        # uint32): o vizinho da linha não é saída nenhuma.
         for v in (2147483647, 4294967295):
             t = rm.trace_de_texto(f"imtrace to x (1.1.1.1):peer=a/wlan0/1 "
                                   f"cost={v} hop cost={v}")
-            self.assertEqual(t["custo_caminho"], rm.CUSTO_SEM_ROTA)
-            self.assertIsNone(t["custo_saida"])
+            self.assertIsNone(t)
 
     def test_trace_recusado_diz_por_que(self):
         radio = _RadioBCAPI(recusa="permission denied for role co")
@@ -4605,16 +4499,16 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         th.start(); _t.sleep(segundos); c.parar(); th.join(15)
         return c, avisos
 
-    def test_amostra_leva_o_enlace_de_saida_e_o_custo_do_caminho(self):
+    def test_amostra_leva_o_enlace_de_saida(self):
         # O trace diz a saída por MAC/interface/encap; o nome vem do serial
         # que a descoberta leu (encap = sufixo do serial).
         malha = {"10.188.97.80": {"nome": "ERM-08 PTP CAM", "serial": 128433}}
         c, _ = self._rodar(_RadioBCAPI(), malha=malha)
         self.assertTrue(c.amostras)
         a = c.amostras[0]
-        self.assertEqual(a["custo_caminho"], 17952)
-        self.assertEqual(a["custo"], 17951)           # o do enlace de saída
         self.assertEqual(a["servidor"], "ERM-08 PTP CAM")
+        # O custo que o trace traz não entra na amostra.
+        self.assertFalse([k for k in a if "custo" in k or k.startswith("enl_")])
         self.assertEqual((a["sinal"], a["snr"]), (-89, 20))
         self.assertEqual(a["banda"], "5.8 GHz")
         # A leitura enxuta não traz `configuration`: o nome é o da
@@ -4627,15 +4521,20 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         c, _ = self._rodar(_RadioBCAPI())
         self.assertEqual(c.amostras[0]["servidor"], "wlan0wds33")
 
-    def test_sem_rota_chega_como_sem_rota(self):
+    def test_sem_rota_nao_inventa_enlace_de_saida(self):
+        # Custo no máximo de int32 é o "sem rota" do InstaMesh: a amostra
+        # fica com o vizinho de sinal mais forte, como sem trace.
         c, _ = self._rodar(_RadioBCAPI(custo=2147483647))
-        self.assertTrue(rm.sem_rota(c.amostras[0]["custo_caminho"],
-                                    "custo_caminho"))
+        self.assertTrue(c.amostras)
+        self.assertEqual(c.trace_ok, 0)
+        self.assertGreater(c.trace_falhas, 0)
+        self.assertNotIn(c.amostras[0]["servidor"], ("ERM-08 PTP CAM", "wlan0wds33"))
+        self.assertTrue([m for m in c.trace_motivos if "sem enlace de saída" in m])
 
     def test_recusa_tira_so_aquele_radio_do_trace(self):
         c, avisos = self._rodar(_RadioBCAPI(recusa="permission denied"))
         self.assertTrue(c.amostras, "a recusa do trace parou a coleta")
-        self.assertIsNone(c.amostras[-1]["custo_caminho"])
+        self.assertNotIn(c.amostras[-1]["servidor"], ("ERM-08 PTP CAM", "wlan0wds33"))
         self.assertIn("permission denied", c.trace_sem["10.0.0.6"])
         self.assertIsNone(c.trace_parado)       # um rádio só não desliga tudo
         # Uma vez durante a coleta (o resumo do fim repete, de propósito).
@@ -4660,7 +4559,7 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
             segundos=6.0)
         self.assertIsNone(c.trace_parado)
         bons = [a for a in c.amostras if a["radio"] == "CA-1006"]
-        self.assertTrue(bons and all(a["custo_caminho"] == 17952 for a in bons))
+        self.assertTrue(bons and all(a["servidor"] == "wlan0wds33" for a in bons))
         self.assertIn("10.0.0.7", c.trace_sem)
         self.assertIn("no route", c.trace_sem["10.0.0.7"])
         # O que o rádio disse aparece na tela, para aprender o formato.
@@ -4699,7 +4598,7 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
         self.assertIsNone(c.trace_parado)
         self.assertEqual(c.trace_ocupado, 3)
         self.assertGreater(c.trace_ok, 0)
-        self.assertEqual(c.amostras[-1]["custo_caminho"], 17952)
+        self.assertEqual(c.amostras[-1]["servidor"], "wlan0wds33")
         self.assertEqual(len([l for l in avisos if "trace ocupado" in l]), 1)
         # Motivos agrupados sem a sessão, que muda a cada vez.
         self.assertEqual(
@@ -4828,7 +4727,10 @@ class TestColetaComTrace(_ComBCAPIReal, unittest.TestCase):
             self.assertIn(etapa, txt)
         self.assertIn("filtro 'gps'", txt)
         self.assertIn("RESULTADO DO TRACE\nOK", txt)
-        self.assertIn("custo_caminho: 17952", txt)
+        self.assertIn("saida: wlan0wds33", txt)
+        # A parte interpretada não mostra custo; só a linha crua do rádio.
+        interpretado = txt.split("RESULTADO DO TRACE", 1)[1]
+        self.assertNotIn("custo", interpretado)
         self.assertIn("saída (base64)", txt)
 
 
@@ -5407,13 +5309,11 @@ class TestColetaAoVivo(unittest.TestCase):
         a = c.amostras[0]
         self.assertEqual(a["ruido"], -95, "ruído do rádio não foi aproveitado")
         self.assertIsNotNone(a["snr"], "SNR ficou None")
-        self.assertEqual(a["custo"], 5000)
+        # O custo que o rádio manda não entra na amostra: o laudo não usa.
+        self.assertFalse([k for k in a if "custo" in k or k.startswith("enl_")])
         # É o que faz SNR e ruído virarem aba no KMZ e slide no PPT.
         self.assertEqual(set(rm.campos_com_medicao(c.amostras)),
-                         {"snr", "ruido", "enl_bons"})
-        # Custo 5000 e SNR 27: bom (não ótimo: SNR abaixo de 30).
-        self.assertEqual((a["enl_bons"], a["enl_otimos"], a["enl_total"]),
-                         (1, 0, 1))
+                         {"snr", "ruido"})
         # O RSSI do laudo e `sinal_cob`, e na coleta ao vivo ele nasce do
         # mesmo passo do arquivo: `cobertura_disponivel` sobre os
         # vizinhos lidos. Sem esta chamada o mapa sai sem a camada

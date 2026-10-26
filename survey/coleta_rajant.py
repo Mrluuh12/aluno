@@ -200,8 +200,8 @@ class Coleta:
         self.fim         = None
         self.em_voo      = {}   # ip -> quando a leitura em curso começou
         self.duracoes    = []   # segundos das últimas leituras, para a tela
-        # TRACE: por onde cada rádio sai até o destino, e com que custo —
-        # o que o MeshMapper grava em traceInfo. None = não medir.
+        # TRACE: por qual vizinho cada rádio sai até o destino — o que o
+        # MeshMapper grava em traceInfo.path. None = não medir.
         self.trace_destino = (trace_destino or "").strip() or None
         self.trace_ok      = 0
         self.trace_falhas  = 0
@@ -346,7 +346,7 @@ class Coleta:
             self.trace_motivos[m] = self.trace_motivos.get(m, 0) + 1
         if primeira:
             self.aviso(f"trace ocupado em {nome} ({ip}): o rádio ainda roda "
-                       f"um TRACE — esta leitura sai sem o custo do caminho, "
+                       f"um TRACE — esta leitura sai sem o enlace de saída, "
                        f"a próxima tenta de novo")
         if insiste:
             self.aviso(f"{nome}: TRACE ocupado em {self.OCUPADO_SEGUIDAS} "
@@ -400,7 +400,7 @@ class Coleta:
         if geral:
             self.aviso(f"trace desligado: {len(self.trace_sem)} rádios "
                        f"falharam e nenhum deu certo ({self.trace_parado}) — "
-                       f"a coleta segue sem o custo do caminho")
+                       f"a coleta segue sem o enlace de saída")
         return None
 
     def _amostra(self, ip, d, agora):
@@ -452,18 +452,17 @@ class Coleta:
             for p in (r.get("peers") or []):
                 # MESMA regra do arquivo: `_i()` devolve 0 para campo
                 # ausente, e 0 dBm ganharia a eleição do melhor sinal.
-                sig, snr, custo, _ru = rm.limpar_enlace(
-                    p.get("sinal"), p.get("snr"), p.get("custo"))
+                sig, snr, _ru = rm.limpar_enlace(p.get("sinal"), p.get("snr"))
                 vizinhos.append({
                     "nome": (self._nome_vizinho(p.get("ip"), p.get("encap"))
                              or p.get("nome") or p.get("ip")),
                     "ip": p.get("ip"), "encap": p.get("encap"),
                     "sinal": sig, "snr": snr,
-                    "custo": custo, "taxa": p.get("taxa") or None,
+                    "taxa": p.get("taxa") or None,
                     "banda": banda_r, "canal": r.get("canal"),
                 })
                 if sig is not None and (bom is None or sig > bom["sinal"]):
-                    bom = {"sinal": sig, "snr": snr, "custo": custo,
+                    bom = {"sinal": sig, "snr": snr,
                            "taxa": p.get("taxa") or None,
                            "ruido": ruido_r, "banda": banda_r,
                            "canal": r.get("canal"),
@@ -477,7 +476,7 @@ class Coleta:
         if snr_f is None and bom.get("sinal") is not None and bom.get("ruido"):
             snr_f = round(bom["sinal"] - bom["ruido"], 1)
         enl = {"sinal": bom.get("sinal"), "snr": snr_f,
-               "ruido": bom.get("ruido"), "custo": bom.get("custo"),
+               "ruido": bom.get("ruido"),
                "taxa": bom.get("taxa"), "banda": bom.get("banda"),
                "canal": bom.get("canal"), "servidor": bom.get("servidor"),
                "interf": bom.get("interf")}
@@ -485,13 +484,12 @@ class Coleta:
         # Com o trace, o enlace da amostra é o de SAÍDA de verdade — o mesmo
         # que o arquivo do MeshMapper grava em traceInfo.path. Sem ele, fica
         # o vizinho de sinal mais forte: nos dados do CA-1006, a saída real
-        # em só 5 de 53 pontos, porque a rede escolhe pelo custo do CAMINHO
-        # e a lista de vizinhos só mostra o custo de um salto.
+        # em só 5 de 53 pontos — o vizinho mais forte nem sempre é o
+        # caminho que a rede escolhe.
         tr = d.get("_trace") or None
-        custo_caminho = None
         if tr:
-            sig_t, snr_t, _c, ruido_t = rm.limpar_enlace(
-                tr.get("sinal"), tr.get("snr"), None)
+            sig_t, snr_t, ruido_t = rm.limpar_enlace(tr.get("sinal"),
+                                                     tr.get("snr"))
             radio_t = next((r for r in (d.get("radios") or [])
                             if tr.get("canal") is not None
                             and r.get("canal") == tr.get("canal")), None)
@@ -499,7 +497,7 @@ class Coleta:
                    # O piso de ruído medido na interface de saída; sem ela,
                    # recuperado de sinal − SNR, como no arquivo.
                    "ruido": (radio_t or {}).get("ruido") or ruido_t,
-                   "custo": tr.get("custo_saida"), "taxa": tr.get("taxa"),
+                   "taxa": tr.get("taxa"),
                    "banda": (rm._norm_banda(tr["freq"]) if tr.get("freq")
                              else enl["banda"]),
                    "canal": tr.get("canal"),
@@ -513,13 +511,8 @@ class Coleta:
                                          None), tr.get("encap"))
                                 or tr.get("saida") or tr.get("mac")),
                    "interf": (radio_t or {}).get("interf_pct")}
-            custo_caminho = tr.get("custo_caminho")
 
-        # Enlaces do ponto pela régua da Rajant: o número do pino do
-        # MeshMapper (todas as WLANs do rádio, como ele conta).
-        enlaces = rm.contar_enlaces(vizinhos)
         return {
-            **enlaces,
             "radio": nome, "ts": time.time(),
             "lat": lat, "lon": lon, "alt": s.get("gps_alt"),
             "vel": s.get("gps_vel"), "sats": s.get("gps_sats"),
@@ -528,18 +521,14 @@ class Coleta:
             # Latência e perda o rádio não mede — ficam None, e sem
             # medição a grandeza não vira aba nem slide.
             "rtt": None, "perda": None,
-            # Custo do CAMINHO até o destino do trace. Sem trace (rádio
-            # recusou, ou desligado na tela), fica None: a aba e o slide
-            # não aparecem, em vez de sair uma régua vazia.
-            "custo_caminho": custo_caminho,
             # Interferência a coleta ao vivo TEM, e o MeshMapper nunca deu:
             # é a fração do meio ocupada por transmissor alheio. Só aparece
             # a partir da segunda leitura do mesmo rádio (os contadores são
             # cumulativos desde o boot; ver calcular_taxas).
             "interf": enl["interf"], "vazao": None,
-            # Custo do ENLACE: o de saída com trace; sem ele, o do vizinho
-            # de sinal mais forte.
-            "custo": enl["custo"], "taxa": enl["taxa"],
+            # Taxa do enlace: o de saída com trace; sem ele, o do vizinho de
+            # sinal mais forte.
+            "taxa": enl["taxa"],
             "peers": len(vizinhos),
             "banda": enl["banda"], "canal": enl["canal"],
             "servidor": enl["servidor"],
@@ -746,7 +735,9 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
     sv = {"nome": coleta.nome, "movel": ", ".join(sorted({a["radio"] for a in am})),
           "inicio": coleta.inicio, "fim": coleta.fim,
           "intervalo_s": None, "arquivo": "coleta ao vivo",
-          "versao_bcc": None, "limiares_mm": {}}
+          "versao_bcc": None,
+          # Para onde o TRACE apontou o enlace de saída; None = sem trace.
+          "destino_trace": coleta.trace_destino if coleta.trace_ok else None}
     sv["cobertura"] = rm.cobertura_disponivel(am, pr)
 
     con = rm.banco()
@@ -757,6 +748,8 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
         rm.survey_fechar(con, sid, sv["fim"], rm.survey_resumo(am),
                          n_moveis=len(radios), n_fixos=0,
                          intervalo_efetivo_s=rm._mm_intervalo_real(am))
+        if sv["destino_trace"]:
+            rm.survey_destino_trace(con, sid, sv["destino_trace"])
     finally:
         con.close()
 
@@ -960,9 +953,9 @@ def main(argv=None):
                     help="coleta só os rádios que reportam posição")
     ap.add_argument("-o", "--saida", default=".")
     ap.add_argument("--sem-trace", action="store_true",
-                    help="não medir o custo do caminho (TRACE)")
+                    help="não pedir o TRACE (enlace de saída)")
     ap.add_argument("--destino-trace", default=rm.DESTINO_TRACE_PADRAO,
-                    help="host até onde medir o custo do caminho")
+                    help="host para onde o TRACE aponta o enlace de saída")
     ap.add_argument("--testar-trace", metavar="IP",
                     help="diagnóstico de campo: pergunta a UM rádio como "
                          "ele responde à leitura e ao TRACE e grava um .txt")

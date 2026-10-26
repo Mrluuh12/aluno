@@ -3,26 +3,18 @@
 #
 # Use:  python -m PyInstaller --noconfirm --clean build/site_survey.spec
 #
-# Diferenças em relação aos outros dois specs, e o motivo de cada uma:
+# O motivo de cada escolha:
 #
-#  * rajant_api ENTRA (hiddenimports). Este exe fala com rádio — é o que
-#    o survey_meshmapper.exe deliberadamente não faz. A importação é
-#    dentro de try/except, então o PyInstaller não a acha sozinho.
-#  * tkinter NÃO entra nos excludes: é a interface do programa. Herdar o
-#    exclude do spec do rajant_monitor geraria um exe que abre e fecha na
-#    hora, com o erro só no console que ninguém vê.
-#  * prometheus_client ENTRA, mesmo este exe não expondo /metrics: o
-#    rajant_monitor o importa no topo e sai se faltar. Excluí-lo uma vez
-#    e o exe passou a fechar sozinho — ver o bloco de excludes.
-#  * Sem servidor web em uso. O rajant_monitor entra como
-#    BIBLIOTECA (parser, KMZ, PPT, Excel), nunca executado — o coletor de
-#    métricas e a página web não têm por que vir junto.
+#  * rajant_api ENTRA (hiddenimports). A importação é dentro de
+#    try/except, então o PyInstaller não a acha sozinho.
+#  * tkinter NÃO entra nos excludes: é a interface do programa. Sem ele o
+#    exe abre e fecha na hora, com o erro só no console que ninguém vê.
+#  * motor_survey é o motor (parser, KMZ, PPT, Excel). Ele não tem coletor
+#    de métricas nem página web: é um projeto separado do rajant_monitor.
 #  * console=True mesmo tendo janela: os módulos também rodam por linha de
 #    comando, e com console=False a saída some — o erro junto.
 #
-# A máquina que roda ESTE exe precisa de rede até a malha. Quem só gera
-# relatório de arquivo continua tendo o survey_meshmapper.exe, que não
-# carrega a rajant-api nem exige rede.
+# A aba Coleta precisa de rede até a malha; a aba Arquivos não.
 import os
 
 datas = []
@@ -57,21 +49,15 @@ a = Analysis(
                    "rajant_api.Message_pb2", "rajant_api.State_pb2",
                    "google.protobuf.text_format",
                    "coleta_rajant", "survey_meshmapper",
-                   "rajant_monitor",
+                   "motor_survey",
                    "tkinter", "tkinter.ttk", "tkinter.filedialog",
                    "tkinter.messagebox", "tkinter.constants",
                    "sv_ttk"],
     hookspath=[],
     runtime_hooks=[],
-    # ATENÇÃO ao mexer aqui: excluir um módulo que o rajant_monitor importa
+    # ATENÇÃO ao mexer aqui: excluir um módulo que o motor_survey importa
     # NO TOPO quebra o executável inteiro, e o sintoma não parece um erro
     # de empacotamento — o exe abre e fecha sozinho.
-    #
-    # Foi o que aconteceu com `prometheus_client`: excluí por raciocinar
-    # que este exe não expõe /metrics, mas o rajant_monitor o importa no
-    # import do módulo e SAI se faltar. Resultado no cliente:
-    #   ERRO: pip install prometheus-client
-    # com o pacote instalado na máquina — ele só não estava DENTRO do exe.
     #
     # Há teste que bloqueia cada nome desta lista e confere que o
     # site_survey ainda importa.
