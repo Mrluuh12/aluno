@@ -38,7 +38,7 @@ EXTENSOES = [("Captura do MeshMapper", "*.kmz *.json *.csv"),
 # ══════════════════════════════════════════════════════════════
 def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
           fazer_kmz=True, fazer_ppt=True, fazer_excel=True, aviso=print,
-          areas=None):
+          areas=None, fazer_mapas=True):
     """Lê as capturas e grava os relatórios. Devolve a lista de arquivos.
 
     `juntar=True` produz UM relatório com tudo — é o caso da campanha de
@@ -48,8 +48,12 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
     `aviso` recebe cada linha de progresso; a interface passa a própria
     função para escrever na janela.
 
-    `areas`: o KMZ/KML com as áreas demarcadas (ou a lista já lida). Sem
-    ele vale o [survey] areas do config; vazio nos dois, laudo sem áreas.
+    `areas`: os arquivos das áreas — GeoTIFF de cada área e/ou KMZ/KML
+    com polígonos — ou a lista já lida. Sem ele vale o [survey] areas do
+    config; vazio nos dois, laudo sem áreas.
+
+    `fazer_mapas`: com GeoTIFF nas áreas, grava em `mapas/` o mapa de cada
+    área, banda e grandeza como GeoTIFF (o PPT recebe os mapas sempre).
     """
     arquivos = [str(a) for a in arquivos]
     if not arquivos:
@@ -57,10 +61,12 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
     destino = Path(saida or ".").resolve()
     destino.mkdir(parents=True, exist_ok=True)
     cfg = rm.carregar_config(); rm.cfg_relatorio(cfg)
-    areas = rm.carregar_areas(areas, cfg)
+    areas = rm.carregar_areas(areas, cfg, aviso)
     if areas:
-        aviso(f"Áreas demarcadas: {len(areas)} em {areas[0]['arquivo']} — "
-              + ", ".join(a["nome"] for a in areas))
+        com_img = sum(1 for a in areas if a.get("imagem"))
+        aviso(f"Áreas demarcadas: {len(areas)} — "
+              + ", ".join(a["nome"] for a in areas)
+              + (f" ({com_img} com imagem)" if com_img else ""))
 
     if not juntar:
         feitos = []
@@ -74,7 +80,8 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
                 sub = destino / rm._slug_arquivo(Path(arq).stem)[:60]
                 sub.mkdir(parents=True, exist_ok=True)
                 feitos += _um(arq, sub, cfg, nome, bandas,
-                              fazer_kmz, fazer_ppt, fazer_excel, aviso, areas)
+                              fazer_kmz, fazer_ppt, fazer_excel, aviso, areas,
+                              fazer_mapas)
             except Exception as e:
                 # Um arquivo ruim não pode levar os outros junto.
                 aviso(f"    ! falhou: {e}")
@@ -90,10 +97,11 @@ def gerar(arquivos, saida=None, nome=None, juntar=True, bandas=None,
         else:
             aviso(f"  FALHOU  {o['arquivo']} — {o.get('erro')}")
     return _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
-                   fazer_kmz, fazer_ppt, fazer_excel, aviso, areas)
+                   fazer_kmz, fazer_ppt, fazer_excel, aviso, areas, fazer_mapas)
 
 
-def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso, areas=None):
+def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso, areas=None,
+        mapas=True):
     sid, sv, amostras, peers = rm.importar_meshmapper(arq, nome=nome,
                                                       areas=areas)
     sv["origens"] = [{"arquivo": Path(arq).name, "ok": True,
@@ -101,7 +109,7 @@ def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso, areas=None):
                       "peers": len(peers), "inicio": sv.get("inicio"),
                       "fim": sv.get("fim")}]
     return _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
-                   kmz, ppt, xls, aviso, areas)
+                   kmz, ppt, xls, aviso, areas, mapas)
 
 
 def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso,
@@ -136,7 +144,8 @@ def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso,
 
 
 def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
-            fazer_kmz, fazer_ppt, fazer_excel, aviso, areas=None):
+            fazer_kmz, fazer_ppt, fazer_excel, aviso, areas=None,
+            fazer_mapas=True):
     campos = rm.campos_com_medicao(amostras)
     faltando = [c for c in rm.CAMPOS_KMZ if c not in campos]
     dur = ((sv["fim"] - sv["inicio"]) / 60.0) if sv.get("fim") and sv.get("inicio") else 0
@@ -184,10 +193,17 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
                 alvo.write_bytes(dados); feitos.append(alvo)
             except Exception as e:
                 aviso(f"  ! KMZ da vizinhança não gerado: {e}")
+    mapas = {}
+    if any(a.get("imagem") for a in (areas or [])) and (fazer_ppt or fazer_mapas):
+        aviso("  desenhando os mapas sobre as imagens das áreas…")
+        mapas, arq_m = rm.mapas_das_areas(amostras, areas,
+                                          destino if fazer_mapas else None,
+                                          aviso)
+        feitos += arq_m
     if fazer_ppt:
         try:
             dados, nome_ppt = rm.ppt_survey_anglo(sid, cfg, bandas,
-                                                  sitios=sitios)
+                                                  sitios=sitios, mapas=mapas)
             alvo = destino / nome_ppt
             alvo.write_bytes(dados); feitos.append(alvo)
         except Exception as e:
@@ -472,10 +488,13 @@ def main():
                     help="um conjunto de relatórios por arquivo, em vez de "
                          "juntar tudo num só")
     ap.add_argument("--bandas", help="bandas a detalhar no PPT")
-    ap.add_argument("--areas", metavar="ARQ",
-                    help="KMZ/KML do Google Earth com as áreas demarcadas "
-                         "(um polígono por área; o nome do polígono é o da "
-                         "área). Leitura fora das áreas sai do laudo.")
+    ap.add_argument("--areas", metavar="ARQ", nargs="+",
+                    help="as áreas: GeoTIFF de cada área (o nome do arquivo "
+                         "é o da área) e/ou KMZ/KML do Google Earth com um "
+                         "polígono por área. Leitura fora das áreas sai do "
+                         "laudo.")
+    ap.add_argument("--sem-mapas", action="store_true",
+                    help="não gravar os mapas das áreas em GeoTIFF")
     ap.add_argument("--sem-ppt", action="store_true")
     ap.add_argument("--sem-excel", action="store_true")
     ap.add_argument("--sem-kmz", action="store_true")
@@ -492,7 +511,7 @@ def main():
     try:
         feitos = gerar(a.arquivos, a.saida, a.nome, not a.separado, bandas,
                        not a.sem_kmz, not a.sem_ppt, not a.sem_excel,
-                       areas=a.areas)
+                       areas=a.areas, fazer_mapas=not a.sem_mapas)
         print(f"\n{len(feitos)} arquivo(s) gerado(s).")
     except Exception as e:
         print(f"\nERRO: {e}")

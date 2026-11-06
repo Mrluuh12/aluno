@@ -1934,7 +1934,9 @@ def calor_por_faixas(amostras, campo, raio_m=RAIO_CALOR_M, res_m=2.5,
     img = np.dstack([rgb, np.clip(a_fim * 255, 0, 255)]).astype(np.uint8)
     buf = _io.BytesIO()
     Image.fromarray(img, "RGBA").save(buf, "PNG", optimize=True)
-    caixa = (y1 / ky, y0 / ky, x1 / kx, x0 / kx)
+    # A extensão EXATA da imagem: W e H arredondam para cima, e a caixa
+    # pelo x1/y0 pedidos esticava o calor alguns metros sobre o mapa.
+    caixa = (y1 / ky, (y1 - H * res) / ky, (x0 + W * res) / kx, x0 / kx)
     return buf.getvalue(), caixa, len(lidas)
 
 
@@ -4034,7 +4036,9 @@ def info_das_areas(areas, infos):
     ordem = [a["nome"] for a in areas]
     por_area = {n: sum((i.get("por_area") or {}).get(n, 0) for i in infos)
                 for n in ordem}
-    return {"arquivo": areas[0].get("arquivo"), "ordem": ordem,
+    arqs = list(dict.fromkeys(a.get("arquivo") for a in areas if a.get("arquivo")))
+    return {"arquivo": ", ".join(arqs) if len(arqs) <= 3
+            else f"{len(arqs)} arquivos", "ordem": ordem,
             "lidas": sum(i.get("lidas", 0) for i in infos),
             "fora": sum(i.get("fora", 0) for i in infos),
             "sobrepostas": sum(i.get("sobrepostas", 0) for i in infos),
@@ -4061,16 +4065,498 @@ def ordem_das_areas(amostras, sv=None, areas=None):
     return [n for n in ordem if n in tem] + fora_da_ordem
 
 
-def carregar_areas(fonte=None, cfg=None):
-    """As áreas a usar: `fonte` (caminho ou lista já lida) ou, sem ela, o
-    arquivo de [survey] areas do config. None = laudo sem áreas."""
+def carregar_areas(fonte=None, cfg=None, aviso=None):
+    """As áreas a usar. `fonte`: um caminho, uma lista de caminhos (KMZ/KML
+    com polígonos e GeoTIFF das áreas) ou a lista já lida; sem ela, os
+    arquivos de [survey] areas do config, separados por ";". None = laudo
+    sem áreas.
+
+    Cada GeoTIFF é uma área: o nome do arquivo é o nome dela e o contorno é
+    a parte da imagem que tem dado. Com polígonos de KMZ/KML junto, quem
+    demarca são os polígonos, e cada imagem vira o fundo da área que ela
+    cobre."""
     if isinstance(fonte, list):
-        return fonte or None
-    if not fonte and cfg is not None:
+        # Lista vazia é "sem áreas" de propósito: não cai no config.
+        if not fonte:
+            return None
+        if isinstance(fonte[0], dict):
+            return fonte
+    elif not fonte and cfg is not None:
         fonte = cfg.get("survey", "areas", fallback="").strip()
+    if isinstance(fonte, (str, Path)):
+        fonte = [x.strip() for x in str(fonte).split(";") if x.strip()]
     if not fonte:
         return None
-    return ler_areas(fonte)
+    poligonos, imagens = [], []
+    for f in fonte:
+        if e_geotiff(f):
+            if aviso:
+                aviso(f"lendo {Path(f).name}…")
+            imagens.append(ler_area_geotiff(f))
+        else:
+            poligonos.extend(ler_areas(f))
+    if not poligonos:
+        vistos = {}
+        for a in imagens:
+            n = vistos[a["nome"].casefold()] = vistos.get(a["nome"].casefold(), 0) + 1
+            if n > 1:
+                a["nome"] = f"{a['nome']} ({n})"
+        return imagens
+    for a in poligonos:
+        a["imagem"] = _imagem_que_cobre(a, imagens)
+    return poligonos
+
+
+def _imagem_que_cobre(area, imagens):
+    """A imagem cuja extensão cobre a maior parte da caixa da área."""
+    s_, n_, o_, l_ = area["caixa"]
+    melhor, fr_m = None, 0.0
+    for im in imagens:
+        s2, n2, o2, l2 = im["caixa_imagem"]
+        dy = max(0.0, min(n_, n2) - max(s_, s2))
+        dx = max(0.0, min(l_, l2) - max(o_, o2))
+        tot = max((n_ - s_) * (l_ - o_), 1e-18)
+        if dx * dy / tot > fr_m:
+            melhor, fr_m = im["imagem"], dx * dy / tot
+    return melhor if fr_m >= 0.5 else None
+
+
+# ══════════════════════════════════════════════════════════════
+# IMAGENS DAS ÁREAS (GeoTIFF)
+# ══════════════════════════════════════════════════════════════
+# A imagem de cada área (ortofoto de drone, satélite) com coordenadas. O
+# programa pinta a medição em cima dela, com as mesmas cores do KMZ, e o
+# mapa vai pronto para o slide — sem print do Google Earth — e sai também
+# como GeoTIFF, para abrir no QGIS/ArcGIS.
+#
+# Arquivo grande é lido REDUZIDO (no máximo `max_px` no lado maior) e só
+# na janela da área. O resultado fica em `fundo_cache/`: a mesma imagem
+# não é relida a cada survey.
+
+EXT_GEOTIFF = (".tif", ".tiff")
+PASTA_CACHE_IMAGEM = "fundo_cache"
+
+
+def e_geotiff(caminho):
+    return Path(str(caminho)).suffix.lower() in EXT_GEOTIFF
+
+
+def _rasterio():
+    try:
+        import rasterio
+        return rasterio
+    except ImportError:
+        raise RuntimeError("para ler GeoTIFF falta o pacote rasterio "
+                           "(pip install rasterio)")
+
+
+def _cache_imagem(caminho, *chave):
+    """Caminho do arquivo de cache para esta imagem e esta leitura. Muda
+    quando o arquivo muda (tamanho e data)."""
+    import hashlib
+    p = Path(caminho).resolve()
+    st = p.stat()
+    h = hashlib.sha1(repr((str(p), st.st_size, int(st.st_mtime))
+                          + tuple(chave)).encode()).hexdigest()[:20]
+    return Path(PASTA_CACHE_IMAGEM) / f"{p.stem[:40]}_{h}"
+
+
+def _simplificar(pts, tol):
+    """Douglas-Peucker de uma linha [(x, y)]: tira os degraus do contorno
+    vindo de pixel sem tirar a forma."""
+    if len(pts) < 3:
+        return list(pts)
+    manter = [False] * len(pts)
+    manter[0] = manter[-1] = True
+    pilha = [(0, len(pts) - 1)]
+    while pilha:
+        i, j = pilha.pop()
+        (x0, y0), (x1, y1) = pts[i], pts[j]
+        dx, dy = x1 - x0, y1 - y0
+        n = math.hypot(dx, dy)
+        k_max, d_max = None, tol
+        for k in range(i + 1, j):
+            x, y = pts[k]
+            d = (abs(dy * (x - x0) - dx * (y - y0)) / n if n
+                 else math.hypot(x - x0, y - y0))
+            if d > d_max:
+                k_max, d_max = k, d
+        if k_max is not None:
+            manter[k_max] = True
+            pilha += [(i, k_max), (k_max, j)]
+    return [p for p, m in zip(pts, manter) if m]
+
+
+def _area_do_anel(pts):
+    return abs(sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1)
+                   in zip(pts, pts[1:] + pts[:1]))) / 2.0
+
+
+def ler_area_geotiff(caminho, max_px=1200):
+    """A área de um GeoTIFF: o nome do arquivo é o nome da área, e o
+    contorno é a parte da imagem que tem dado (sem o nodata/transparente
+    em volta). Imagem sem nodata dá o retângulo inteiro.
+
+    Devolve o dict de área de `ler_areas`, mais "imagem" (o caminho) e
+    "caixa_imagem" (a extensão da imagem em graus)."""
+    p = Path(caminho)
+    if not p.exists():
+        raise RuntimeError(f"imagem não encontrada: {p}")
+    cache = _cache_imagem(p, "area", max_px).with_suffix(".json")
+    if cache.exists():
+        try:
+            a = json.loads(cache.read_text(encoding="utf-8"))
+            a["poligonos"] = [{"externo": [tuple(q) for q in g["externo"]],
+                               "buracos": [[tuple(q) for q in b]
+                                           for b in g["buracos"]]}
+                              for g in a["poligonos"]]
+            a["caixa"] = tuple(a["caixa"]); a["caixa_imagem"] = tuple(a["caixa_imagem"])
+            a["imagem"] = str(p.resolve())
+            return a
+        except Exception:
+            pass
+    rio = _rasterio()
+    import numpy as np
+    from rasterio import features, warp
+    from affine import Affine
+    try:
+        ds = rio.open(p)
+    except Exception as e:
+        raise RuntimeError(f"{p.name}: não abriu como GeoTIFF ({e})")
+    with ds:
+        if ds.crs is None:
+            raise RuntimeError(f"{p.name}: a imagem não tem sistema de "
+                               f"coordenadas — não dá para saber onde ela fica")
+        f = max(1.0, max(ds.width, ds.height) / float(max_px))
+        w, h = max(1, round(ds.width / f)), max(1, round(ds.height / f))
+        msk = ds.dataset_mask(out_shape=(h, w)) > 0
+        t = ds.transform * Affine.scale(ds.width / w, ds.height / h)
+        lado = max(abs(t.a), abs(t.e))
+        polis_crs = []
+        for geo, v in features.shapes(msk.astype("uint8"), mask=msk, transform=t):
+            aneis = [[tuple(q) for q in anel[:-1]] for anel in geo["coordinates"]]
+            if _area_do_anel(aneis[0]) < 30 * lado * lado:
+                continue            # mancha de poucos pixels
+            ext = _simplificar(aneis[0] + aneis[0][:1], 1.5 * lado)[:-1]
+            bur = [_simplificar(b + b[:1], 1.5 * lado)[:-1] for b in aneis[1:]
+                   if _area_do_anel(b) >= 30 * lado * lado]
+            if len(ext) >= 3:
+                polis_crs.append((ext, [b for b in bur if len(b) >= 3]))
+        if not polis_crs:
+            raise RuntimeError(f"{p.name}: a imagem não tem nenhuma parte "
+                               f"com dado")
+
+        def _graus(pts):
+            lon, lat = warp.transform(ds.crs, "EPSG:4326",
+                                      [q[0] for q in pts], [q[1] for q in pts])
+            return list(zip(lat, lon))
+        polis = [{"externo": _graus(e), "buracos": [_graus(b) for b in bs]}
+                 for e, bs in polis_crs]
+        b = ds.bounds
+        cx = _graus([(b.left, b.bottom), (b.left, b.top),
+                     (b.right, b.bottom), (b.right, b.top)])
+    lat = [q[0] for g in polis for q in g["externo"]]
+    lon = [q[1] for g in polis for q in g["externo"]]
+    a = {"nome": " ".join(p.stem.replace("_", " ").split()) or p.stem,
+         "poligonos": polis, "arquivo": p.name,
+         "caixa": (min(lat), max(lat), min(lon), max(lon)),
+         "caixa_imagem": (min(q[0] for q in cx), max(q[0] for q in cx),
+                          min(q[1] for q in cx), max(q[1] for q in cx)),
+         "imagem": str(p.resolve())}
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(a, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return a
+
+
+def _para_uint8(banda, valido):
+    """Banda de qualquer tipo → 0..255, esticada entre os percentis 2 e 98
+    da parte com dado (imagem de satélite em 16 bits, por exemplo)."""
+    import numpy as np
+    if banda.dtype == np.uint8:
+        return banda
+    v = banda[valido] if valido.any() else banda.ravel()
+    lo, hi = (np.percentile(v, [2, 98]) if v.size else (0, 1))
+    if hi <= lo:
+        hi = lo + 1
+    return (np.clip((banda.astype("float32") - lo) / (hi - lo), 0, 1)
+            * 255).astype(np.uint8)
+
+
+def fundo_da_area(area, max_px=3000, margem=0.06):
+    """A imagem da área, recortada na área (com margem) e reduzida a
+    `max_px` no lado maior. Devolve {"rgb": HxWx3 uint8, "valido": HxW
+    bool, "transform", "crs", "arquivo"} ou None sem imagem."""
+    if not area.get("imagem"):
+        return None
+    rio = _rasterio()
+    import numpy as np
+    from rasterio import warp, windows
+    from rasterio.enums import Resampling, ColorInterp
+    from affine import Affine
+    p = Path(area["imagem"])
+    lat = [q[0] for g in area["poligonos"] for q in g["externo"]]
+    lon = [q[1] for g in area["poligonos"] for q in g["externo"]]
+    cache = _cache_imagem(p, "fundo", max_px, margem,
+                          round(min(lat), 7), round(max(lat), 7),
+                          round(min(lon), 7), round(max(lon), 7)).with_suffix(".npz")
+    if cache.exists():
+        try:
+            z = np.load(cache, allow_pickle=False)
+            from rasterio.crs import CRS
+            return {"rgb": z["rgb"], "valido": z["valido"],
+                    "transform": Affine(*z["transform"].tolist()),
+                    "crs": CRS.from_wkt(str(z["crs"])), "arquivo": p.name}
+        except Exception:
+            pass
+    with rio.open(p) as ds:
+        xs, ys = warp.transform("EPSG:4326", ds.crs, lon, lat)
+        l, r_, b, t = min(xs), max(xs), min(ys), max(ys)
+        mx, my = (r_ - l) * margem, (t - b) * margem
+        win = windows.from_bounds(l - mx, b - my, r_ + mx, t + my, ds.transform)
+        win = win.intersection(windows.Window(0, 0, ds.width, ds.height))
+        win = win.round_offsets().round_lengths()
+        if win.width < 2 or win.height < 2:
+            return None
+        f = max(1.0, max(win.width, win.height) / float(max_px))
+        w, h = max(1, round(win.width / f)), max(1, round(win.height / f))
+        ci = list(ds.colorinterp)
+        if ds.count >= 3:
+            idx = [ci.index(c) + 1 if c in ci else k + 1 for k, c in
+                   enumerate((ColorInterp.red, ColorInterp.green, ColorInterp.blue))]
+        else:
+            idx = [1]
+        bandas = ds.read(idx, window=win, out_shape=(len(idx), h, w),
+                         resampling=Resampling.average if f > 1 else Resampling.nearest)
+        valido = ds.dataset_mask(window=win, out_shape=(h, w)) > 0
+        if len(idx) == 1 and ci and ci[0] == ColorInterp.palette:
+            cmap = ds.colormap(1)
+            lut = np.zeros((256, 3), dtype=np.uint8)
+            for k, c in cmap.items():
+                if 0 <= k < 256:
+                    lut[k] = c[:3]
+            rgb = lut[np.clip(bandas[0], 0, 255).astype(np.uint8)]
+        else:
+            rgb = np.dstack([_para_uint8(bd, valido) for bd in bandas])
+            if rgb.shape[2] == 1:
+                rgb = np.repeat(rgb, 3, axis=2)
+        tr = ds.window_transform(win) * Affine.scale(win.width / w, win.height / h)
+        crs = ds.crs
+    out = {"rgb": rgb, "valido": valido, "transform": tr, "crs": crs,
+           "arquivo": p.name}
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(cache, rgb=rgb, valido=valido,
+                            transform=np.array(tuple(tr)[:6]),
+                            crs=np.array(crs.to_wkt()))
+    except Exception:
+        pass
+    return out
+
+
+def _metros_por_pixel(fundo):
+    t = fundo["transform"]
+    if fundo["crs"].is_geographic:
+        h = fundo["rgb"].shape[0]
+        lat = t.f + t.e * h / 2.0
+        return abs(t.a) * 111320.0 * math.cos(math.radians(lat))
+    try:
+        fator = fundo["crs"].linear_units_factor[1]
+    except Exception:
+        fator = 1.0
+    return abs(t.a) * fator
+
+
+def mapa_sobre_imagem(area, amostras, campo, fundo):
+    """O mapa de uma grandeza sobre a imagem da área: o calor por faixa
+    (o mesmo do KMZ, recortado na área) e o contorno da área.
+
+    Devolve RGBA HxWx4 uint8 na grade de `fundo` (alfa 0 fora da imagem),
+    ou None sem leitura com valor."""
+    import numpy as np
+    from rasterio import warp
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds
+    from PIL import Image, ImageDraw
+    import io as _io
+    rx_infra = re.compile(PADRAO_INFRA, re.I)
+    do_calor = [a for a in amostras if not rx_infra.search(a.get("radio") or "")]
+    if not any(a.get(campo) is not None for a in do_calor):
+        return None
+    res = max(1.0, _metros_por_pixel(fundo))
+    r = calor_por_faixas(do_calor, campo, res_m=res, mascara=area["poligonos"])
+    rgb = fundo["rgb"].astype("float32")
+    h, w = rgb.shape[:2]
+    alfa_c = np.zeros((h, w), dtype="float32")
+    if r:
+        png, (n_, s_, l_, o_), _ = r
+        cal = np.array(Image.open(_io.BytesIO(png)).convert("RGBA"))
+        src_t = from_bounds(o_, s_, l_, n_, cal.shape[1], cal.shape[0])
+        dst = np.zeros((4, h, w), dtype="uint8")
+        for b in range(4):
+            # Cor pelo vizinho mais próximo: nunca um tom fora da régua.
+            # Só a transparência é suavizada.
+            warp.reproject(cal[..., b], dst[b], src_transform=src_t,
+                           src_crs="EPSG:4326", dst_transform=fundo["transform"],
+                           dst_crs=fundo["crs"],
+                           resampling=(Resampling.bilinear if b == 3
+                                       else Resampling.nearest))
+        alfa_c = dst[3].astype("float32") / 255.0
+        cor = np.moveaxis(dst[:3], 0, -1).astype("float32")
+        rgb = rgb * (1 - alfa_c[..., None]) + cor * alfa_c[..., None]
+    valido = fundo["valido"] | (alfa_c > 0)
+    out = np.dstack([np.clip(rgb, 0, 255).astype("uint8"),
+                     np.where(valido, 255, 0).astype("uint8")])
+    # Contorno da área: branco sobre sombra escura, legível em qualquer chão.
+    im = Image.fromarray(out, "RGBA")
+    dr = ImageDraw.Draw(im)
+    inv = ~fundo["transform"]
+    larg = max(2, round(max(w, h) / 900))
+    for g in area["poligonos"]:
+        for anel in [g["externo"]] + g["buracos"]:
+            xs, ys = warp.transform("EPSG:4326", fundo["crs"],
+                                    [q[1] for q in anel], [q[0] for q in anel])
+            pts = [inv * (x, y) for x, y in zip(xs, ys)]
+            pts.append(pts[0])
+            dr.line(pts, fill=(0, 0, 0, 255), width=larg + 2)
+            dr.line(pts, fill=(255, 255, 255, 255), width=larg)
+    return np.array(im)
+
+
+def _fonte_pil(tam):
+    from PIL import ImageFont
+    for nome in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(nome, tam)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size=tam)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def png_do_mapa(mapa, fundo, max_px=1800):
+    """O mapa para o slide: fora da imagem em cinza claro, com barra de
+    escala e o norte. PNG em bytes."""
+    import numpy as np, io as _io
+    from PIL import Image, ImageDraw
+    rgba = mapa
+    a = rgba[..., 3:4].astype("float32") / 255.0
+    rgb = (rgba[..., :3] * a + 242 * (1 - a)).astype("uint8")
+    im = Image.fromarray(rgb, "RGB")
+    m_px = _metros_por_pixel(fundo)
+    f = max(1.0, max(im.size) / float(max_px))
+    if f > 1:
+        im = im.resize((round(im.size[0] / f), round(im.size[1] / f)),
+                       Image.LANCZOS)
+        m_px *= f
+    W, H = im.size
+    dr = ImageDraw.Draw(im)
+    tam = max(14, round(max(W, H) / 60))
+    fonte = _fonte_pil(tam)
+    # Barra de escala: o maior valor "redondo" que cabe em ~1/5 da largura.
+    alvo = W * m_px / 5.0
+    comp = max((v for v in (5, 10, 20, 25, 50, 100, 200, 250, 500, 1000,
+                            2000, 2500, 5000, 10000) if v <= alvo), default=5)
+    px = comp / m_px
+    x0, y0 = round(W * 0.03), round(H - H * 0.04)
+    alt = max(4, round(tam * 0.45))
+    rot = f"{comp:g} m" if comp < 1000 else f"{comp / 1000:g} km"
+    dr.rectangle([x0 - 8, y0 - alt - tam - 14, x0 + px + 8, y0 + 8],
+                 fill=(255, 255, 255))
+    dr.rectangle([x0, y0 - alt, x0 + px / 2, y0], fill=(26, 26, 26))
+    dr.rectangle([x0 + px / 2, y0 - alt, x0 + px, y0], fill=(255, 255, 255),
+                 outline=(26, 26, 26))
+    dr.text((x0, y0 - alt - tam - 6), rot, fill=(26, 26, 26), font=fonte)
+    # Norte: a imagem vem com o norte para cima (grade da projeção).
+    xn, yn = W - round(W * 0.04), round(H * 0.05)
+    dr.polygon([(xn, yn), (xn - tam * 0.5, yn + tam * 1.2),
+                (xn + tam * 0.5, yn + tam * 1.2)], fill=(26, 26, 26),
+               outline=(255, 255, 255))
+    dr.text((xn - tam * 0.35, yn + tam * 1.3), "N", fill=(26, 26, 26),
+            font=fonte, stroke_width=2, stroke_fill=(255, 255, 255))
+    buf = _io.BytesIO(); im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+def gravar_geotiff_do_mapa(caminho, mapa, fundo):
+    """O mapa como GeoTIFF RGBA, no mesmo sistema de coordenadas da imagem
+    da área: abre por cima das camadas no QGIS/ArcGIS."""
+    rio = _rasterio()
+    import numpy as np
+    h, w = mapa.shape[:2]
+    with rio.open(caminho, "w", driver="GTiff", width=w, height=h, count=4,
+                  dtype="uint8", crs=fundo["crs"], transform=fundo["transform"],
+                  compress="deflate", tiled=True, photometric="RGB",
+                  alpha="YES") as d:
+        d.write(np.moveaxis(mapa, -1, 0))
+
+
+# Grandezas e títulos das páginas de mapa, na ordem do PPT.
+GRANDEZAS_DAS_PAGINAS = (("sinal_cob", "Intensidade de Sinal (RSSI)"),
+                         ("snr", "Relação Sinal/Ruído (SNR)"),
+                         ("ruido", "Noise Floor"),
+                         ("interf", "Interferência de Canal"),
+                         ("perda", "Packet Loss"),
+                         ("rtt", "Latência (RTT)"))
+
+
+def mapas_das_areas(amostras, areas, destino=None, aviso=None, max_px=3000):
+    """Para cada área com imagem, cada banda e cada grandeza medida: o mapa
+    sobre a imagem. Grava os GeoTIFF em `destino`/mapas (se `destino`).
+
+    Devolve ({(área, campo, banda): {"png", "imagem"}}, [arquivos gravados]).
+    """
+    aviso = aviso or (lambda t: None)
+    pngs, feitos = {}, []
+    if not areas:
+        return pngs, feitos
+    bandas = sorted({_norm_banda(a.get("banda")) for a in amostras
+                     if a.get("banda")}) or [None]
+    pasta = None
+    for area in areas:
+        if not area.get("imagem"):
+            continue
+        am_ar = [a for a in amostras if a.get("area") == area["nome"]]
+        if not am_ar:
+            continue
+        try:
+            fundo = fundo_da_area(area, max_px=max_px)
+        except Exception as e:
+            aviso(f"  ! imagem de {area['nome']} não lida: {e}")
+            continue
+        if fundo is None:
+            aviso(f"  ! a imagem de {area['nome']} não cobre a área")
+            continue
+        for b in bandas:
+            am_b = ([a for a in am_ar if _norm_banda(a.get("banda")) == b]
+                    if b else am_ar)
+            for campo, _rot in GRANDEZAS_DAS_PAGINAS:
+                try:
+                    mapa = mapa_sobre_imagem(area, am_b, campo, fundo)
+                except Exception as e:
+                    aviso(f"  ! mapa de {area['nome']} ({campo}) falhou: {e}")
+                    continue
+                if mapa is None:
+                    continue
+                pngs[(area["nome"], campo, b)] = {
+                    "png": png_do_mapa(mapa, fundo), "imagem": fundo["arquivo"]}
+                if destino:
+                    if pasta is None:
+                        pasta = Path(destino) / "mapas"
+                        pasta.mkdir(parents=True, exist_ok=True)
+                    suf = f"_{b.replace(' ', '').replace('.', '')}" if b else ""
+                    alvo = pasta / (f"{_slug_arquivo(area['nome'])[:50]}_"
+                                    f"{campo}{suf}.tif")
+                    try:
+                        gravar_geotiff_do_mapa(alvo, mapa, fundo)
+                        feitos.append(alvo)
+                    except Exception as e:
+                        aviso(f"  ! GeoTIFF de {area['nome']} não gravado: {e}")
+    return pngs, feitos
 
 
 def mascara_de_area(lats, lons, poligonos):
@@ -6286,13 +6772,16 @@ def capa_anglo(p, titulo, subtitulo=""):
     return s
 
 
-def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
+def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None, mapas=None):
     """Deck EXCLUSIVO de site survey, na identidade Anglo.
 
     Separado do relatorio semanal a pedido: o survey virou dois tercos
     daquele deck e tem publico proprio. Aqui ele nao depende do template
     do cliente — os slides sao construidos do zero, entao a identidade e
     a mesma do inicio ao fim.
+
+    `mapas` (de `mapas_das_areas()`): a página da área leva o mapa pronto
+    sobre a imagem dela, em vez da moldura para o print do Google Earth.
 
     `sitios` (de `sitios_parados()`) acrescenta o laudo das capturas
     feitas de um ponto fixo. Vem por parametro porque o censo nasce dos
@@ -6437,7 +6926,7 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
     if nomes_area:
         ficha.insert(4, [
             "Áreas demarcadas",
-            f"{len(nomes_area)} polígono{'s' if len(nomes_area) != 1 else ''}"
+            f"{len(nomes_area)} área{'s' if len(nomes_area) != 1 else ''}"
             + (f" ({info_ar['arquivo']})" if (info_ar or {}).get("arquivo")
                else "")
             + (f" · {info_ar['fora']} de {info_ar['lidas']} leituras fora "
@@ -6571,15 +7060,21 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None):
                 # Mapa a esquerda, distribuicao a direita: a moldura mostra
                 # ONDE, o grafico mostra QUANTO.
                 suf = f"_{b.replace(' ', '').replace('.', '')}" if b else ""
-                # A aba e a camada com os nomes EXATOS do painel do Google
-                # Earth. Era "camada: Rotas" — pasta que deixou de existir
-                # quando o rastro virou a fita do Trajeto.
-                _moldura_anglo(s, 0.55, 1.45, 7.3, 5.4,
-                               f"Survey_*_todas{suf}.kmz",
-                               f"aba: {nome_da_aba(campo)}   ·   "
-                               + (f"pasta: {area}   ·   " if area else "")
-                               + f"camada: {CAMADA_DO_CALOR}"
-                               + (f"   ·   {b}" if b else ""))
+                mapa = (mapas or {}).get((area, campo, _norm_banda(b) if b else b))
+                if mapa:
+                    _mapa_anglo(s, 0.55, 1.45, 7.3, 5.4, mapa["png"],
+                                f"Imagem: {mapa['imagem']}   ·   contorno: "
+                                f"{area}" + (f"   ·   {b}" if b else ""))
+                else:
+                    # A aba e a camada com os nomes EXATOS do painel do
+                    # Google Earth. Era "camada: Rotas" — pasta que deixou
+                    # de existir quando o rastro virou a fita do Trajeto.
+                    _moldura_anglo(s, 0.55, 1.45, 7.3, 5.4,
+                                   f"Survey_*_todas{suf}.kmz",
+                                   f"aba: {nome_da_aba(campo)}   ·   "
+                                   + (f"pasta: {area}   ·   " if area else "")
+                                   + f"camada: {CAMADA_DO_CALOR}"
+                                   + (f"   ·   {b}" if b else ""))
                 rotulos, pcts, un = distribuicao(am_b, campo)
                 if rotulos:
                     _grafico_anglo(s, 8.05, 1.45, 4.75, 3.4,
@@ -7056,6 +7551,23 @@ def _escala_anglo(s, x, y, w, campo):
                    f"{nome} {_OP_TXT[op]} {lim:g} {un}".rstrip(), 8.5, True,
                    ANGLO["azul"])
     return yb + hb + 0.50
+
+
+def _mapa_anglo(s, x, y, w, h, png, legenda):
+    """O mapa pronto, centrado na caixa sem deformar, e a origem embaixo."""
+    from pptx.util import Inches, Pt
+    from PIL import Image
+    import io as _io
+    lw, lh = Image.open(_io.BytesIO(png)).size
+    esc = min(w / lw, (h - 0.3) / lh)
+    pw, ph = lw * esc, lh * esc
+    px, py = x + (w - pw) / 2, y + (h - 0.3 - ph) / 2
+    pic = s.shapes.add_picture(_io.BytesIO(png), Inches(px), Inches(py),
+                               Inches(pw), Inches(ph))
+    pic.line.color.rgb = _rgb(ANGLO["linha"]); pic.line.width = Pt(0.75)
+    _txt_anglo(s, px, py + ph + 0.04, max(pw, 4.0), 0.28, legenda, 9, False,
+               ANGLO["suave"])
+    return pic
 
 
 def _moldura_anglo(s, x, y, w, h, arquivo, detalhe):

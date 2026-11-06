@@ -28,6 +28,17 @@ try:
     datas += collect_data_files("sv_ttk")
 except Exception:
     pass
+# GeoTIFF das áreas: o rasterio leva o GDAL e o PROJ, e os dados deles
+# (gdal_data, proj_data com o proj.db) têm de ir junto — sem o proj.db a
+# conversão de coordenadas falha só na hora de usar. O `--verificar` do
+# fim do build confere isso.
+rio_mods = []
+try:
+    from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+    datas += collect_data_files("rasterio")
+    rio_mods = collect_submodules("rasterio")
+except Exception:
+    pass
 
 a = Analysis(
     ["../site_survey.py"],
@@ -52,7 +63,7 @@ a = Analysis(
                    "motor_survey",
                    "tkinter", "tkinter.ttk", "tkinter.filedialog",
                    "tkinter.messagebox", "tkinter.constants",
-                   "sv_ttk"],
+                   "sv_ttk", "affine"] + rio_mods,
     hookspath=[],
     runtime_hooks=[],
     # ATENÇÃO ao mexer aqui: excluir um módulo que o motor_survey importa

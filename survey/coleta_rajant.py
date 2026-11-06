@@ -721,11 +721,13 @@ class Coleta:
 
 
 def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
-                   fazer_excel=True, aviso=print, areas=None):
+                   fazer_excel=True, aviso=print, areas=None, fazer_mapas=True):
     """Grava o survey no banco e emite os relatórios. Devolve os arquivos.
 
-    `areas`: KMZ/KML das áreas demarcadas (ou a lista já lida); sem ele,
-    o [survey] areas do config. Leitura fora das áreas sai do laudo."""
+    `areas`: os arquivos das áreas (GeoTIFF de cada área e/ou KMZ/KML com
+    polígonos) ou a lista já lida; sem ele, o [survey] areas do config.
+    Leitura fora das áreas sai do laudo. Com GeoTIFF, o PPT leva o mapa
+    sobre a imagem e `fazer_mapas` grava os mapas em `mapas/`."""
     am, pr = coleta.amostras, coleta.peers
     if not am:
         raise RuntimeError("nenhuma amostra com posição foi coletada")
@@ -791,9 +793,20 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
             alvo = destino / nome; alvo.write_bytes(dados); feitos.append(alvo)
         except Exception as e:
             aviso(f"  ! KMZ da vizinhança não gerado: {e}")
+    mapas = {}
+    if any(a.get("imagem") for a in (areas or [])) and (fazer_ppt or fazer_mapas):
+        aviso("  desenhando os mapas sobre as imagens das áreas…")
+        try:
+            mapas, arq_m = rm.mapas_das_areas(am, areas,
+                                              destino if fazer_mapas else None,
+                                              aviso)
+            feitos += arq_m
+        except Exception as e:
+            aviso(f"  ! mapas sobre as imagens não gerados: {e}")
     if fazer_ppt:
         try:
-            dados, nome = rm.ppt_survey_anglo(sid, cfg, sitios=sitios)
+            dados, nome = rm.ppt_survey_anglo(sid, cfg, sitios=sitios,
+                                              mapas=mapas)
             alvo = destino / nome; alvo.write_bytes(dados); feitos.append(alvo)
         except Exception as e:
             aviso(f"  ! PPT não gerado: {e}")
@@ -977,10 +990,10 @@ def main(argv=None):
                     help="não pedir o TRACE (enlace de saída)")
     ap.add_argument("--destino-trace", default=rm.DESTINO_TRACE_PADRAO,
                     help="host para onde o TRACE aponta o enlace de saída")
-    ap.add_argument("--areas", metavar="ARQ",
-                    help="KMZ/KML do Google Earth com as áreas demarcadas "
-                         "(um polígono por área). Leitura fora das áreas "
-                         "sai do laudo.")
+    ap.add_argument("--areas", metavar="ARQ", nargs="+",
+                    help="as áreas: GeoTIFF de cada área (o nome do arquivo "
+                         "é o da área) e/ou KMZ/KML com um polígono por "
+                         "área. Leitura fora das áreas sai do laudo.")
     ap.add_argument("--testar-trace", metavar="IP",
                     help="diagnóstico de campo: pergunta a UM rádio como "
                          "ele responde à leitura e ao TRACE e grava um .txt")

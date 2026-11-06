@@ -146,6 +146,17 @@ def verificar():
         except Exception as e:
             print(f"  FALHOU  {pacote}: {e}"); problemas.append(pacote)
 
+    # GeoTIFF: importar não basta. No exe, o que costuma faltar são os
+    # dados de projeção (proj.db), e aí só a conversão de coordenadas
+    # quebra. Converte um ponto de UTM 23S para graus.
+    try:
+        from rasterio import warp
+        lon, lat = warp.transform("EPSG:31983", "EPSG:4326", [600000], [7900000])
+        assert -45 < lon[0] < -43 and -20 < lat[0] < -18
+        print("  ok      GeoTIFF e coordenadas (rasterio)")
+    except Exception as e:
+        print(f"  FALHOU  GeoTIFF (rasterio): {e}"); problemas.append("rasterio")
+
     print()
     if problemas:
         print(f"{len(problemas)} problema(s): {', '.join(problemas)}")
@@ -270,49 +281,83 @@ def main():
     for txt_, var in (("KMZ", v_kmz), ("PPT", v_ppt), ("Excel", v_xls)):
         ttk.Checkbutton(rod, text=txt_, variable=var).pack(side="left", padx=(14, 0))
 
-    # Áreas demarcadas (KMZ/KML do Google Earth, um polígono por área):
-    # valem para as duas abas. Vazio = laudo sem áreas.
+    # Áreas: a imagem de cada área (GeoTIFF; o nome do arquivo é o nome da
+    # área) e/ou polígonos do Google Earth (KMZ/KML). Valem para as duas
+    # abas. Sem nenhuma, laudo sem áreas. A leitura vai para uma thread:
+    # GeoTIFF de drone tem gigabytes, e a janela não pode congelar.
+    v_tif = tk.BooleanVar(value=True)
+    ttk.Checkbutton(rod, text="Mapas GeoTIFF", variable=v_tif).pack(
+        side="left", padx=(14, 0))
     rod_ar = ttk.Frame(jan, padding=(14, 2, 14, 0))
     rod_ar.pack(side="bottom", fill="x")
     ttk.Label(rod_ar, text="Áreas").pack(side="left")
-    v_areas = tk.StringVar(value=cfg.get("survey", "areas", fallback="").strip())
-    ttk.Entry(rod_ar, textvariable=v_areas, width=46).pack(side="left", padx=(25, 8))
     lbl_areas = ttk.Label(rod_ar, text="", style="Fraco.TLabel")
+    est["areas_arqs"] = [x.strip() for x in cfg.get(
+        "survey", "areas", fallback="").split(";") if x.strip()]
+    est["areas_arqs_ok"] = []
+    est["areas"] = []
+    est["areas_lendo"] = False
 
-    def _ler_areas_da_tela(avisar=True):
-        """As áreas do campo, ou [] sem arquivo. None: arquivo com erro."""
-        cam = v_areas.get().strip()
-        if not cam:
-            lbl_areas.configure(text="laudo sem áreas")
-            return []
-        try:
-            ar = rm.ler_areas(cam)
-        except Exception as e:
-            lbl_areas.configure(text="arquivo de áreas com erro")
-            if avisar:
-                messagebox.showerror(TITULO, f"Áreas demarcadas:\n{e}")
-            return None
-        nomes = ", ".join(a["nome"] for a in ar)
-        lbl_areas.configure(text=f"{len(ar)} área(s): "
-                                 + (nomes if len(nomes) < 70 else nomes[:67] + "…"))
-        return ar
+    def _resumo_areas():
+        ar = est["areas"]
+        if est["areas_lendo"]:
+            t = "lendo as áreas…"
+        elif not ar:
+            t = "laudo sem áreas"
+        else:
+            nomes = ", ".join(a["nome"] for a in ar)
+            img = sum(1 for a in ar if a.get("imagem"))
+            t = (f"{len(ar)} área(s)" + (f", {img} com imagem" if img else "")
+                 + ": " + (nomes if len(nomes) < 70 else nomes[:67] + "…"))
+        lbl_areas.configure(text=t)
 
-    def escolher_areas():
-        f = filedialog.askopenfilename(
-            title="Áreas demarcadas (Google Earth)",
-            filetypes=[("Google Earth", "*.kmz *.kml"),
+    def _ler_areas(arqs):
+        est["areas_lendo"] = True
+        _resumo_areas()
+        arqs = list(arqs)
+
+        def trab():
+            try:
+                ar = rm.carregar_areas(arqs) or []
+                fila.put(("areas", (arqs, ar, None)))
+            except Exception as e:
+                fila.put(("areas", (arqs, None, str(e))))
+        threading.Thread(target=trab, daemon=True).start()
+
+    def adicionar_areas():
+        fs = filedialog.askopenfilenames(
+            title="Áreas: a imagem de cada área ou os polígonos",
+            filetypes=[("Áreas", "*.tif *.tiff *.kmz *.kml"),
+                       ("Imagem georreferenciada (GeoTIFF)", "*.tif *.tiff"),
+                       ("Google Earth", "*.kmz *.kml"),
                        ("Todos os arquivos", "*.*")])
-        if f:
-            v_areas.set(f)
-            if _ler_areas_da_tela() is None:
-                v_areas.set("")
+        novos = [f for f in fs if f not in est["areas_arqs"]]
+        if novos:
+            est["areas_arqs"] = est["areas_arqs"] + novos
+            _ler_areas(est["areas_arqs"])
 
-    ttk.Button(rod_ar, text="Escolher…", command=escolher_areas).pack(side="left")
-    ttk.Button(rod_ar, text="Sem áreas",
-               command=lambda: (v_areas.set(""), _ler_areas_da_tela())
-               ).pack(side="left", padx=(6, 0))
+    def limpar_areas():
+        est["areas_arqs"], est["areas_arqs_ok"], est["areas"] = [], [], []
+        est["areas_lendo"] = False
+        _resumo_areas()
+
+    def _areas_prontas():
+        """As áreas lidas ([] = sem áreas), ou None se ainda lendo."""
+        if est["areas_lendo"]:
+            messagebox.showinfo(TITULO, "Aguarde: as áreas ainda estão "
+                                        "sendo lidas.")
+            return None
+        return est["areas"]
+
+    ttk.Button(rod_ar, text="Adicionar áreas…",
+               command=adicionar_areas).pack(side="left", padx=(25, 0))
+    ttk.Button(rod_ar, text="Limpar", command=limpar_areas).pack(
+        side="left", padx=(6, 0))
     lbl_areas.pack(side="left", padx=(12, 0))
-    _ler_areas_da_tela(avisar=False)
+    if est["areas_arqs"]:
+        _ler_areas(est["areas_arqs"])
+    else:
+        _resumo_areas()
 
     # ═══════════════════════ ABA COLETA ══════════════════════════
     if rm.Breadcrumb is None:
@@ -514,7 +559,7 @@ def main():
         if not est["arquivos"]:
             messagebox.showwarning(TITULO, "Escolha ao menos um arquivo.")
             return
-        areas = _ler_areas_da_tela()
+        areas = _areas_prontas()
         if areas is None:
             return
         b_ger.configure(state="disabled", text="Gerando…")
@@ -522,13 +567,14 @@ def main():
         arqs = list(est["arquivos"]); juntar = v_juntar.get()
         alvo = v_saida.get()
         kmz, ppt, xls = v_kmz.get(), v_ppt.get(), v_xls.get()
+        tif = v_tif.get()
 
         def trab():
             try:
                 feitos = smm.gerar(arqs, alvo, juntar=juntar, fazer_kmz=kmz,
                                    fazer_ppt=ppt, fazer_excel=xls,
                                    aviso=lambda t: fila.put(("log", t)),
-                                   areas=areas)
+                                   areas=areas, fazer_mapas=tif)
                 fila.put(("pronto_arq", feitos))
             except Exception as e:
                 fila.put(("log", f"ERRO: {e}"))
@@ -584,7 +630,7 @@ def main():
             minutos = _minutos()
             # Lidas AGORA: arquivo errado aparece antes da coleta, não
             # depois dela.
-            areas = _ler_areas_da_tela()
+            areas = _areas_prontas()
             if areas is None:
                 return
             c = col.Coleta(alvos, role=v_role.get(), senha=v_senha.get(),
@@ -599,6 +645,7 @@ def main():
             b_desc.configure(state="disabled")
             alvo = v_saida.get()
             kmz, ppt, xls = v_kmz.get(), v_ppt.get(), v_xls.get()
+            tif = v_tif.get()
 
             def trab():
                 try:
@@ -606,7 +653,8 @@ def main():
                     fila.put(("log", "gerando relatórios…"))
                     feitos = col.gravar_e_gerar(
                         c, alvo, fazer_kmz=kmz, fazer_ppt=ppt, fazer_excel=xls,
-                        aviso=lambda t: fila.put(("log", t)), areas=areas)
+                        aviso=lambda t: fila.put(("log", t)), areas=areas,
+                        fazer_mapas=tif)
                     fila.put(("pronto_col", feitos))
                 except Exception as e:
                     fila.put(("log", f"ERRO: {e}"))
@@ -654,6 +702,23 @@ def main():
                 tipo, val = fila.get_nowait()
                 if tipo == "log":
                     escreve(val)
+                elif tipo == "areas":
+                    arqs, ar, erro = val
+                    if arqs != est["areas_arqs"]:
+                        continue            # leitura de uma lista antiga
+                    est["areas_lendo"] = False
+                    if erro:
+                        # Fica a última lista que leu sem erro.
+                        est["areas_arqs"] = list(est["areas_arqs_ok"])
+                        escreve(f"ERRO nas áreas: {erro}")
+                        messagebox.showerror(TITULO, f"Áreas:\n{erro}")
+                    else:
+                        est["areas"], est["areas_arqs_ok"] = ar, list(arqs)
+                        for a in ar:
+                            escreve(f"área {a['nome']}"
+                                    + (f" — imagem {Path(a['imagem']).name}"
+                                       if a.get("imagem") else ""))
+                    _resumo_areas()
                 elif tipo == "teste_fim":
                     b_tt.configure(state="normal", text="Testar trace")
                 elif tipo == "achados":

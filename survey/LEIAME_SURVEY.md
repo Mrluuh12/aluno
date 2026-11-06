@@ -17,29 +17,39 @@ mesmo executável serve as duas máquinas.
 Pela linha de comando, os módulos funcionam soltos:
 
 ```
-survey_meshmapper captura1.kmz captura2.kmz -o relatorios --areas areas.kmz
+survey_meshmapper captura1.kmz captura2.kmz -o relatorios --areas "Cava Norte.tif" Britagem.tif
 survey_meshmapper *.kmz --separado          # um relatório por arquivo
 coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios --areas areas.kmz
 ```
 
 ## Áreas demarcadas
 
-O laudo sai **por área**. As áreas vêm de um KMZ (ou KML) do Google Earth:
+O laudo sai **por área**. Na janela, embaixo (vale para as duas abas):
+**Áreas → Adicionar áreas…**. Aceita dois tipos de arquivo, juntos ou
+separados:
 
-1. No Google Earth, **Adicionar polígono** e desenhar o contorno da área.
-2. O **nome do polígono é o nome da área** no laudo ("Cava Norte",
-   "Britagem"…). Um polígono por área; dois polígonos com o mesmo nome
-   viram uma área em duas partes. Um buraco no polígono fica fora da área.
-3. Pôr todos numa pasta e **Salvar lugar como… → KMZ**.
-4. Na janela, campo **Áreas** (embaixo, vale para as duas abas) →
-   **Escolher…**. A janela lê o arquivo na hora e mostra as áreas achadas.
+| arquivo | o que é a área |
+|---|---|
+| **GeoTIFF** (`.tif`) de cada área — ortofoto de drone, satélite | **o nome do arquivo é o nome da área** (`Cava Norte.tif` → "Cava Norte") e o contorno é a parte da imagem que tem dado: o que estiver sem dado (transparente/nodata) em volta fica fora. Imagem sem nodata vale o retângulo inteiro |
+| **KMZ/KML** do Google Earth | um polígono por área, desenhado com **Adicionar polígono**; o nome do polígono é o nome da área. Dois polígonos com o mesmo nome viram uma área em duas partes; buraco no polígono fica fora |
 
-Também vale `--areas arquivo.kmz` na linha de comando, ou fixar no
-`config.ini`:
+Com os dois juntos, **quem demarca são os polígonos**, e cada imagem vira
+o fundo da área que ela cobre.
+
+A janela lê os arquivos logo ao adicionar, sem travar — GeoTIFF de drone
+tem gigabytes — e mostra as áreas achadas. A primeira leitura de um
+arquivo grande pode demorar (num teste com 16000 × 16000 pixels, sem
+pirâmides, foram ~4 s); ela fica guardada em `fundo_cache/`, ao lado do
+programa, e a mesma imagem não é relida a cada survey (muda o arquivo,
+ele é lido de novo). A memória usada na leitura é limitada pelo próprio
+leitor de GeoTIFF, qualquer que seja o tamanho do arquivo.
+
+Também vale pela linha de comando (`--areas` com um ou vários arquivos)
+ou fixo no `config.ini`, com `;` entre os arquivos:
 
 ```ini
 [survey]
-areas = C:\Survey\areas.kmz
+areas = C:\Survey\Cava Norte.tif ; C:\Survey\Britagem.tif
 ```
 
 Com áreas:
@@ -47,22 +57,39 @@ Com áreas:
 | | o que muda |
 |---|---|
 | leituras | cada uma leva a área em que caiu; **as de fora de todas as áreas são descartadas** (o andamento, a Metodologia e o Excel dizem quantas) |
-| sobreposição | a leitura que cai em duas áreas fica na **primeira do arquivo**; o andamento avisa |
-| KMZ | em cada aba de grandeza, **uma pasta por área**, com o calor recortado no polígono, o trajeto, as medições e o fora do requisito daquela área; e a pasta **Áreas**, com o contorno e o nome de cada uma — clicando, os números dela |
+| sobreposição | a leitura que cai em duas áreas fica na **primeira**; o andamento avisa |
+| KMZ | em cada aba de grandeza, **uma pasta por área**, com o calor recortado no contorno, o trajeto, as medições e o fora do requisito daquela área; e a pasta **Áreas**, com o contorno e o nome de cada uma — clicando, os números dela |
 | PPT | **Resumo por área** (área × banda: amostras, RSSI e SNR contra o requisito) e uma **seção por área**: a abertura com os números e os botões para as páginas dela, e as páginas de grandeza da área. O Índice leva às áreas; cada página tem **◂ ÍNDICE** e **◂ ÁREA** |
 | Excel | coluna **Área** nas amostras e a aba **Por Área** |
 
 O Sumário continua sendo do survey inteiro — do que caiu dentro das áreas.
+Sem nenhuma área, tudo sai como antes, do survey inteiro.
 
-Sem arquivo de áreas, tudo sai como antes, do survey inteiro.
-
-Na coleta ao vivo o arquivo é lido **antes** de começar: arquivo errado
+Na coleta ao vivo as áreas são lidas **antes** de começar: arquivo errado
 aparece na hora, não depois de meia hora de coleta. Se no fim nenhuma
 leitura cair dentro das áreas, o laudo sai sem áreas — a coleta não se
 perde.
 
-Só polígono demarca área. Um caminho (linha) que volta ao ponto de partida
-é aceito como polígono; caminho aberto é ignorado.
+### O mapa sobre a imagem da área
+
+Com GeoTIFF, o programa **pinta a medição em cima da imagem**, com as
+mesmas cores e a mesma régua do KMZ (o mapa de calor por faixa, recortado
+no contorno da área), mais o contorno, a barra de escala e o norte.
+
+| onde | o que sai |
+|---|---|
+| **PPT** | cada página de grandeza da área já vem com o mapa pronto, no lugar da moldura "colar aqui o print do Google Earth". Embaixo, de qual imagem ele saiu |
+| **pasta `mapas/`** | o mesmo mapa como **GeoTIFF**, um por área, grandeza e banda (`Cava-Norte_sinal_cob_58GHz.tif`), no **mesmo sistema de coordenadas da imagem** (UTM, graus…): abre por cima das camadas no QGIS/ArcGIS. Fora da área fica transparente |
+
+A caixa **Mapas GeoTIFF** (ao lado de KMZ, PPT e Excel) liga e desliga a
+pasta `mapas/`; o PPT leva o mapa sempre. Área de polígono sem imagem que
+a cubra continua com a moldura para o print.
+
+A imagem é lida **reduzida** (até 3000 pixels no lado maior) e só na
+janela da área: o mapa de uma área de 1,5 km sai com ~0,5 m por pixel,
+mais que o suficiente para o calor, que é calculado a cada 1 m ou mais.
+Imagem de satélite em 16 bits é esticada para a tela; imagem em tons de
+cinza ou com paleta também serve.
 
 ## Coleta ao vivo: densidade de leituras
 
@@ -279,6 +306,7 @@ existem no código.
 |---|---|
 | `Survey_*_24GHz.kmz` | trajeto de 2,4 GHz, uma aba por grandeza (com uma pasta por área), a pasta Áreas e a legenda na tela |
 | `Survey_*_58GHz.kmz` | idem, 5,8 GHz |
+| `mapas/*.tif` | com GeoTIFF nas áreas: o mapa de cada área, grandeza e banda sobre a imagem, georreferenciado |
 | `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, resumo por área, uma seção por área (com uma página por grandeza/banda) e duas páginas em branco para diagnóstico e conclusões |
 | `Survey_*.xlsx` | origens, resumo, por grandeza, por área e amostras |
 
@@ -520,13 +548,14 @@ executável — sem ela o deck sai sem logo, em vez de falhar.
 
 O build **falha se o exe não for abrir**: o último passo roda
 `site_survey.exe --verificar`, que confere módulos, tcl/tk e dependências
-sem abrir janela. Se algo der errado depois, rode isso no Prompt e mande
+sem abrir janela — inclusive a conversão de coordenadas do GeoTIFF, que
+no exe depende dos dados de projeção irem junto. Se algo der errado depois, rode isso no Prompt e mande
 a saída; o erro também fica em `site_survey_erro.txt`, ao lado do exe.
 
 Para rodar direto pelo Python:
 
 ```
-pip install matplotlib numpy scipy python-pptx openpyxl lxml
+pip install matplotlib numpy scipy python-pptx openpyxl lxml rasterio
 pip install rajant-api --no-deps && pip install "protobuf==4.23.4"
 python site_survey.py
 ```

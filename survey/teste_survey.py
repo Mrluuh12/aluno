@@ -6075,5 +6075,246 @@ class TestAreasDemarcadas(unittest.TestCase):
         self.assertTrue([d for d in ditos if "laudo sem áreas" in d], ditos)
 
 
+
+def _tif_utm(caminho, x0, x1, px=0.5, elipse=True):
+    """GeoTIFF RGB em SIRGAS 2000 / UTM 23S (EPSG:31983) cobrindo de x0 a
+    x1 metros a leste da origem da estrada sintética, com 30 m de folga.
+    `elipse`: dado só numa elipse inscrita (o resto é nodata), como uma
+    ortofoto exportada recortada na área."""
+    import numpy as np, rasterio
+    from rasterio.transform import from_origin
+    from rasterio.warp import transform as wt
+    lons = [_LON0 + x0 / _KX, _LON0 + x1 / _KX]
+    lats = [_LAT0 - 0.0005, _LAT0 + 0.0005]
+    xs, ys = wt("EPSG:4326", "EPSG:31983", [lons[0], lons[1], lons[0], lons[1]],
+                [lats[0], lats[0], lats[1], lats[1]])
+    l, r, b, t = min(xs) - 30, max(xs) + 30, min(ys) - 30, max(ys) + 30
+    w, h = int((r - l) / px), int((t - b) / px)
+    yy, xx = np.mgrid[0:h, 0:w]
+    rgb = np.stack([np.full((h, w), 120, "uint8"), np.full((h, w), 110, "uint8"),
+                    np.full((h, w), 90, "uint8")])
+    if elipse:
+        fora = ((xx - w / 2) / (w / 2.05)) ** 2 + ((yy - h / 2) / (h / 2.05)) ** 2 > 1
+        rgb[:, fora] = 0
+    with rasterio.open(caminho, "w", driver="GTiff", width=w, height=h, count=3,
+                       dtype="uint8", crs="EPSG:31983",
+                       transform=from_origin(l, t, px, px),
+                       nodata=0 if elipse else None) as d:
+        d.write(rgb)
+    return str(caminho)
+
+
+def _tif_graus(caminho, x0, x1, crs="EPSG:4326"):
+    """GeoTIFF de uma banda em graus (WGS84), retângulo inteiro com dado."""
+    import numpy as np, rasterio
+    from rasterio.transform import from_bounds
+    o, l = _LON0 + x0 / _KX, _LON0 + x1 / _KX
+    w, h = 700, 130
+    g = (np.random.RandomState(1).rand(h, w) * 60 + 100).astype("uint8")
+    with rasterio.open(caminho, "w", driver="GTiff", width=w, height=h, count=1,
+                       dtype="uint8", crs=crs,
+                       transform=from_bounds(o, _LAT0 - 0.0006, l, _LAT0 + 0.0006,
+                                             w, h)) as d:
+        d.write(g, 1)
+    return str(caminho)
+
+
+class TestImagensDasAreas(unittest.TestCase):
+    """A imagem de cada área (GeoTIFF): o arquivo é a área, e o programa
+    pinta a medição em cima dela — no slide e num GeoTIFF de saída."""
+
+    def setUp(self):
+        try:
+            import rasterio  # noqa: F401
+        except ImportError:
+            self.skipTest("rasterio ausente")
+        import tempfile, os, shutil
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # O cache das imagens vai para a pasta corrente.
+        antes = os.getcwd(); os.chdir(self.tmp)
+        self.addCleanup(os.chdir, antes)
+        self.cava = _tif_utm(self.tmp / "Cava Norte.tif", -20, 700)
+        self.brit = _tif_graus(self.tmp / "Britagem.tif", 900, 1600)
+
+    def _captura(self):
+        import json as _j
+        alvo = self.tmp / "captura.json"
+        alvo.write_text(_j.dumps(_captura_sintetica()), encoding="utf-8")
+        return str(alvo)
+
+    # ── a imagem como área ──
+    def test_contorno_e_a_parte_da_imagem_com_dado(self):
+        a = rm.ler_area_geotiff(self.cava)
+        self.assertEqual(a["nome"], "Cava Norte")
+        self.assertTrue(a["imagem"].endswith("Cava Norte.tif"))
+        lon = lambda x: _LON0 + x / _KX
+        self.assertTrue(rm._na_area(a, _LAT0, lon(340)))          # centro
+        # Canto do retângulo da imagem: fora da elipse, é nodata.
+        s_, n_, o_, l_ = a["caixa_imagem"]
+        self.assertFalse(rm._na_area(a, n_ - 1e-6, o_ + 1e-6))
+        # O contorno de pixel é simplificado: nada de milhares de vértices.
+        self.assertLess(len(a["poligonos"][0]["externo"]), 200)
+
+    def test_imagem_sem_nodata_e_o_retangulo(self):
+        a = rm.ler_area_geotiff(self.brit)
+        self.assertEqual(a["nome"], "Britagem")
+        self.assertEqual(len(a["poligonos"]), 1)
+        self.assertLessEqual(len(a["poligonos"][0]["externo"]), 6)
+        self.assertTrue(rm._na_area(a, _LAT0, _LON0 + 1200 / _KX))
+
+    def test_imagem_sem_coordenadas_explica(self):
+        import numpy as np, rasterio
+        cam = self.tmp / "sem.tif"
+        with rasterio.open(cam, "w", driver="GTiff", width=10, height=10,
+                           count=1, dtype="uint8") as d:
+            d.write(np.zeros((10, 10), "uint8"), 1)
+        with self.assertRaises(RuntimeError) as ctx:
+            rm.ler_area_geotiff(cam)
+        self.assertIn("sistema de coordenadas", str(ctx.exception))
+
+    def test_cada_imagem_e_uma_area(self):
+        ar = rm.carregar_areas([self.cava, self.brit])
+        self.assertEqual([a["nome"] for a in ar], ["Cava Norte", "Britagem"])
+        self.assertTrue(all(a.get("imagem") for a in ar))
+
+    def test_com_poligonos_a_imagem_vira_o_fundo_da_area(self):
+        kmz = _gravar_areas(self.tmp, _caixa_kml("Pátio", 100, 500),
+                            _caixa_kml("Longe", 50000, 50200))
+        ar = rm.carregar_areas([kmz, self.cava])
+        self.assertEqual([a["nome"] for a in ar], ["Pátio", "Longe"])
+        self.assertTrue(ar[0]["imagem"].endswith("Cava Norte.tif"))
+        self.assertIsNone(ar[1]["imagem"])
+
+    def test_config_aceita_varios_arquivos(self):
+        cfg = rm.configparser.ConfigParser()
+        cfg.read_string(f"[survey]\nareas = {self.cava} ; {self.brit}\n")
+        self.assertEqual(len(rm.carregar_areas(None, cfg)), 2)
+
+    def test_segunda_leitura_vem_do_cache(self):
+        from unittest import mock as _m
+        rm.ler_area_geotiff(self.cava)
+        ar = rm.ler_area_geotiff(self.cava)
+        with _m.patch("rasterio.open", side_effect=AssertionError("releu")):
+            a = rm.ler_area_geotiff(self.cava)
+        self.assertEqual(a["poligonos"], ar["poligonos"])
+        a2 = rm.carregar_areas([self.cava])[0]
+        rm.fundo_da_area(a2)
+        with _m.patch("rasterio.open", side_effect=AssertionError("releu")):
+            f = rm.fundo_da_area(a2)
+        self.assertEqual(f["arquivo"], "Cava Norte.tif")
+
+    def test_imagem_grande_e_lida_reduzida(self):
+        a = rm.carregar_areas([self.cava])[0]
+        f = rm.fundo_da_area(a, max_px=400)
+        self.assertLessEqual(max(f["rgb"].shape[:2]), 400)
+        self.assertEqual(f["rgb"].shape[2], 3)
+        self.assertEqual(f["crs"].to_epsg(), 31983)
+
+    # ── o mapa ──
+    def test_mapa_pinta_onde_mediu_e_respeita_o_contorno(self):
+        import numpy as np
+        ar = rm.carregar_areas([self.cava])
+        sv, am, pr = rm.ler_meshmapper(self._captura())
+        rm.cobertura_disponivel(am, pr)
+        am, pr, _ = rm.separar_por_area(am, pr, ar)
+        f = rm.fundo_da_area(ar[0])
+        mapa = rm.mapa_sobre_imagem(ar[0], am, "sinal_cob", f)
+        self.assertEqual(mapa.shape[:2], f["rgb"].shape[:2])
+        from rasterio.warp import transform as wt
+        inv = ~f["transform"]
+        def px(x_m, dlat=0.0):
+            xs, ys = wt("EPSG:4326", f["crs"], [_LON0 + x_m / _KX], [_LAT0 + dlat])
+            c, l = inv * (xs[0], ys[0])
+            return mapa[int(l), int(c)]
+        # Na estrada, a 100 m: RSSI -63 a -65, verde da régua sobre o fundo.
+        p = px(100)
+        self.assertEqual(p[3], 255)
+        self.assertGreater(int(p[1]), int(p[0]) + 30)
+        # Longe da estrada (mais que o raio do calor), só a imagem.
+        self.assertEqual(tuple(px(100, 0.00045)[:3]), (120, 110, 90))
+        # Fora da elipse (canto): transparente.
+        self.assertEqual(mapa[0, 0, 3], 0)
+
+    def test_ppt_leva_o_mapa_no_lugar_da_moldura(self):
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        from pptx import Presentation
+        feitos = sm.gerar([self._captura()], str(self.tmp / "saida"),
+                          aviso=lambda t: None, areas=[self.cava, self.brit])
+        p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+        pags = [sl for sl in p.slides
+                if rm._titulo_do_slide(sl).startswith(("Cava Norte · ", "Britagem · "))]
+        self.assertTrue(pags)
+        for sl in pags:
+            textos = " ".join(sh.text_frame.text for sh in sl.shapes if sh.has_text_frame)
+            self.assertNotIn("COLAR AQUI", textos)
+            self.assertIn("Imagem: ", textos)
+            self.assertTrue([sh for sh in sl.shapes if sh.shape_type == 13],
+                            "página sem a figura do mapa")
+
+    def test_mapas_saem_em_geotiff_no_sistema_da_imagem(self):
+        import sys as _s, rasterio
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        feitos = sm.gerar([self._captura()], str(self.tmp / "saida"),
+                          aviso=lambda t: None, areas=[self.cava, self.brit])
+        tifs = sorted(f.name for f in feitos if f.suffix == ".tif")
+        self.assertIn("Cava-Norte_sinal_cob_58GHz.tif", tifs)
+        self.assertIn("Britagem_snr_58GHz.tif", tifs)
+        with rasterio.open(self.tmp / "saida" / "mapas" / "Cava-Norte_sinal_cob_58GHz.tif") as d:
+            self.assertEqual(d.crs.to_epsg(), 31983)
+            self.assertEqual(d.count, 4)
+            self.assertEqual(d.colorinterp[3].name, "alpha")
+        with rasterio.open(self.tmp / "saida" / "mapas" / "Britagem_snr_58GHz.tif") as d:
+            self.assertEqual(d.crs.to_epsg(), 4326)
+
+    def test_sem_mapas_geotiff_o_ppt_ainda_leva_o_mapa(self):
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        feitos = sm.gerar([self._captura()], str(self.tmp / "saida"),
+                          aviso=lambda t: None, areas=[self.cava],
+                          fazer_mapas=False)
+        self.assertFalse([f for f in feitos if f.suffix == ".tif"])
+        self.assertFalse((self.tmp / "saida" / "mapas").exists())
+        from pptx import Presentation
+        p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+        self.assertTrue([sl for sl in p.slides for sh in sl.shapes
+                         if sh.has_text_frame and sh.text_frame.text.startswith("Imagem: ")])
+
+    def test_area_de_poligono_sem_imagem_fica_com_a_moldura(self):
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        kmz = _gravar_areas(self.tmp, _caixa_kml("Britagem", 900, 1600))
+        feitos = sm.gerar([self._captura()], str(self.tmp / "saida"),
+                          aviso=lambda t: None, areas=[kmz])
+        from pptx import Presentation
+        p = Presentation([f for f in feitos if f.suffix == ".pptx"][0])
+        textos = " ".join(sh.text_frame.text for sl in p.slides for sh in sl.shapes
+                          if sh.has_text_frame)
+        self.assertIn("COLAR AQUI", textos)
+
+    def test_verificacao_do_exe_confere_as_coordenadas(self):
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        self.assertIn('warp.transform("EPSG:31983", "EPSG:4326"', fonte)
+        spec = (Path(__file__).resolve().parent / "build" / "site_survey.spec"
+                ).read_text(encoding="utf-8")
+        self.assertIn('collect_data_files("rasterio")', spec)
+
+    def test_janela_le_as_areas_fora_da_thread_da_tela(self):
+        # GeoTIFF de drone tem gigabytes: lido na thread da janela, ela
+        # congelava até terminar.
+        fonte = (Path(__file__).resolve().parent / "site_survey.py").read_text(
+            encoding="utf-8")
+        i = fonte.index("def _ler_areas(arqs):")
+        trecho = fonte[i:fonte.index("def adicionar_areas", i)]
+        self.assertIn("threading.Thread", trecho)
+        self.assertIn("rm.carregar_areas(arqs)", trecho)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
