@@ -475,13 +475,25 @@ def main():
         v_sent = tk.StringVar(value="Os dois")
         ttk.Combobox(l4, textvariable=v_sent, width=9, state="readonly",
                      values=("Subida", "Descida", "Os dois")).pack(
-            side="left", padx=(6, 12))
-        ttk.Label(l4, text="Duração (s)").pack(side="left")
+            side="left", padx=(6, 0))
+        # Os testes rodam em paralelo, cada um na sua thread: as leituras
+        # não esperam por eles. Ao mesmo tempo só equipamentos distantes
+        # entre si e saindo por ERMs diferentes.
+        l5 = ttk.Frame(baixo); l5.pack(fill="x", pady=(4, 0))
+        ttk.Label(l5, text="Throughput:", style="Fraco.TLabel").pack(
+            side="left", padx=(0, 10))
+        ttk.Label(l5, text="Duração (s)").pack(side="left")
         v_iseg = tk.StringVar(value="5")
-        ttk.Entry(l4, textvariable=v_iseg, width=4).pack(side="left", padx=(6, 12))
-        ttk.Label(l4, text="Intervalo (s)").pack(side="left")
-        v_iint = tk.StringVar(value="60")
-        ttk.Entry(l4, textvariable=v_iint, width=5).pack(side="left", padx=(6, 0))
+        ttk.Entry(l5, textvariable=v_iseg, width=4).pack(side="left", padx=(6, 12))
+        ttk.Label(l5, text="Intervalo entre inícios (s)").pack(side="left")
+        v_iint = tk.StringVar(value="10")
+        ttk.Entry(l5, textvariable=v_iint, width=5).pack(side="left", padx=(6, 12))
+        ttk.Label(l5, text="Simultâneos").pack(side="left")
+        v_ipar = tk.StringVar(value="3")
+        ttk.Entry(l5, textvariable=v_ipar, width=3).pack(side="left", padx=(6, 12))
+        ttk.Label(l5, text="Distância mínima entre eles (m)").pack(side="left")
+        v_idis = tk.StringVar(value="300")
+        ttk.Entry(l5, textvariable=v_idis, width=5).pack(side="left", padx=(6, 0))
 
         def _ip_servidor():
             """O IP do servidor do iperf3: "ERB-01 (10.188.96.30)" ou o IP."""
@@ -716,10 +728,14 @@ def main():
             try:
                 iseg = int(float(v_iseg.get().replace(",", ".")))
                 iint = float(v_iint.get().replace(",", "."))
-                if iseg <= 0 or iint < 10: raise ValueError
+                ipar = int(float(v_ipar.get().replace(",", ".")))
+                idis = float(v_idis.get().replace(",", "."))
+                if iseg <= 0 or iint < 2 or ipar < 1 or idis < 0:
+                    raise ValueError
             except ValueError:
                 messagebox.showwarning(TITULO, "Throughput: duração maior que "
-                                       "zero e intervalo de no mínimo 10 s.")
+                                       "zero, intervalo de no mínimo 2 s, ao "
+                                       "menos 1 simultâneo e distância em metros.")
                 return
             c = col.Coleta(alvos, role=v_role.get(), senha=v_senha.get(),
                            porta=int(v_porta.get() or 2300), passo_m=passo,
@@ -728,7 +744,8 @@ def main():
                                           if v_trace.get() else None),
                            malha=est["achados"], ping=v_ping.get(),
                            iperf_servidor=srv, iperf_segundos=iseg,
-                           iperf_intervalo_s=iint,
+                           iperf_intervalo_s=iint, iperf_paralelos=ipar,
+                           iperf_distancia_min_m=idis,
                            iperf_sentido={"Subida": "envio",
                                           "Descida": "recebimento"}.get(
                                               v_sent.get(), "ambos"))

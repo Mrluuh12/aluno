@@ -47,6 +47,7 @@ PADROES = {
     "celula_m": 3.0,         # grade do terreno
     "k": 4.0 / 3.0,          # raio efetivo da Terra
     "min_calibracao": 20,    # leituras para calibrar uma banda
+    "max_correcao_db": 15.0, # correção maior que isto não é calibração: é dado errado
 }
 FREQ_MHZ = {"2.4 GHz": 2437.0, "5.8 GHz": 5785.0}
 COLUNAS_INFRA = ["nome", "lat", "lon", "altura_m", "potencia_dbm",
@@ -477,8 +478,11 @@ def perda_difracao_db(nu):
 
 def _geometria(mos, tx_xy, h_tx, prm):
     """O perfil radial a partir da ERB/ERM: para cada ponto (raio,
-    distância), o obstáculo dominante entre ela e o veículo. Não depende
-    da banda — é calculado uma vez por ERB/ERM."""
+    distância), as duas cristas que mais barram o caminho até o veículo
+    (Deygout): a dominante vista da antena e, entre ela e o veículo, a
+    dominante vista da primeira. Numa cava, o sinal costuma passar por
+    mais de uma bancada. Não depende da banda — é calculado uma vez por
+    ERB/ERM."""
     import numpy as np
     cel = abs(mos["transform"].a)
     R = float(prm["raio_m"])
@@ -494,33 +498,63 @@ def _geometria(mos, tx_xy, h_tx, prm):
     dentro = (c >= 0) & (c < nx) & (l >= 0) & (l < ny)
     z = np.full(xs.shape, np.nan, dtype="float64")
     z[dentro] = mos["z"][l[dentro], c[dentro]]
+    del xs, ys, c, l, dentro
     # Curvatura: o terreno "desce" d²/(2kR) visto da antena.
     z_eff = z - d[None, :] ** 2 / (2 * prm["k"] * 6371000.0)
-    s = np.where(np.isfinite(z_eff), (z_eff - h_tx) / d[None, :], -np.inf)
-    cm = np.maximum.accumulate(s, axis=1)
-    idx = np.where(s >= cm, np.arange(K)[None, :], 0)
-    J = np.maximum.accumulate(idx, axis=1)
+    ok = np.isfinite(z_eff)
+    ar = np.arange(K)[None, :]
+    # ── 1ª crista: a de maior inclinação vista da antena ──
+    s_ = np.where(ok, (z_eff - h_tx) / d[None, :], -np.inf)
+    cm = np.maximum.accumulate(s_, axis=1)
+    J = np.maximum.accumulate(np.where(s_ >= cm, ar, 0), axis=1)
     M_ant = np.concatenate([np.full((n_rad, 1), -np.inf), cm[:, :-1]], axis=1)
     J_ant = np.concatenate([np.zeros((n_rad, 1), dtype=np.int64), J[:, :-1]], axis=1)
     h_rx = z_eff + prm["altura_rx_m"]
     s_rx = (h_rx - h_tx) / d[None, :]
     d1 = (J_ant + 1) * cel
     d2 = np.maximum(d[None, :] - d1, cel)
-    h_obs = d1 * (M_ant - s_rx)
     # ν sem o comprimento de onda: ν = h·sqrt(2/λ·(1/d1 + 1/d2)).
-    nu_base = np.where(np.isfinite(M_ant), h_obs * np.sqrt(2 * (1 / d1 + 1 / d2)),
-                       -np.inf)
+    nu1 = np.where(np.isfinite(M_ant),
+                   d1 * (M_ant - s_rx) * np.sqrt(2 * (1 / d1 + 1 / d2)), -np.inf)
+    # ── 2ª crista: entre a 1ª e o veículo, a de maior inclinação vista
+    # do topo da 1ª. Os pontos com a mesma 1ª crista formam um trecho
+    # contínuo do raio; o máximo acumulado recomeça a cada trecho.
+    zm = np.take_along_axis(np.where(ok, z_eff, -1e6), J_ant, axis=1)
+    dm = d[J_ant]
+    # Pelo menos 30 m depois da 1ª: o topo plano da própria crista (a
+    # berma) não é uma segunda crista.
+    sep = max(30.0, 3 * cel)
+    t = np.where(ok & (d[None, :] - dm >= sep),
+                 (z_eff - zm) / np.maximum(d[None, :] - dm, cel), -np.inf)
+    muda = np.concatenate([np.ones((n_rad, 1), bool), J_ant[:, 1:] != J_ant[:, :-1]], axis=1)
+    grp = np.cumsum(muda, axis=1).astype("float64")
+    G = 1e5
+    tt = np.clip(np.where(np.isfinite(t), t, -4e4), -4e4, 4e4) + G * grp
+    cmg = np.maximum.accumulate(tt, axis=1)
+    J2 = np.maximum.accumulate(np.where(tt >= cmg, ar, 0), axis=1)
+    mesmo = ~muda
+    T_ant = np.concatenate([np.full((n_rad, 1), -np.inf), cmg[:, :-1]], axis=1) - G * grp
+    T_ant = np.where(mesmo & (T_ant > -3.9e4), T_ant, -np.inf)
+    J2_ant = np.concatenate([np.zeros((n_rad, 1), dtype=np.int64), J2[:, :-1]], axis=1)
+    d_j2 = (J2_ant + 1) * cel
+    t_rx = (h_rx - zm) / np.maximum(d[None, :] - dm, cel)
+    a1 = np.maximum(d_j2 - dm, cel)
+    a2 = np.maximum(d[None, :] - d_j2, cel)
+    nu2 = np.where(np.isfinite(T_ant),
+                   a1 * (T_ant - t_rx) * np.sqrt(2 * (1 / a1 + 1 / a2)), -np.inf)
     d3 = np.sqrt(d[None, :] ** 2 + (h_rx - h_tx) ** 2)
-    return {"n_rad": n_rad, "K": K, "cel": cel, "d3": d3, "nu_base": nu_base,
-            "ok": np.isfinite(z_eff), "ang": ang}
+    return {"n_rad": n_rad, "K": K, "cel": cel, "d3": d3, "nu1": nu1, "nu2": nu2,
+            "ok": ok, "ang": ang}
 
 
 def _rssi_polar(geo, f_mhz, base_db, azimute=None, abertura=None):
     import numpy as np
-    lam = 299.792458 / f_mhz
-    nu = geo["nu_base"] / math.sqrt(lam)
+    raiz = math.sqrt(299.792458 / f_mhz)
     fspl = 20 * np.log10(geo["d3"]) + 20 * math.log10(f_mhz) - 27.55
-    rssi = base_db - fspl - perda_difracao_db(nu)
+    nu1 = geo["nu1"] / raiz
+    # A 2ª crista só conta quando a 1ª bloqueia de fato (Deygout).
+    perda = perda_difracao_db(nu1) + np.where(nu1 > 0, perda_difracao_db(geo["nu2"] / raiz), 0.0)
+    rssi = base_db - fspl - perda
     if azimute is not None and abertura:
         rumo = (90.0 - np.degrees(geo["ang"])) % 360.0
         dif = np.abs((rumo - azimute + 180.0) % 360.0 - 180.0)
@@ -536,23 +570,23 @@ def _no_polar(geo, tx_xy, xs, ys, polar):
     a = np.mod(np.arctan2(dy, dx), 2 * math.pi)
     ri = np.round(a / (2 * math.pi / geo["n_rad"])).astype(np.int64) % geo["n_rad"]
     ki = np.clip(np.round(d / geo["cel"]).astype(np.int64) - 1, 0, geo["K"] - 1)
-    v = polar[ri, ki].astype("float64")
+    v = polar[ri, ki].astype("float32")
     return np.where(d <= geo["K"] * geo["cel"], v, np.nan)
 
 
-def estimar(mos, txs, bandas, prm, medidas=None, aviso=None):
-    """A melhor ERB/ERM em cada célula do terreno, por banda.
+def calcular(mos, txs, bandas, prm, medidas=None, aviso=None):
+    """O sinal de CADA ERB/ERM, por banda, em coordenadas polares em volta
+    dela (sem calibração).
 
-    `medidas`: [(nome da ERB/ERM, banda, x, y, RSSI medido)] — o estimado
-    em cada uma volta junto, para a calibração.
+    `medidas`: [(nome, banda, x, y, RSSI medido, …)] — o estimado em cada
+    uma volta junto, para a calibração.
 
-    Devolve ({banda: grade}, [(nome, banda, medido, estimado)], usados)."""
+    Devolve ({nome: {"xy", "geo", banda: polar}}, [(nome, banda, medido,
+    estimado)], usadas)."""
     import numpy as np
     from rasterio import warp
     aviso = aviso or (lambda t: None)
-    melhor = {b: np.full(mos["z"].shape, np.nan, dtype="float32") for b in bandas}
-    pares, usados = [], []
-    tr = mos["transform"]
+    polares, pares, usados = {}, [], []
     por_tx = {}
     for m in medidas or []:
         por_tx.setdefault(m[0].casefold(), []).append(m)
@@ -575,17 +609,7 @@ def estimar(mos, txs, bandas, prm, medidas=None, aviso=None):
         geo = _geometria(mos, xy, h_tx, prm)
         usados.append(dict(tx, altura_usada=altura,
                            altura_padrao=tx.get("altura_m") is None))
-        R = geo["K"] * geo["cel"]
-        c0, l0 = ~tr * (xy[0] - R, xy[1] + R)
-        c1, l1 = ~tr * (xy[0] + R, xy[1] - R)
-        c0, l0 = max(0, int(c0)), max(0, int(l0))
-        c1 = min(mos["z"].shape[1], int(math.ceil(c1)))
-        l1 = min(mos["z"].shape[0], int(math.ceil(l1)))
-        if c1 <= c0 or l1 <= l0:
-            continue
-        cc, ll = np.meshgrid(np.arange(c0, c1), np.arange(l0, l1))
-        gx = tr.c + (cc + 0.5) * tr.a
-        gy = tr.f + (ll + 0.5) * tr.e
+        info = {"xy": xy, "geo": {k: geo[k] for k in ("n_rad", "K", "cel")}}
         for b in bandas:
             if tx.get("bandas") and b not in tx["bandas"]:
                 continue
@@ -597,20 +621,60 @@ def estimar(mos, txs, bandas, prm, medidas=None, aviso=None):
                        else prm["perda_cabo_db"]))
             polar = _rssi_polar(geo, FREQ_MHZ.get(b, 5785.0), base,
                                 tx.get("azimute"), tx.get("abertura"))
-            v = _no_polar(geo, xy, gx, gy, polar).astype("float32")
-            jan = melhor[b][l0:l1, c0:c1]
-            melhor[b][l0:l1, c0:c1] = np.where(np.isfinite(jan), np.fmax(jan, v), v)
             ms = [m for m in por_tx.get(tx["nome"].casefold(), []) if m[1] == b]
             if ms:
-                est = _no_polar(geo, xy, [m[2] for m in ms], [m[3] for m in ms], polar)
+                est = _no_polar(info["geo"], xy, [m[2] for m in ms], [m[3] for m in ms], polar)
                 pares += [(tx["nome"], b, m[4], float(e)) for m, e in zip(ms, est)
                           if math.isfinite(e)]
-    return melhor, pares, usados
+            # float16 basta (décimo de dB) e é metade da memória.
+            info[b] = polar.astype("float16")
+        del geo
+        polares[tx["nome"]] = info
+    return polares, pares, usados
+
+
+def grade_de(mos, info, banda, correcao=0.0, destino=None):
+    """O sinal de uma ERB/ERM (`info` de `calcular`) na grade do terreno,
+    ou em `destino` (uma grade melhor já existente: fica o maior)."""
+    import numpy as np
+    tr = mos["transform"]
+    g = info["geo"]
+    R = g["K"] * g["cel"]
+    xy = info["xy"]
+    c0, l0 = ~tr * (xy[0] - R, xy[1] + R)
+    c1, l1 = ~tr * (xy[0] + R, xy[1] - R)
+    c0, l0 = max(0, int(c0)), max(0, int(l0))
+    c1 = min(mos["z"].shape[1], int(math.ceil(c1)))
+    l1 = min(mos["z"].shape[0], int(math.ceil(l1)))
+    out = destino if destino is not None else np.full(mos["z"].shape, np.nan, dtype="float32")
+    if c1 <= c0 or l1 <= l0 or banda not in info:
+        return out
+    cc, ll = np.meshgrid(np.arange(c0, c1), np.arange(l0, l1))
+    v = _no_polar(g, xy, tr.c + (cc + 0.5) * tr.a, tr.f + (ll + 0.5) * tr.e,
+                  info[banda]) + correcao
+    jan = out[l0:l1, c0:c1]
+    out[l0:l1, c0:c1] = np.where(np.isfinite(jan), np.fmax(jan, v), v)
+    return out
+
+
+def estimar(mos, txs, bandas, prm, medidas=None, aviso=None):
+    """O conjunto das ERB/ERM em cada célula do terreno (o sinal mais forte
+    entre elas), por banda, sem calibração.
+
+    Devolve ({banda: grade}, [(nome, banda, medido, estimado)], usadas)."""
+    polares, pares, usados = calcular(mos, txs, bandas, prm, medidas, aviso)
+    grades = {}
+    for b in bandas:
+        g = None
+        for info in polares.values():
+            g = grade_de(mos, info, b, destino=g)
+        grades[b] = g
+    return grades, pares, usados
 
 
 def medidas_do_survey(amostras, peers, crs):
     """As leituras em que um veículo ouviu uma ERB/ERM: (nome, banda, x,
-    y, RSSI), com a posição do veículo no sistema do terreno."""
+    y, RSSI, lat, lon), com a posição do veículo no sistema do terreno."""
     from rasterio import warp
     rx = re.compile(rm.PADRAO_INFRA, re.I)
     por_ponto = {i: a for i, a in enumerate(amostras, start=1)
@@ -629,19 +693,27 @@ def medidas_do_survey(amostras, peers, crs):
         return []
     xs, ys = warp.transform("EPSG:4326", crs, [m[2] for m in brutas],
                             [m[3] for m in brutas])
-    return [(m[0], m[1], x, y, m[4]) for m, x, y in zip(brutas, xs, ys)]
+    return [(m[0], m[1], x, y, m[4], m[3], m[2]) for m, x, y in zip(brutas, xs, ys)]
 
 
-def calibrar(pares, bandas, minimo=20):
+def calibrar(pares, bandas, minimo=20, max_correcao=15.0):
     """Por banda: a correção (mediana de medido − estimado) e o erro que
     sobra (RMS), e o mesmo por ERB/ERM. Com menos de `minimo` leituras a
-    banda fica sem correção — e o relatório diz."""
+    banda fica sem correção — e o relatório diz.
+
+    Correção acima de `max_correcao` dB não é aplicada: ganho de antena e
+    perda de cabo não explicam tanto, e o que sobra é posição, altura ou
+    potência de ERB/ERM errada. Fica registrada como rejeitada."""
     import numpy as np
     out = {}
     for b in bandas:
         r = np.array([m - e for _n, bb, m, e in pares if bb == b])
-        if len(r) >= minimo:
-            c = float(np.median(r))
+        c = float(np.median(r)) if len(r) else 0.0
+        if len(r) >= minimo and abs(c) > max_correcao:
+            out[b] = {"correcao": 0.0, "rejeitada": round(c, 1), "n": int(len(r)),
+                      "calibrado": False,
+                      "rms": round(float(np.sqrt(np.mean(r ** 2))), 1)}
+        elif len(r) >= minimo:
             out[b] = {"correcao": round(c, 1),
                       "rms": round(float(np.sqrt(np.mean((r - c) ** 2))), 1),
                       "n": int(len(r)), "calibrado": True}
@@ -659,21 +731,38 @@ def calibrar(pares, bandas, minimo=20):
 
 
 # ══════════════════════════════════════════════════════════════
-# A VISUALIZAÇÃO — sobre a imagem da área
+# O MAPA DE CALOR — sobre a imagem da área, com o relevo
 # ══════════════════════════════════════════════════════════════
-_ALFA_ESTIMADO = 0.62    # mais transparente que o medido: é estimativa
+# A cor é contínua, nas cores da régua do RSSI (a mesma do medido),
+# passando de uma faixa para a outra sem degrau; a linha branca marca o
+# requisito (−75 dBm). O relevo do LAS sombreia a cor: a bancada e a
+# encosta continuam visíveis por baixo do calor.
+_ANCORAS_CALOR = ((-95.0, "5C0000"), (-85.0, "B70404"), (-77.5, "FF0000"),
+                  (-72.5, "F26A00"), (-69.0, "DD9F17"), (-64.0, "3EAD30"))
+_ALFA_CALOR_EST = 0.72
 
 
-def _relevo(z):
-    """Sombreamento do relevo (sol a noroeste), para a área sem imagem."""
+def cor_continua(v):
+    """RGB (float, 0–255) do RSSI `v` (array), na escala contínua."""
     import numpy as np
-    zz = np.where(np.isfinite(z), z, np.nanmedian(z) if np.isfinite(z).any() else 0)
-    gy, gx = np.gradient(zz)
+    xs = np.array([a for a, _c in _ANCORAS_CALOR])
+    cs = np.array([[int(c[i:i + 2], 16) for i in (0, 2, 4)] for _a, c in _ANCORAS_CALOR],
+                  dtype="float32")
+    v = np.clip(np.asarray(v, dtype="float32"), xs[0], xs[-1])
+    return np.stack([np.interp(v, xs, cs[:, k]) for k in range(3)], axis=-1)
+
+
+def _relevo(z, lado_m=1.0):
+    """Sombreamento do relevo (sol a noroeste), 0–1."""
+    import numpy as np
+    fin = np.isfinite(z)
+    zz = np.where(fin, z, np.nanmedian(z) if fin.any() else 0.0)
+    gy, gx = np.gradient(zz, lado_m)
     az, alt = math.radians(315), math.radians(45)
     dec = np.arctan(np.hypot(gx, gy))
     asp = np.arctan2(-gx, gy)
-    sh = (np.sin(alt) * np.cos(dec) + np.cos(alt) * np.sin(dec) * np.cos(az - asp))
-    return (np.clip(sh, 0, 1) * 200 + 40).astype("uint8")
+    return np.clip(np.sin(alt) * np.cos(dec)
+                   + np.cos(alt) * np.sin(dec) * np.cos(az - asp), 0, 1)
 
 
 def fundo_do_terreno(area, mos, margem=0.06, max_px=3000):
@@ -694,54 +783,105 @@ def fundo_do_terreno(area, mos, margem=0.06, max_px=3000):
     z = mos["z"][win.row_off:win.row_off + win.height, win.col_off:win.col_off + win.width]
     f = max(1, int(math.ceil(max(z.shape) / max_px)))
     z = z[::f, ::f]
-    cinza = _relevo(z)
+    cinza = (_relevo(z, abs(mos["transform"].a) * f) * 200 + 40).astype("uint8")
     tr = windows.transform(win, mos["transform"]) * Affine.scale(f, f)
     return {"rgb": np.dstack([cinza] * 3), "valido": np.isfinite(z),
             "transform": tr, "crs": mos["crs"], "arquivo": "relevo do LAS"}
 
 
-def mapa_estimado(area, grade, mos, fundo, txs):
-    """A cobertura estimada sobre a imagem da área, na régua do RSSI,
-    recortada na área, com as ERB/ERM marcadas. RGBA."""
+class GradeDaArea:
+    """Tudo o que o mapa de uma área precisa, calculado uma vez: as
+    coordenadas de cada pixel da imagem no sistema do terreno, o contorno
+    da área nessa grade e o relevo sombreado."""
+
+    def __init__(self, area, fundo, mos):
+        import numpy as np
+        from rasterio import warp, features
+        from rasterio.enums import Resampling
+        self.area, self.fundo, self.mos = area, fundo, mos
+        h, w = fundo["rgb"].shape[:2]
+        tr = fundo["transform"]
+        # Coordenadas dos pixels no sistema do terreno. No mesmo sistema
+        # é a conta direta; noutro, de 16 em 16 pixels e interpolado.
+        cc, ll = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
+        X, Y = tr.c + cc * tr.a, tr.f + ll * tr.e
+        if fundo["crs"] != mos["crs"]:
+            from scipy.ndimage import map_coordinates
+            pc, pl = np.arange(0, w + 16, 16), np.arange(0, h + 16, 16)
+            gc, gl = np.meshgrid(pc + 0.5, pl + 0.5)
+            gx, gy = warp.transform(fundo["crs"], mos["crs"],
+                                    (tr.c + gc * tr.a).ravel(), (tr.f + gl * tr.e).ravel())
+            gx = np.array(gx).reshape(gl.shape); gy = np.array(gy).reshape(gl.shape)
+            coords = [ll / 16.0, cc / 16.0]
+            X = map_coordinates(gx, coords, order=1, mode="nearest")
+            Y = map_coordinates(gy, coords, order=1, mode="nearest")
+        self.X, self.Y = X.astype("float64"), Y.astype("float64")
+        geoms = []
+        for g in area["poligonos"]:
+            aneis = []
+            for anel in [g["externo"]] + g["buracos"]:
+                xs, ys = warp.transform("EPSG:4326", fundo["crs"],
+                                        [q[1] for q in anel], [q[0] for q in anel])
+                aneis.append(list(zip(xs, ys)) + [(xs[0], ys[0])])
+            geoms.append({"type": "Polygon", "coordinates": aneis})
+        self.dentro = features.rasterize(((gg, 1) for gg in geoms), out_shape=(h, w),
+                                         transform=tr, fill=0, dtype="uint8").astype(bool)
+        z = np.full((h, w), np.nan, dtype="float32")
+        warp.reproject(mos["z"], z, src_transform=mos["transform"], src_crs=mos["crs"],
+                       dst_transform=tr, dst_crs=fundo["crs"], src_nodata=np.nan,
+                       dst_nodata=np.nan, resampling=Resampling.bilinear)
+        self.sombra = _relevo(z, rm._metros_por_pixel(fundo))
+        self.m_px = rm._metros_por_pixel(fundo)
+
+    def valores(self, info, banda, correcao=0.0):
+        """O sinal de uma ERB/ERM em cada pixel da área, suavizado na
+        escala da célula do terreno (sem o degrau dos raios)."""
+        import numpy as np
+        from scipy.ndimage import gaussian_filter
+        if banda not in info:
+            return None
+        v = _no_polar(info["geo"], info["xy"], self.X, self.Y, info[banda]) + correcao
+        sig = max(0.5, 0.6 * info["geo"]["cel"] / max(self.m_px, 1e-6))
+        fin = np.isfinite(v)
+        if not fin.any():
+            return v
+        # Média ponderada só entre pixels com valor: a borda do raio de
+        # cálculo não puxa o calor para baixo.
+        num = gaussian_filter(np.where(fin, v, 0.0), sig)
+        den = gaussian_filter(fin.astype("float32"), sig)
+        return np.where(fin, num / np.maximum(den, 1e-3), np.nan).astype("float32")
+
+
+def mapa_de_calor(grade, val, txs, destaque=None, req=None):
+    """O mapa de calor sobre a imagem: a cor contínua da régua, o relevo
+    sombreando a cor, a linha branca do requisito, o contorno da área e
+    as ERB/ERM (a `destaque` em amarelo, as outras em cinza). RGBA."""
     import numpy as np
-    from rasterio import warp, features
-    from rasterio.enums import Resampling
+    from rasterio import warp
+    from scipy.ndimage import binary_erosion, binary_dilation
     from PIL import Image, ImageDraw
+    fundo = grade.fundo
     h, w = fundo["rgb"].shape[:2]
-    val = np.full((h, w), np.nan, dtype="float32")
-    warp.reproject(grade, val, src_transform=mos["transform"], src_crs=mos["crs"],
-                   dst_transform=fundo["transform"], dst_crs=fundo["crs"],
-                   src_nodata=np.nan, dst_nodata=np.nan,
-                   resampling=Resampling.bilinear)
-    geoms = []
-    for g in area["poligonos"]:
-        aneis = []
-        for anel in [g["externo"]] + g["buracos"]:
-            xs, ys = warp.transform("EPSG:4326", fundo["crs"],
-                                    [q[1] for q in anel], [q[0] for q in anel])
-            aneis.append(list(zip(xs, ys)) + [(xs[0], ys[0])])
-        geoms.append({"type": "Polygon", "coordinates": aneis})
-    dentro = features.rasterize(((gg, 1) for gg in geoms), out_shape=(h, w),
-                                transform=fundo["transform"], fill=0,
-                                dtype="uint8").astype(bool)
-    faixas = rm.FAIXAS_KML["sinal_cob"]
-    baixo = rm.limites_na_faixa_de_baixo("sinal_cob")
-    paleta = np.array([[int(c[i:i + 2], 16) for i in (0, 2, 4)] for _l, c in faixas],
-                      dtype="float32")
-    ok = np.isfinite(val) & dentro
-    k = np.zeros((h, w), dtype=np.int64)
-    if ok.any():
-        k[ok] = _faixas_vetor(val[ok], faixas, baixo)
-    rgb = fundo["rgb"].astype("float32")
-    a = np.where(ok, _ALFA_ESTIMADO, 0.0)[..., None]
-    rgb = rgb * (1 - a) + paleta[k] * a
+    req = float(rm.ESCALAS["sinal_cob"]["req"]) if req is None else req
+    ok = np.isfinite(val) & grade.dentro
+    # Abaixo de −95 dBm a cor some aos poucos: ali já não há o que pintar.
+    alfa = np.where(ok, _ALFA_CALOR_EST * np.clip((val + 108.0) / 13.0, 0, 1), 0.0)
+    cor = cor_continua(np.where(ok, val, -95.0))
+    cor = cor * (0.62 + 0.38 * grade.sombra)[..., None]
+    rgb = fundo["rgb"].astype("float32") * (1 - alfa[..., None]) + cor * alfa[..., None]
+    # A linha do requisito, branca sobre uma sombra escura.
+    acima = ok & (val > req)
+    larg = max(2, round(max(w, h) / 700))
+    borda = acima & ~binary_erosion(acima, iterations=larg)
+    sombra_l = binary_dilation(borda, iterations=1) & ~borda
+    rgb[sombra_l] = rgb[sombra_l] * 0.35
+    rgb[borda] = 255.0
     out = np.dstack([np.clip(rgb, 0, 255).astype("uint8"),
                      np.where(fundo["valido"] | ok, 255, 0).astype("uint8")])
     im = Image.fromarray(out, "RGBA")
-    rm._desenhar_contorno(im, area, fundo)
+    rm._desenhar_contorno(im, grade.area, fundo)
     dr = ImageDraw.Draw(im)
     fonte = rm._fonte_pil(max(14, round(max(w, h) / 70)))
-    lado = max(7, round(max(w, h) / 160))
     inv = ~fundo["transform"]
     for tx in txs:
         if tx.get("lat") is None:
@@ -750,25 +890,47 @@ def mapa_estimado(area, grade, mos, fundo, txs):
         c, l = inv * (xs[0], ys[0])
         if not (0 <= c < w and 0 <= l < h):
             continue
-        cor = (255, 255, 255, 255) if tx.get("proposta") else (20, 20, 20, 255)
+        em = destaque is None or tx["nome"] == destaque
+        lado = max(7, round(max(w, h) / (140 if em else 220)))
         dr.polygon([(c, l - lado), (c - lado, l + lado * 0.8), (c + lado, l + lado * 0.8)],
-                   fill=(241, 196, 15, 255), outline=cor, width=2)
-        dr.text((c + lado + 3, l - lado), tx["nome"] + (" (proposta)" if tx.get("proposta") else ""),
-                fill=(26, 26, 26, 255), font=fonte, stroke_width=2,
-                stroke_fill=(255, 255, 255, 255))
-    return np.array(im), (val, dentro)
+                   fill=(241, 196, 15, 255) if em else (150, 150, 150, 255),
+                   outline=(255, 255, 255, 255) if tx.get("proposta") else (20, 20, 20, 255),
+                   width=2)
+        if em:
+            dr.text((c + lado + 3, l - lado),
+                    tx["nome"] + (" (proposta)" if tx.get("proposta") else ""),
+                    fill=(26, 26, 26, 255), font=fonte, stroke_width=2,
+                    stroke_fill=(255, 255, 255, 255))
+    return np.array(im)
 
 
-def _faixas_vetor(v, faixas, baixo):
-    """`_faixa_idx` para um vetor inteiro de uma vez."""
-    import numpy as np
-    lims = np.array([l for l, _c in faixas], dtype="float64")
-    na_baixo = np.array([l in (baixo or set()) for l, _c in faixas])
-    k = np.searchsorted(lims, v, side="right")
-    # Valor exatamente no limite que pertence à faixa de baixo.
-    igual = (k > 0) & np.isclose(v, lims[np.clip(k - 1, 0, len(lims) - 1)])
-    k = np.where(igual & na_baixo[np.clip(k - 1, 0, len(lims) - 1)], k - 1, k)
-    return np.clip(k, 0, len(faixas) - 1)
+def legenda_continua_png(largura=900, altura=46):
+    """A barra da escala contínua, para o slide."""
+    import numpy as np, io as _io
+    from PIL import Image
+    v = np.linspace(-100.0, -60.0, largura)
+    cor = cor_continua(v)
+    im = np.repeat(cor[None, :, :], altura, axis=0).astype("uint8")
+    req = float(rm.ESCALAS["sinal_cob"]["req"])
+    x = int(round((req + 100.0) / 40.0 * (largura - 1)))
+    im[:, max(0, x - 2):x + 2] = 255
+    buf = _io.BytesIO(); Image.fromarray(im, "RGB").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _escala_calor(s, x, y, w):
+    from pptx.util import Inches
+    import io as _io
+    s.shapes.add_picture(_io.BytesIO(legenda_continua_png()), Inches(x), Inches(y + 0.25),
+                         Inches(w), Inches(0.26))
+    rm._txt_anglo(s, x, y - 0.05, w, 0.3, "RSSI estimado (dBm) — escala contínua",
+                  9, True, rm.ANGLO["texto"])
+    for v in (-100, -90, -80, -75, -70, -60):
+        px = x + (v + 100.0) / 40.0 * w
+        rm._txt_anglo(s, px - 0.3, y + 0.52, 0.6, 0.25, f"{v}", 8.5, v == -75,
+                      rm.ANGLO["azul"] if v == -75 else rm.ANGLO["suave"])
+    rm._txt_anglo(s, x, y + 0.78, w, 0.3, "linha branca no mapa: o requisito, −75 dBm",
+                  8.5, False, rm.ANGLO["suave"])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -777,10 +939,10 @@ def _faixas_vetor(v, faixas, baixo):
 def gerar(amostras, peers, areas, destino, cfg=None, malha=None, nome=None,
           aviso=None, infra=None, quando=None):
     """Cobertura estimada das áreas com LAS: o deck próprio e os GeoTIFF
-    em `destino`/estimativa. Devolve os arquivos gravados (vazio sem LAS
-    ou sem ERB/ERM com posição)."""
+    em `destino`/estimativa. Cada área considera as ERB/ERM que estão
+    DENTRO dela: um mapa de cada uma e o do conjunto delas. Devolve os
+    arquivos gravados (vazio sem LAS ou sem ERB/ERM com posição)."""
     import numpy as np
-    from datetime import datetime
     aviso = aviso or (lambda t: None)
     prm = parametros(cfg)
     caminhos = [a["terreno"] for a in areas or [] if a.get("terreno")]
@@ -810,25 +972,37 @@ def gerar(amostras, peers, areas, destino, cfg=None, malha=None, nome=None,
     bandas = sorted(({rm._norm_banda(a.get("banda")) for a in amostras or []
                       if a.get("banda")} | {m[1] for m in medidas}) - {None}) \
         or list(FREQ_MHZ)
-    grades, pares, usados = estimar(mos, txs, bandas, prm, medidas, aviso)
-    cal = calibrar(pares, bandas, prm["min_calibracao"])
+    polares, pares, usados = calcular(mos, txs, bandas, prm, medidas, aviso)
+    cal = calibrar(pares, bandas, prm["min_calibracao"], prm["max_correcao_db"])
     for b in bandas:
-        grades[b] = grades[b] + cal[b]["correcao"]
-        c = cal[b]
-        aviso(f"    {b}: " + (f"correção {c['correcao']:+g} dB, erro {c['rms']:g} dB "
-                              f"em {c['n']} leituras" if c["calibrado"] else
-                              f"sem calibração ({c['n']} leituras)"))
+        aviso(f"    {b}: {_txt_calibracao(cal[b], prm)}")
     pasta = Path(destino) / "estimativa"
     pasta.mkdir(parents=True, exist_ok=True)
     feitos = []
+    suf = {b: b.replace(" ", "").replace(".", "") for b in bandas}
+    # Em dBm, para o QGIS/ArcGIS: cada ERB/ERM e o conjunto de todas.
+    (pasta / "ERB-ERM").mkdir(exist_ok=True)
     for b in bandas:
-        suf = b.replace(" ", "").replace(".", "")
-        alvo = pasta / f"cobertura_estimada_{suf}.tif"
-        _gravar_grade(alvo, grades[b], mos)
-        feitos.append(alvo)
-    # Mapas por área e banda, sobre a imagem (ou o relevo).
-    mapas = {}
+        conj = None
+        for n_tx, info in polares.items():
+            g = grade_de(mos, info, b, cal[b]["correcao"])
+            alvo = pasta / "ERB-ERM" / f"{rm._slug_arquivo(n_tx)[:50]}_{suf[b]}.tif"
+            _gravar_grade(alvo, g, mos, f"RSSI estimado de {n_tx} (dBm)")
+            feitos.append(alvo)
+            conj = g if conj is None else np.where(np.isfinite(conj), np.fmax(conj, g), g)
+        if conj is not None:
+            alvo = pasta / f"cobertura_estimada_{suf[b]}.tif"
+            _gravar_grade(alvo, conj, mos, "RSSI estimado (dBm), conjunto das ERB/ERM")
+            feitos.append(alvo)
+    req = float(rm.ESCALAS["sinal_cob"]["req"])
+    secoes = []
     for area in areas:
+        dentro_tx = [t for t in usados if rm._na_area(area, t["lat"], t["lon"])]
+        sec = {"area": area, "txs": dentro_tx, "paginas": []}
+        secoes.append(sec)
+        if not dentro_tx:
+            aviso(f"  · {area['nome']}: nenhuma ERB/ERM dentro da área")
+            continue
         try:
             fundo = rm.fundo_da_area(area) if area.get("imagem") else None
         except Exception as e:
@@ -837,33 +1011,52 @@ def gerar(amostras, peers, areas, destino, cfg=None, malha=None, nome=None,
         fundo = fundo or fundo_do_terreno(area, mos)
         if fundo is None:
             continue
+        grade = GradeDaArea(area, fundo, mos)
         am_ar = [a for a in amostras or [] if a.get("area") == area["nome"]]
+        pasta_a = pasta / rm._slug_arquivo(area["nome"])[:50]
+        pasta_a.mkdir(exist_ok=True)
         for b in bandas:
-            try:
-                mapa, (val, dentro) = mapa_estimado(area, grades[b], mos, fundo, usados)
-            except Exception as e:
-                aviso(f"  ! estimativa de {area['nome']} ({b}): {e}")
+            vals = {t["nome"]: grade.valores(polares[t["nome"]], b, cal[b]["correcao"])
+                    for t in dentro_tx if t["nome"] in polares}
+            vals = {k: v for k, v in vals.items() if v is not None}
+            if not vals:
                 continue
-            vv = val[dentro & np.isfinite(val)]
-            if not vv.size:
-                continue
-            req = float(rm.ESCALAS["sinal_cob"]["req"])
+            conj = np.fmax.reduce([v for v in vals.values()]) if len(vals) > 1 \
+                else next(iter(vals.values()))
             am_b = [a for a in am_ar if rm._norm_banda(a.get("banda")) == b]
             medido = (rm.survey_resumo(am_b) or {}).get("sinal_cob") if am_b else None
-            mapas[(area["nome"], b)] = {
-                "png": rm.png_do_mapa(mapa, fundo), "imagem": fundo["arquivo"],
-                "pct_acima": round(float((vv > req).mean() * 100), 1),
-                "mediana": round(float(np.median(vv)), 1),
-                "medido_pct": medido["pct_ok"] if medido else None}
-            alvo = pasta / f"{rm._slug_arquivo(area['nome'])[:50]}_cobertura_estimada_" \
-                           f"{b.replace(' ', '').replace('.', '')}.tif"
-            try:
-                rm.gravar_geotiff_do_mapa(alvo, mapa, fundo)
-                feitos.append(alvo)
-            except Exception as e:
-                aviso(f"  ! GeoTIFF da estimativa de {area['nome']}: {e}")
+
+            def _pct(v):
+                vv = v[grade.dentro & np.isfinite(v)]
+                return (round(float((vv > req).mean() * 100), 1) if vv.size else None,
+                        round(float(np.median(vv)), 1) if vv.size else None)
+            pc, md = _pct(conj)
+            mapa = mapa_de_calor(grade, conj, usados, None, req)
+            sec["paginas"].append({
+                "tipo": "conjunto", "banda": b, "png": rm.png_do_mapa(mapa, fundo),
+                "imagem": fundo["arquivo"], "pct_acima": pc, "mediana": md,
+                "medido_pct": medido["pct_ok"] if medido else None,
+                "n_tx": len(vals)})
+            _gravar_mapa(pasta_a / f"conjunto_{suf[b]}.tif", mapa, fundo, feitos, aviso)
+            for t in dentro_tx:
+                v = vals.get(t["nome"])
+                if v is None:
+                    continue
+                pc_t, md_t = _pct(v)
+                med_t = [m[4] for m in medidas if m[0].casefold() == t["nome"].casefold()
+                         and m[1] == b and rm._na_area(area, m[5], m[6])]
+                mapa_t = mapa_de_calor(grade, v, usados, t["nome"], req)
+                sec["paginas"].append({
+                    "tipo": "erb", "tx": t, "banda": b,
+                    "png": rm.png_do_mapa(mapa_t, fundo), "imagem": fundo["arquivo"],
+                    "pct_acima": pc_t, "mediana": md_t,
+                    "medido_mediana": (round(float(np.median(med_t)), 1) if med_t else None),
+                    "medido_n": len(med_t),
+                    "erro": cal["por_tx"].get((t["nome"], b))})
+                _gravar_mapa(pasta_a / f"{rm._slug_arquivo(t['nome'])[:50]}_{suf[b]}.tif",
+                             mapa_t, fundo, feitos, aviso)
     try:
-        dados, nome_ppt = ppt_estimativa(nome or "Site Survey", areas, bandas, mapas,
+        dados, nome_ppt = ppt_estimativa(nome or "Site Survey", secoes, bandas,
                                          usados, cal, prm, mos, quando)
         alvo = Path(destino) / nome_ppt
         alvo.write_bytes(dados); feitos.append(alvo)
@@ -872,7 +1065,15 @@ def gerar(amostras, peers, areas, destino, cfg=None, malha=None, nome=None,
     return feitos
 
 
-def _gravar_grade(caminho, grade, mos):
+def _gravar_mapa(alvo, mapa, fundo, feitos, aviso):
+    try:
+        rm.gravar_geotiff_do_mapa(alvo, mapa, fundo)
+        feitos.append(alvo)
+    except Exception as e:
+        aviso(f"  ! GeoTIFF {alvo.name}: {e}")
+
+
+def _gravar_grade(caminho, grade, mos, descricao="RSSI estimado (dBm)"):
     """A estimativa em dBm, float, para o QGIS/ArcGIS estilizar."""
     rio = rm._rasterio()
     import numpy as np
@@ -881,12 +1082,13 @@ def _gravar_grade(caminho, grade, mos):
                   transform=mos["transform"], nodata=np.nan, compress="deflate",
                   tiled=True) as d:
         d.write(grade.astype("float32"), 1)
-        d.set_band_description(1, "RSSI estimado (dBm), melhor ERB/ERM")
+        d.set_band_description(1, descricao)
 
 
-def ppt_estimativa(nome_sv, areas, bandas, mapas, usados, cal, prm, mos,
-                   quando=None):
-    """O deck da cobertura estimada, na identidade Anglo."""
+def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
+    """O deck da cobertura estimada, na identidade Anglo: premissas, as
+    ERB/ERM, e uma seção por área — a abertura com as ERB/ERM que estão
+    nela, o mapa do conjunto e um mapa de cada uma, por banda."""
     from pptx import Presentation
     from pptx.util import Inches
     from datetime import datetime
@@ -901,25 +1103,25 @@ def ppt_estimativa(nome_sv, areas, bandas, mapas, usados, cal, prm, mos,
     s = rm.slide_anglo(p, "Premissas da estimativa",
                        "Como o número saiu — e quanto ele erra contra o survey")
     n_pad = sum(1 for t in usados if t.get("altura_padrao"))
+    sem = [sec["area"]["nome"] for sec in secoes if not sec["txs"]]
     ficha = [
         ["Terreno", f"{', '.join(mos['arquivos'])} · célula de "
                     f"{abs(mos['transform'].a):g} m (ponto mais alto da célula)"],
-        ["Modelo", "espaço livre + difração no obstáculo dominante do perfil "
-                   "(ITU-R P.526), curvatura da Terra k = 4/3"],
+        ["Modelo", "espaço livre + difração nas duas cristas que mais barram o "
+                   "caminho (Deygout, ITU-R P.526), curvatura da Terra k = 4/3"],
         ["Antena no veículo", f"{prm['altura_rx_m']:g} m acima do terreno, "
                               f"{prm['ganho_rx_dbi']:g} dBi"],
         ["ERB/ERM", f"{len(usados)} no cálculo"
                     + (f" · {n_pad} com altura padrão ({prm['altura_tx_m']:g} m)"
                        if n_pad else "")],
+        ["Por área", "cada área considera as ERB/ERM que estão dentro dela: um "
+                     "mapa de cada uma e o do conjunto (em cada ponto, o sinal "
+                     "mais forte entre elas)"
+                     + (f" · sem ERB/ERM dentro: {', '.join(sem)}" if sem else "")],
         ["Raio de cálculo", f"{prm['raio_m']:g} m a partir de cada ERB/ERM"],
     ]
     for b in bandas:
-        c = cal.get(b) or {}
-        ficha.append([f"Calibração {b}",
-                      f"correção {c['correcao']:+g} dB · erro (RMS) {c['rms']:g} dB "
-                      f"em {c['n']} leituras do survey" if c.get("calibrado") else
-                      f"sem calibração: {c.get('n', 0)} leituras do survey "
-                      f"(mínimo {prm['min_calibracao']})"])
+        ficha.append([f"Calibração {b}", _txt_calibracao(cal.get(b) or {}, prm)])
     ficha.append(["O que o modelo não vê", "veículos e equipamentos (não estão no "
                   "LAS), reflexão nas paredes da cava, mudança da cava depois do LAS"])
     rm._tabela_anglo(s, 0.55, 1.5, 12.25, ["Premissa", "Valor"], ficha, tam=10)
@@ -930,7 +1132,8 @@ def ppt_estimativa(nome_sv, areas, bandas, mapas, usados, cal, prm, mos,
         err = " · ".join(f"{b.split()[0]}: {cal['por_tx'][(t['nome'], b)]['rms']:g} dB "
                          f"({cal['por_tx'][(t['nome'], b)]['n']})"
                          for b in bandas if (t["nome"], b) in cal.get("por_tx", {}))
-        linhas.append([t["nome"] + (" (proposta)" if t.get("proposta") else ""),
+        area_t = next((sec["area"]["nome"] for sec in secoes if t in sec["txs"]), "—")
+        linhas.append([t["nome"] + (" (proposta)" if t.get("proposta") else ""), area_t,
                        f"{t['altura_usada']:g} m" + (" (padrão)" if t.get("altura_padrao") else ""),
                        pot or f"{prm['potencia_dbm']:g} (padrão)",
                        f"{t['azimute']:g}° / {t['abertura']:g}°" if t.get("azimute") is not None
@@ -938,40 +1141,104 @@ def ppt_estimativa(nome_sv, areas, bandas, mapas, usados, cal, prm, mos,
                        err or "—"])
     for k in range(0, max(1, len(linhas)), 14):
         s = rm.slide_anglo(p, "ERB/ERM no cálculo" + (f" ({k // 14 + 1})" if len(linhas) > 14 else ""),
-                           "Altura do mastro, potência por banda (dBm), setor e o erro "
-                           "do modelo em cada uma (leituras)")
+                           "Área, altura do mastro, potência por banda (dBm), setor e o "
+                           "erro do modelo em cada uma (leituras)")
         rm._tabela_anglo(s, 0.55, 1.5, 12.25,
-                         ["ERB/ERM", "Altura", "Potência (dBm)", "Setor", "Erro do modelo"],
-                         linhas[k:k + 14], tam=9.5)
+                         ["ERB/ERM", "Área", "Altura", "Potência (dBm)", "Setor",
+                          "Erro do modelo"], linhas[k:k + 14], tam=9.5)
 
-    for area in areas:
-        for b in bandas:
-            m = mapas.get((area["nome"], b))
-            if not m:
-                continue
-            s = rm.slide_anglo(p, f"{area['nome']} · Cobertura estimada (RSSI) — {b}",
-                               f"ESTIMATIVA — melhor ERB/ERM em cada ponto  ·  requisito "
-                               f"> {req:g} dBm")
-            rm._mapa_anglo(s, 0.55, 1.45, 7.3, 5.4, m["png"],
-                           f"Imagem: {m['imagem']}   ·   estimativa pelo relevo   ·   {b}")
-            c = cal.get(b) or {}
-            cartoes = [(f"Área acima de {req:g} dBm", f"{m['pct_acima']:.1f}%"),
-                       ("Mediana estimada", f"{m['mediana']:g} dBm"),
-                       ("Medido nas rotas — dentro", f"{m['medido_pct']:.1f}%"
-                        if m.get("medido_pct") is not None else "—"),
-                       ("Erro do modelo (RMS)", f"{c['rms']:g} dB" if c.get("rms") is not None
-                        else "—")]
-            for k, (rot, val) in enumerate(cartoes):
+    navegar = {}
+    for sec in secoes:
+        nome_a = sec["area"]["nome"]
+        cab = rm.slide_anglo(p, nome_a,
+                             f"Cobertura estimada — {len(sec['txs'])} ERB/ERM dentro da área"
+                             if sec["txs"] else "Cobertura estimada — nenhuma ERB/ERM "
+                             "dentro da área")
+        if not sec["txs"]:
+            rm._txt_anglo(cab, 0.55, 1.6, 12.25, 0.8,
+                          "A estimativa por área considera as ERB/ERM que estão dentro "
+                          "dela. Para incluir uma que ainda não existe, ponha-a na "
+                          "planilha infraestrutura.csv com proposta = sim.",
+                          11, False, rm.ANGLO["suave"])
+            continue
+        lin = []
+        for t in sec["txs"]:
+            cel = [t["nome"] + (" (proposta)" if t.get("proposta") else ""),
+                   f"{t['altura_usada']:g} m"]
+            for b in bandas:
+                pg = next((x for x in sec["paginas"] if x["tipo"] == "erb"
+                           and x["tx"]["nome"] == t["nome"] and x["banda"] == b), None)
+                cel.append(f"{pg['pct_acima']:.0f}%" if pg and pg["pct_acima"] is not None
+                           else "—")
+            lin.append(cel)
+        rm._tabela_anglo(cab, 0.55, 1.45, 7.6,
+                         ["ERB/ERM", "Mastro"] + [f"Área > {req:g} dBm — {b}" for b in bandas],
+                         lin[:13], tam=9.5)
+        paginas = []
+        for pg in sorted(sec["paginas"], key=lambda x: (x["banda"], x["tipo"] != "conjunto",
+                                                        (x.get("tx") or {}).get("nome", ""))):
+            b = pg["banda"]
+            if pg["tipo"] == "conjunto":
+                tit = f"{nome_a} · Conjunto das ERB/ERM — {b}"
+                sub = (f"ESTIMATIVA — {pg['n_tx']} ERB/ERM da área; em cada ponto, o "
+                       f"sinal mais forte entre elas")
+                cart = [(f"Área acima de {req:g} dBm", _pct_txt(pg["pct_acima"])),
+                        ("Mediana estimada", _dbm_txt(pg["mediana"])),
+                        ("Medido nas rotas — dentro", _pct_txt(pg.get("medido_pct"))),
+                        ("Erro do modelo (RMS)", _db_txt((cal.get(b) or {}).get("rms")))]
+            else:
+                t = pg["tx"]
+                tit = f"{nome_a} · {t['nome']} — {b}"
+                sub = (f"ESTIMATIVA — só {t['nome']}, mastro de {t['altura_usada']:g} m"
+                       + (" (padrão)" if t.get("altura_padrao") else ""))
+                e = pg.get("erro") or {}
+                cart = [(f"Área acima de {req:g} dBm", _pct_txt(pg["pct_acima"])),
+                        ("Mediana estimada", _dbm_txt(pg["mediana"])),
+                        (f"Medido dela na área ({pg['medido_n']})",
+                         _dbm_txt(pg.get("medido_mediana"))),
+                        ("Erro do modelo nela", _db_txt(e.get("rms")))]
+            s = rm.slide_anglo(p, tit, sub)
+            rm._mapa_anglo(s, 0.55, 1.45, 7.3, 5.4, pg["png"],
+                           f"Imagem: {pg['imagem']}   ·   relevo do LAS   ·   {b}")
+            for k, (rot, val) in enumerate(cart):
                 rm._cartao_anglo(s, 8.05 + (k % 2) * 2.45, 1.45 + (k // 2) * 0.9,
                                  2.3, 0.8, rot, val)
-            rm._txt_anglo(s, 8.05, 3.4, 4.75, 2.2,
+            rm._txt_anglo(s, 8.05, 3.4, 4.75, 2.0,
                           "Estimado ≠ medido. A cor diz o que o relevo permite com a "
                           "altura e a potência informadas; o survey diz o que a rede "
                           "entregou nas rotas. Onde os dois divergem, vale o medido — "
                           "e a divergência aponta altura, potência ou obstáculo a "
                           "conferir.", 9.5, False, rm.ANGLO["suave"])
-            rm._escala_anglo(s, 8.05, 6.05, 4.75, "sinal_cob")
-    rm._navegacao_anglo(p)
+            _escala_calor(s, 8.05, 5.7, 4.75)
+            paginas.append(s)
+        rm._indice_da_area(cab, paginas, nome_a)
+        for sl in paginas:
+            navegar[sl.slide_id] = cab
+    rm._navegacao_anglo(p, secoes=navegar)
     buf = _io.BytesIO(); p.save(buf)
     seguro = re.sub(r"[^\w\-]+", "_", nome_sv)[:40]
     return buf.getvalue(), f"Cobertura_Estimada_{seguro}_{quando:%Y%m%d}.pptx"
+
+
+def _txt_calibracao(c, prm):
+    if c.get("calibrado"):
+        return (f"correção {c['correcao']:+g} dB · erro (RMS) {c['rms']:g} dB em "
+                f"{c['n']} leituras do survey")
+    if c.get("rejeitada") is not None:
+        return (f"correção de {c['rejeitada']:+g} dB REJEITADA (acima de "
+                f"{prm['max_correcao_db']:g} dB): estimado e medido não batem — "
+                f"confira posição, altura e potência das ERB/ERM · {c['n']} leituras")
+    return (f"sem calibração: {c.get('n', 0)} leituras do survey "
+            f"(mínimo {prm['min_calibracao']})")
+
+
+def _pct_txt(v):
+    return f"{v:.1f}%" if v is not None else "—"
+
+
+def _dbm_txt(v):
+    return f"{v:g} dBm" if v is not None else "—"
+
+
+def _db_txt(v):
+    return f"{v:g} dB" if v is not None else "—"

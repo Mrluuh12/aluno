@@ -7028,6 +7028,21 @@ class Pinger:
         self._threads = []
         self.enviados = 0
         self.perdidos = 0
+        self._fora = {}     # ip -> [(início, fim)]: pings que não contam
+
+    def excluir(self, ip, ini, fim=None):
+        """Os pings de `ip` entre `ini` e `fim` (None = até segunda ordem)
+        não contam: é o rádio em teste de throughput, e o ping dele mede o
+        próprio teste. Chamar de novo com o mesmo `ini` fecha a janela."""
+        with self.lock:
+            js = self._fora.setdefault(ip, [])
+            js[:] = [j for j in js if j[0] != ini] + [(ini, fim)]
+
+    def _conta(self, ip, t):
+        for ini, fim in self._fora.get(ip, ()):
+            if t >= ini and (fim is None or t <= fim):
+                return False
+        return True
 
     def iniciar(self):
         agora = time.monotonic()
@@ -7081,7 +7096,8 @@ class Pinger:
         None e perda 100."""
         ts = ts if ts is not None else time.time()
         with self.lock:
-            ps = [r for t, r in self.hist.get(ip, ()) if ts - janela_s <= t <= ts + 0.5]
+            ps = [r for t, r in self.hist.get(ip, ())
+                  if ts - janela_s <= t <= ts + 0.5 and self._conta(ip, t)]
         if len(ps) < minimo:
             return None, None
         ok = sorted(r for r in ps if r is not None)
@@ -7097,8 +7113,8 @@ class Pinger:
         `janela_s`, ou None sem resposta."""
         t0 = time.time() - janela_s
         with self.lock:
-            ok = sorted(r for h in self.hist.values() for t, r in h
-                        if t >= t0 and r is not None)
+            ok = sorted(r for ip, h in self.hist.items() for t, r in h
+                        if t >= t0 and r is not None and self._conta(ip, t))
         return ok[len(ok) // 2] if ok else None
 
 

@@ -4072,7 +4072,7 @@ class _RadioBCAPI:
                  senha="", papel="CO", motivo_recusa="authentication failed",
                  ocupado=0, mudo_no_login=None, parado=False,
                  destino_saida="10.188.96.11", id_saida=None,
-                 saida_iperf=None, recusa_iperf=None):
+                 saida_iperf=None, recusa_iperf=None, lat_nmea="1853.6443S"):
         self.nome, self.n_peers, self.filtro_ok = nome, peers, filtro_ok
         self.recusa, self.fragmentos, self.pedaco = recusa, fragmentos, pedaco
         self.custo, self.salto, self.saida = custo, salto, saida
@@ -4101,6 +4101,7 @@ class _RadioBCAPI:
         self.destino_saida, self.id_saida = destino_saida, id_saida
         # IPERF3: a saída de texto do iperf3 e, se dado, o motivo da recusa.
         self.saida_iperf = saida_iperf if saida_iperf is not None else SAIDA_IPERF_TCP
+        self.lat_nmea = lat_nmea        # posição do rádio (a longitude é fixa)
         self.recusa_iperf = recusa_iperf
         self.conexoes = []              # o lado do rádio, para ver se fechou
         self.pedidos = []
@@ -4171,7 +4172,7 @@ class _RadioBCAPI:
         g = st.gps
         g.gpsSwitch.enabled = True
         g.gpsPos.gpsTime = 143025.0 + self._pos
-        g.gpsPos.gpsLat = "1853.6443S"
+        g.gpsPos.gpsLat = self.lat_nmea
         g.gpsPos.gpsLong = "04325.8538W"
         g.gpsVel.gpsSpeedKph = 0.0 if self.parado else 40.0
         w = st.wireless.add()
@@ -6377,6 +6378,18 @@ class TestPing(unittest.TestCase):
             p.hist["a"].append((_t.time() - k, None))
         self.assertEqual(p.rtt_e_perda("a"), (None, 100.0))
 
+    def test_ping_do_radio_em_teste_nao_conta(self):
+        import time as _t
+        p = rm.Pinger(["a"])
+        agora = _t.time()
+        for k in range(10):
+            p.hist["a"].append((agora - 9 + k, 900.0 if k >= 5 else 10.0))
+        p.excluir("a", agora - 4.5)              # throughput começou
+        self.assertEqual(p.rtt_e_perda("a", agora), (10.0, 0.0))
+        self.assertEqual(p.mediana_recente(), 10.0)
+        p.excluir("a", agora - 4.5, agora - 0.5)  # terminou
+        self.assertEqual(p.rtt_e_perda("a", agora + 0.4), (10.0, 0.0))
+
     def test_pinger_de_verdade_com_pingar_falso(self):
         import time as _t
         p = rm.Pinger(["a", "b"], intervalo_s=0.1, timeout_s=0.1,
@@ -6568,6 +6581,53 @@ class TestTestesAtivosNaColeta(_ComBCAPIReal, unittest.TestCase):
         self.assertFalse(c.testes)
         self.assertTrue([l for l in avisos if "throughput em pausa" in l])
 
+    def _frota_paralela(self, lat_b, mesma_erm=False):
+        # Duas ERMs diferentes (encap → serial na malha) e, com
+        # `mesma_erm`, as duas saindo pela mesma.
+        frota = {"10.0.0.6": ("CA-1006", _RadioBCAPI(encap=128433)),
+                 "10.0.0.7": ("CA-1007", _RadioBCAPI(
+                     encap=128433 if mesma_erm else 128434, lat_nmea=lat_b))}
+        malha = {"10.188.97.80": {"nome": "ERM-08", "serial": 128433},
+                 "10.188.97.90": {"nome": "ERM-09", "serial": 128434}}
+        return frota, malha
+
+    def test_longe_um_do_outro_testam_ao_mesmo_tempo(self):
+        # 0,54' de latitude ≈ 1 km.
+        frota, malha = self._frota_paralela("1854.1843S")
+        c, avisos = self._rodar(frota, 6.0, pingar=lambda ip, t=1.0: 8.0,
+                                iperf_servidor="10.188.96.30", iperf_segundos=3,
+                                iperf_intervalo_s=2, malha=malha)
+        self.assertEqual({t["radio"] for t in c.testes}, {"CA-1006", "CA-1007"}, avisos)
+        self.assertEqual(c.iperf_max_simultaneos, 2)
+        a, b = sorted(t["ts"] for t in c.testes)
+        self.assertLess(b - a, 3.0)                     # o segundo começou antes do fim do primeiro
+
+    def test_perto_um_do_outro_nao_testam_juntos(self):
+        # 0,0557' ≈ 100 m, abaixo dos 300 m.
+        frota, malha = self._frota_paralela("1853.7000S")
+        c, _ = self._rodar(frota, 6.0, pingar=lambda ip, t=1.0: 8.0,
+                           iperf_servidor="10.188.96.30", iperf_segundos=3,
+                           iperf_intervalo_s=2, malha=malha)
+        self.assertTrue(c.testes)
+        self.assertEqual(c.iperf_max_simultaneos, 1)
+
+    def test_mesma_erm_nao_testa_junto_mesmo_longe(self):
+        frota, malha = self._frota_paralela("1854.1843S", mesma_erm=True)
+        c, _ = self._rodar(frota, 6.0, pingar=lambda ip, t=1.0: 8.0,
+                           iperf_servidor="10.188.96.30", iperf_segundos=3,
+                           iperf_intervalo_s=2, malha=malha)
+        self.assertTrue(c.testes)
+        self.assertEqual(c.iperf_max_simultaneos, 1)
+
+    def test_leituras_seguem_durante_o_teste(self):
+        # O teste roda na thread dele: o rádio em teste continua sendo lido.
+        c, _ = self._rodar({"10.0.0.6": ("CA-1006", _RadioBCAPI())}, 5.0,
+                           pingar=lambda ip, t=1.0: 8.0,
+                           iperf_servidor="10.188.96.30", iperf_segundos=3)
+        t0 = c.testes[0]["ts"]
+        durante = [a for a in c.amostras if t0 + 0.5 < a["ts"] < t0 + 2.5]
+        self.assertTrue(durante, "nenhuma leitura enquanto o iperf3 rodava")
+
     def test_recusa_tira_o_radio_e_varios_desligam(self):
         frota = {f"10.0.0.{k}": (f"CA-10{k:02d}", _RadioBCAPI(
             recusa_iperf="permission denied")) for k in range(6, 11)}
@@ -6581,13 +6641,14 @@ class TestTestesAtivosNaColeta(_ComBCAPIReal, unittest.TestCase):
         c = self.col.Coleta({"a": "A", "b": "B", "srv": "ERB-01"}, aviso=lambda t: None,
                             iperf_servidor="srv")
         agora = _t.time()
-        for ip in ("a", "b", "srv"):
-            c.ultima_amostra[ip] = {"ts": agora, "servidor": "ERM-1"}
+        for k, ip in enumerate(("a", "b", "srv")):
+            c.ultima_amostra[ip] = {"ts": agora, "servidor": f"ERM-{k}",
+                                    "lat": -18.9 - k * 0.01, "lon": -43.4}
         c.iperf_ultimo["a"] = _t.monotonic() - 5000
         self.assertEqual(c._proximo_teste(), "b")       # nunca testado
-        c.iperf_ultimo["b"] = _t.monotonic()
+        self.assertIn("b", c.em_teste)                  # já reservado
         self.assertEqual(c._proximo_teste(), "a")
-        c.iperf_ultimo["a"] = _t.monotonic()
+        c.em_teste.clear()
         self.assertIsNone(c._proximo_teste())           # todos recentes
         # o próprio servidor nunca é testado contra si mesmo
 
@@ -6703,7 +6764,7 @@ class TestTestesAtivosNaJanela(unittest.TestCase):
 # COBERTURA ESTIMADA PELO RELEVO (LAS)
 # ══════════════════════════════════════════════════════════════════
 def _las_sintetico(caminho, x0_m, x1_m, crista=(480, 520, 40.0), passo=1.0,
-                   com_crs=True, ruido_alto=False):
+                   com_crs=True, ruido_alto=False, cristas=None):
     """LAS de terreno plano a 900 m com uma crista no meio (de crista[0] a
     crista[1] metros a leste da origem, crista[2] m de altura), em SIRGAS
     2000 / UTM 23S. `ruido_alto`: um ponto de classe 7 (ruído) a 2000 m."""
@@ -6719,8 +6780,8 @@ def _las_sintetico(caminho, x0_m, x1_m, crista=(480, 520, 40.0), passo=1.0,
     ox, _ = wt("EPSG:4326", "EPSG:31983", [_LON0], [_LAT0])
     e = gx - ox[0]
     z = np.full(gx.shape, 900.0)
-    if crista:
-        z = np.where((e >= crista[0]) & (e <= crista[1]), 900.0 + crista[2], z)
+    for c in (cristas if cristas is not None else ([crista] if crista else [])):
+        z = np.where((e >= c[0]) & (e <= c[1]), 900.0 + c[2], z)
     cl = np.full(gx.shape, 2, dtype=np.uint8)
     if ruido_alto:
         z[len(z) // 2] = 2000.0; cl[len(z) // 2] = 7
@@ -6833,6 +6894,21 @@ class TestCoberturaEstimada(unittest.TestCase):
                                      self.ce.PADROES, med)
         self.assertGreater(alto[0][3], baixo[0][3] + 8)
 
+    def test_duas_cristas_atenuam_mais_que_uma(self):
+        # A 2ª bancada entre a 1ª e o veículo soma perda (Deygout): numa
+        # cava o sinal costuma passar por mais de uma.
+        uma = _las_sintetico(self.tmp / "uma.las", -50, 900, cristas=[(300, 320, 20.0)])
+        duas = _las_sintetico(self.tmp / "duas.las", -50, 900,
+                              cristas=[(300, 320, 20.0), (500, 520, 20.0)])
+        res = []
+        for las in (uma, duas):
+            mos = self.ce.mosaico([las])
+            med = [("ERM-08 PTP CAM", "5.8 GHz", *self._xy(mos, x), -60.0) for x in (450, 700)]
+            _, pares, _ = self.ce.estimar(mos, [self._tx()], ["5.8 GHz"], self.ce.PADROES, med)
+            res.append([p[3] for p in pares])
+        self.assertAlmostEqual(res[0][0], res[1][0], delta=0.5)   # antes da 2ª, igual
+        self.assertGreater(res[0][1] - res[1][1], 15)              # depois, bem mais perda
+
     def test_setor_atenua_fora_da_abertura(self):
         mos = self.ce.mosaico([self.las])
         med = [("ERM-08 PTP CAM", "5.8 GHz", *self._xy(mos, x), -60.0) for x in (200, 0)]
@@ -6843,6 +6919,25 @@ class TestCoberturaEstimada(unittest.TestCase):
                                       ["5.8 GHz"], self.ce.PADROES, med)
         self.assertAlmostEqual(setor[0][3], omni[0][3], delta=0.5)
         self.assertAlmostEqual(omni[1][3] - setor[1][3], 20.0, delta=0.5)
+
+    def test_correcao_grande_demais_e_rejeitada(self):
+        # +40 dB não é ganho de antena: é ERB/ERM no lugar errado, ou
+        # altura ou potência erradas. Não se aplica, e o deck diz.
+        pares = [("E", "5.8 GHz", -60.0, -100.0) for _ in range(30)]
+        c = self.ce.calibrar(pares, ["5.8 GHz"], minimo=20, max_correcao=15)
+        self.assertFalse(c["5.8 GHz"]["calibrado"])
+        self.assertEqual((c["5.8 GHz"]["correcao"], c["5.8 GHz"]["rejeitada"]), (0.0, 40.0))
+        self.assertIn("REJEITADA", self.ce._txt_calibracao(c["5.8 GHz"], self.ce.PADROES))
+
+    def test_escala_continua_nas_cores_da_regua(self):
+        import numpy as np
+        c = self.ce.cor_continua(np.array([-120.0, -95.0, -64.0, -40.0, -75.0]))
+        self.assertEqual(tuple(c[1].round()), (0x5C, 0x00, 0x00))
+        self.assertEqual(tuple(c[0].round()), tuple(c[1].round()))   # abaixo, satura
+        self.assertEqual(tuple(c[2].round()), (0x3E, 0xAD, 0x30))
+        self.assertEqual(tuple(c[3].round()), tuple(c[2].round()))
+        # −75: entre o vermelho (FF0000) e o laranja (F26A00) da régua.
+        self.assertTrue(0xF2 <= c[4][0] <= 0xFF and 0 < c[4][1] < 0x6A)
 
     def test_calibracao_absorve_o_desvio_e_diz_o_erro(self):
         pares = [("E", "5.8 GHz", -60.0 + k % 3, -67.0 + k % 3) for k in range(30)]
@@ -6923,8 +7018,10 @@ class TestCoberturaEstimada(unittest.TestCase):
         p = Presentation(decks[0])
         tits = [rm._titulo_do_slide(s) for s in p.slides]
         self.assertIn("Premissas da estimativa", tits)
+        self.assertIn("Cava Norte", tits)                        # a abertura da área
+        self.assertIn("Cava Norte · ERM-08 PTP CAM — 2.4 GHz", tits)
         pag = [s for s in p.slides
-               if rm._titulo_do_slide(s) == "Cava Norte · Cobertura estimada (RSSI) — 2.4 GHz"]
+               if rm._titulo_do_slide(s) == "Cava Norte · Conjunto das ERB/ERM — 2.4 GHz"]
         self.assertTrue(pag, tits)
         self.assertTrue([sh for sh in pag[0].shapes if sh.shape_type == 13])
         textos = " ".join(sh.text_frame.text for sh in pag[0].shapes if sh.has_text_frame)
@@ -6942,8 +7039,8 @@ class TestCoberturaEstimada(unittest.TestCase):
         prem = [s for s in p.slides if rm._titulo_do_slide(s) == "Premissas da estimativa"][0]
         celulas = [c.text for sh in prem.shapes if getattr(sh, "has_table", False)
                    and sh.has_table for lin in sh.table.rows for c in lin.cells]
-        cal = [c for c in celulas if "leituras do survey" in c]
-        self.assertTrue([c for c in cal if c.startswith("correção")], cal)
+        cal = [c for c in celulas if "leituras" in c and "survey" in c or "REJEITADA" in c]
+        self.assertTrue(cal, celulas)
 
     def test_geotiff_da_estimativa_em_dbm(self):
         import rasterio, numpy as np
@@ -6955,9 +7052,52 @@ class TestCoberturaEstimada(unittest.TestCase):
             self.assertEqual(d.crs.to_epsg(), 31983)
         v = v[np.isfinite(v)]
         self.assertTrue(v.size)
-        self.assertTrue(-140 < float(v.min()) and float(v.max()) < 0)
-        self.assertTrue((self.tmp / "saida" / "estimativa" /
-                         "Cava-Norte_cobertura_estimada_24GHz.tif").exists())
+        # Atrás das cristas o estimado cai muito; perto da antena, nunca acima de 0.
+        self.assertTrue(float(v.max()) < 0, float(v.max()))
+        self.assertLess(float(v.min()), -80)
+        est = self.tmp / "saida" / "estimativa"
+        self.assertTrue((est / "Cava-Norte" / "conjunto_24GHz.tif").exists())
+        self.assertTrue((est / "Cava-Norte" / "ERM-08-PTP-CAM_24GHz.tif").exists())
+        with rasterio.open(est / "ERB-ERM" / "ERM-08-PTP-CAM_24GHz.tif") as d:
+            self.assertEqual(d.dtypes[0], "float32")        # em dBm, por ERB/ERM
+
+    def test_erb_fora_da_area_nao_entra_nela(self):
+        import json as _j, sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parent))
+        import survey_meshmapper as sm
+        from pptx import Presentation
+        cap = self.tmp / "captura.json"
+        cap.write_text(_j.dumps(_captura_sintetica()), encoding="utf-8")
+        tif = _tif_utm(self.tmp / "Cava Norte.tif", -20, 700, px=1.0)
+        # A 745 m: no terreno do LAS, fora da elipse da imagem.
+        (self.tmp / "infraestrutura.csv").write_text(
+            "nome;lat;lon;altura_m\n"
+            f"ERM-08 PTP CAM;{_LAT0:.7f};{_LON0 + 745 / _KX:.7f};12\n",
+            encoding="utf-8-sig")
+        ditos = []
+        feitos = sm.gerar([str(cap)], str(self.tmp / "saida"), aviso=ditos.append,
+                          areas=[tif, self.las])
+        p = Presentation([f for f in feitos if f.name.startswith("Cobertura_Estimada_")][0])
+        tits = [rm._titulo_do_slide(s) for s in p.slides]
+        self.assertFalse([t for t in tits if t.startswith("Cava Norte · ")], tits)
+        textos = " ".join(sh.text_frame.text for s in p.slides for sh in s.shapes
+                          if sh.has_text_frame)
+        self.assertIn("nenhuma ERB/ERM dentro da área", textos)
+
+    def test_mapa_de_calor_tem_a_linha_do_requisito(self):
+        import numpy as np
+        tif = _tif_utm(self.tmp / "Cava Norte.tif", -20, 700, px=1.0)
+        area = rm.carregar_areas([tif])[0]
+        fundo = rm.fundo_da_area(area)
+        mos = self.ce.mosaico([self.las])
+        grade = self.ce.GradeDaArea(area, fundo, mos)
+        h, w = fundo["rgb"].shape[:2]
+        val = np.tile(np.linspace(-90, -60, w, dtype="float32"), (h, 1))
+        mapa = self.ce.mapa_de_calor(grade, val, [])
+        brancos = (mapa[..., 0] == 255) & (mapa[..., 1] == 255) & (mapa[..., 2] == 255)
+        self.assertGreater(int(brancos.sum()), h // 4)
+        # O relevo sombreia: a crista não sai da mesma cor do chão plano.
+        self.assertGreater(float(grade.sombra.max() - grade.sombra.min()), 0.1)
 
     def test_sem_erb_com_posicao_nao_gera_e_diz(self):
         import json as _j, sys as _s

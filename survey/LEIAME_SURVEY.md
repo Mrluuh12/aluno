@@ -94,13 +94,32 @@ cinza ou com paleta também serve.
 
 ## Cobertura estimada pelo relevo (LAS)
 
-Com o LAS das áreas, o programa estima a cobertura de cada ERB/ERM pelo
-relevo e mostra **sobre os tif das áreas**, na mesma régua de cores do
-RSSI medido. **Não é medição**: sai num deck próprio
-(`Cobertura_Estimada_*.pptx`), separado do laudo, que continua sendo só o
-que foi medido.
+Com o LAS das áreas, o programa estima a cobertura das ERB/ERM pelo
+relevo e pinta como **mapa de calor sobre os tif das áreas**. **Não é
+medição**: sai num deck próprio (`Cobertura_Estimada_*.pptx`), separado
+do laudo, que continua sendo só o que foi medido.
 
-**Como o número sai.** Em cada ponto, a melhor ERB/ERM:
+**Por área, as ERB/ERM que estão dentro dela** — todas:
+
+| página | o que mostra |
+|---|---|
+| abertura da área | as ERB/ERM que estão na área, com a altura do mastro e quanto da área cada uma cobre acima de −75 dBm, por banda; botões para as páginas |
+| **uma por ERB/ERM**, por banda | o sinal só daquela ERB/ERM em toda a área; ela em amarelo, as outras em cinza |
+| **conjunto**, por banda | as ERB/ERM da área juntas: em cada ponto, o sinal mais forte entre elas |
+
+ERB/ERM fora da área não entra nela. Área sem nenhuma dentro tem a
+abertura dizendo isso; para simular uma, ponha-a na planilha com
+`proposta = sim`.
+
+**O mapa de calor.** A cor é **contínua** nas cores da régua do RSSI —
+do vermelho-escuro (−95) ao verde (−64), passando de uma faixa para a
+outra sem degrau —, e a **linha branca** marca o requisito, −75 dBm. O
+**relevo do LAS sombreia a cor**: a bancada, a encosta e a crista
+aparecem por baixo do calor, e dá para ver onde o morro faz sombra. Abaixo
+de −95 dBm a cor some aos poucos e fica só a imagem. A escala do slide é a
+mesma barra contínua.
+
+**Como o número sai.** Em cada ponto:
 
     RSSI = potência + ganho TX + ganho RX − perda de cabo
            − espaço livre − difração no relevo + correção da calibração
@@ -108,15 +127,18 @@ que foi medido.
 - o **terreno** é o ponto mais alto de cada célula de 3 m do LAS (o que
   barra o sinal é a crista da bancada, a pilha, o prédio), sem os pontos
   de ruído;
-- a **difração** é a do obstáculo dominante do perfil entre a antena da
-  ERB/ERM e a do veículo (gume de faca, ITU-R P.526), com a curvatura da
-  Terra;
+- a **difração** soma as **duas cristas** que mais barram o caminho entre
+  a antena da ERB/ERM e a do veículo (método de Deygout, ITU-R P.526): a
+  dominante vista da antena e, entre ela e o veículo, a próxima — numa
+  cava o sinal costuma passar por mais de uma bancada. Curvatura da Terra
+  incluída;
 - a **calibração** compara o estimado com o que os veículos mediram de
-  cada ERB/ERM no survey (as mesmas leituras da pasta "Por repetidora")
-  e corrige a diferença mediana, por banda. O que sobra é o **erro do
-  modelo, em dB**, que vai escrito na página de premissas e em cada mapa.
-  Com menos de 20 leituras numa banda, ela fica sem correção — e o deck
-  diz.
+  cada ERB/ERM no survey e corrige a diferença mediana, por banda. O que
+  sobra é o **erro do modelo, em dB**, escrito nas premissas e em cada
+  mapa. Com menos de 20 leituras numa banda ela fica sem correção; e uma
+  correção acima de **15 dB é rejeitada** — ganho de antena e cabo não
+  explicam tanto, e o deck manda conferir posição, altura e potência das
+  ERB/ERM.
 
 **As ERB/ERM.** A posição, as bandas e a potência de cada uma vêm da
 busca (o GPS e os rádios de cada BreadCrumb). O resto fica na planilha
@@ -139,13 +161,14 @@ sem mexer no que já estiver preenchido. O que não for informado usa os
 padrões do `[cobertura]` do `config.ini` (mastro de 9 m, antena no
 veículo a 4 m, 24 dBm…), e o deck diz quantas usaram o padrão.
 
-**O que sai:**
+**Os arquivos:**
 
 | | |
 |---|---|
-| `Cobertura_Estimada_*.pptx` | premissas e erro do modelo, a tabela das ERB/ERM, e uma página por área e banda com o mapa sobre o tif, a área acima de −75 dBm estimada, a mediana e o medido nas rotas ao lado |
-| `estimativa/cobertura_estimada_*.tif` | o RSSI estimado em **dBm** (número, não cor), em toda a área dos LAS — para a engenharia estilizar no QGIS/ArcGIS |
-| `estimativa/<área>_cobertura_estimada_*.tif` | o mapa colorido sobre o tif da área |
+| `Cobertura_Estimada_*.pptx` | premissas e erro do modelo, a tabela das ERB/ERM e uma seção por área |
+| `estimativa/cobertura_estimada_*.tif` | o RSSI estimado em **dBm** (número, não cor), do conjunto de todas as ERB/ERM, em toda a área dos LAS — para estilizar no QGIS/ArcGIS |
+| `estimativa/ERB-ERM/<nome>_*.tif` | o mesmo, de cada ERB/ERM sozinha, em dBm |
+| `estimativa/<área>/` | os mapas de calor coloridos sobre o tif da área: o conjunto e um por ERB/ERM |
 
 Área sem tif ganha o relevo sombreado do próprio LAS de fundo. O modelo
 não vê veículos nem equipamentos (não estão no LAS), reflexão nas paredes
@@ -251,18 +274,29 @@ medido) e o andamento avisa — "100% de perda" nele seria mentira.
 **Throughput (iperf3)** — desligado por padrão. É o mesmo "Test
 Performance" do BC|Commander: o **próprio rádio** roda o iperf3 até o
 servidor escolhido (outro BreadCrumb da lista — ERB/ERM aparecem primeiro
-— ou o IP de um servidor iperf3). É o teste que mais pesa na malha, então:
+— ou o IP de um servidor iperf3).
 
-| regra | por quê |
-|---|---|
-| **um teste por vez** na malha inteira | dois juntos dividem o canal e um mede o outro |
-| no mínimo **60 s** entre testes (ajustável, mínimo 10) | a malha carrega o Dispatch |
-| cada rádio no máximo a cada **10 min** | o teste se espalha pela frota |
-| **duração** de 5 s (ajustável) | curto o bastante para não segurar a malha |
-| sentido **subida, descida ou os dois** (alternando por rádio) | |
-| entre dois candidatos, o que sai por **outra ERM** que o teste anterior | dois seguidos na mesma ERM carregam o mesmo enlace |
-| **pausa** enquanto a latência mediana do ping passar de 200 ms | rede carregada: o teste só pioraria |
-| durante o teste, o rádio fica **sem TRACE** | o rádio roda uma tarefa por vez |
+Os testes rodam **em paralelo e fora das leituras**: cada um na sua
+thread e na sua sessão com o rádio, e a coleta segue lendo todos os
+equipamentos — inclusive o que está em teste — enquanto o iperf3 roda.
+Como o teste pesa na malha, vários ao mesmo tempo só entre equipamentos
+**longe um do outro**:
+
+| regra | padrão | por quê |
+|---|---|---|
+| **testes simultâneos** | 3 | ajustável na tela |
+| **distância mínima** entre dois em teste ao mesmo tempo | 300 m | perto, dividem o mesmo canal: um mediria o outro, e a latência de quem está em volta subiria |
+| dois ao mesmo tempo **nunca pela mesma ERM** | — | carregariam o mesmo enlace |
+| **intervalo entre um início e o próximo** | 10 s | espalha a carga |
+| cada rádio no máximo a cada | 5 min | o teste se espalha pela frota |
+| **duração** | 5 s | ajustável |
+| sentido | subida, descida ou os dois (alternando por rádio) | |
+| **pausa** com a latência mediana do ping acima de 200 ms | — | rede carregada: o teste só pioraria |
+| durante o teste, o rádio fica **sem TRACE** | — | o rádio roda uma tarefa por vez |
+
+**O ping do rádio em teste não conta** na latência e na perda dele (nem
+na mediana que decide a pausa): ele mediria o próprio teste. As amostras
+dele nesse intervalo ficam com a latência dos pings de fora do teste.
 
 Quem recusa o teste sai dele (o andamento diz o motivo); com 4 rádios
 recusando e nenhum sucesso, o throughput desliga para a coleta toda — o

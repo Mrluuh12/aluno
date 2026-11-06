@@ -162,9 +162,10 @@ class Coleta:
                  parado_s=INTERVALO_PARADO_S, aviso=print,
                  trace_destino=rm.DESTINO_TRACE_PADRAO, malha=None,
                  ping=True, ping_intervalo_s=2.0,
-                 iperf_servidor=None, iperf_segundos=5, iperf_intervalo_s=60.0,
-                 iperf_por_radio_s=600.0, iperf_sentido="ambos",
+                 iperf_servidor=None, iperf_segundos=5, iperf_intervalo_s=10.0,
+                 iperf_por_radio_s=300.0, iperf_sentido="ambos",
                  iperf_modo="TCP", iperf_limite_mbps=0,
+                 iperf_paralelos=3, iperf_distancia_min_m=300.0,
                  pausar_latencia_ms=200.0):
         self.alvos    = {ip: (nomes or ip) for ip, nomes in dict(alvos).items()}
         self.role     = role
@@ -247,15 +248,20 @@ class Coleta:
         self.ping_intervalo = float(ping_intervalo_s)
         self.pinger = None
         # THROUGHPUT: o iperf3 do próprio rádio (tarefa IPERF3) até
-        # `iperf_servidor`. Pesa na malha — ocupa o canal e todos os
-        # saltos até o servidor —, então: um teste por vez na malha
-        # inteira, no mínimo `iperf_intervalo_s` entre testes, cada rádio
-        # no máximo a cada `iperf_por_radio_s`, e pausa enquanto a
-        # latência mediana do ping passar de `pausar_latencia_ms`.
+        # `iperf_servidor`, em PARALELO e fora das leituras: cada teste na
+        # sua thread e na sua sessão. Pesa na malha — ocupa o canal e os
+        # saltos até o servidor —, então: até `iperf_paralelos` ao mesmo
+        # tempo, só entre equipamentos a pelo menos `iperf_distancia_min_m`
+        # um do outro e que saem por ERMs diferentes; `iperf_intervalo_s`
+        # entre um início e o próximo; cada rádio no máximo a cada
+        # `iperf_por_radio_s`; e pausa enquanto a latência mediana do
+        # ping (sem os rádios em teste) passar de `pausar_latencia_ms`.
         self.iperf_servidor = (iperf_servidor or "").strip() or None
         self.iperf_segundos = max(1, min(30, int(iperf_segundos)))
-        self.iperf_intervalo = max(10.0, float(iperf_intervalo_s))
+        self.iperf_intervalo = max(2.0, float(iperf_intervalo_s))
         self.iperf_por_radio = max(60.0, float(iperf_por_radio_s))
+        self.iperf_paralelos = max(1, min(10, int(iperf_paralelos)))
+        self.iperf_distancia_min = max(0.0, float(iperf_distancia_min_m))
         self.iperf_sentido = (iperf_sentido if iperf_sentido in
                               ("envio", "recebimento", "ambos") else "ambos")
         self.iperf_modo = (str(iperf_modo).upper()
@@ -263,7 +269,9 @@ class Coleta:
         self.iperf_limite = float(iperf_limite_mbps or 0)
         self.pausar_latencia = float(pausar_latencia_ms)
         self.testes = []            # resultados de throughput
-        self.em_teste = None        # ip com iperf3 rodando agora
+        self.em_teste = {}          # ip -> (lat, lon, saída) do teste em curso
+        self._threads_teste = []
+        self.iperf_max_simultaneos = 0
         self.ultima_amostra = {}    # ip -> última amostra gravada
         self.iperf_ultimo = {}      # ip -> quando foi testado (monotonic)
         self.iperf_inverter = {}    # ip -> o próximo é de descida?
@@ -346,7 +354,7 @@ class Coleta:
         """Por onde o rádio sai até o destino, ou None. Nunca derruba a
         leitura: sem trace, a amostra sai como antes."""
         if (not self.trace_destino or self.trace_parado
-                or ip in self.trace_sem or ip == self.em_teste):
+                or ip in self.trace_sem or ip in self.em_teste):
             # Rádio com iperf3 rodando: a tarefa dele está ocupada, e o
             # TRACE só voltaria "already running".
             return None
@@ -712,7 +720,9 @@ class Coleta:
                 t.join(max(0.0, prazo - time.monotonic()))
             if t_testes is not None:
                 # Um teste em curso termina por si (segundos + o resultado).
-                t_testes.join(self.iperf_segundos + 25)
+                t_testes.join(5)
+                for t in list(self._threads_teste):
+                    t.join(self.iperf_segundos + 25)
             if self.pinger is not None:
                 self.pinger.parar()
 
@@ -792,7 +802,8 @@ class Coleta:
                 "ping_ms": (self.pinger.mediana_recente(30)
                             if self.pinger is not None else None),
                 "iperf_ok": self.iperf_ok, "iperf_falhas": self.iperf_falhas,
-                "iperf_em_teste": self.alvos.get(self.em_teste) if self.em_teste else None,
+                "iperf_em_teste": (", ".join(self.alvos.get(i, i) for i in self.em_teste)
+                                   if self.em_teste else None),
                 "iperf_ultimo": (self.testes[-1]["mbps"] if self.testes else None),
                 "iperf_pausado": self.iperf_pausado,
                 "iperf_parado": self.iperf_parado,
@@ -804,10 +815,16 @@ class Coleta:
     IPERF_RADIOS_PARA_DESLIGAR = 4
 
     def _laco_testes(self, fim):
+        """Dispara os testes, cada um na sua thread: as leituras e os
+        outros testes seguem enquanto um iperf3 roda."""
         ultimo = -1e9
         while not fim.is_set() and not self._parar.is_set():
-            fim.wait(1.0)
+            fim.wait(0.5)
             if fim.is_set() or self.iperf_parado:
+                continue
+            with self.lock:
+                rodando = len(self.em_teste)
+            if rodando >= self.iperf_paralelos:
                 continue
             if time.monotonic() - ultimo < self.iperf_intervalo:
                 continue
@@ -827,40 +844,66 @@ class Coleta:
             if ip is None:
                 continue
             ultimo = time.monotonic()
-            self._testar(ip)
+            t = threading.Thread(target=self._testar, args=(ip,), daemon=True)
+            self._threads_teste = [x for x in self._threads_teste if x.is_alive()] + [t]
+            t.start()
 
     def _proximo_teste(self):
         """O rádio há mais tempo sem teste, entre os que estão sendo lidos
-        agora. Entre dois empatados, o que sai por outra ERM que a do
-        teste anterior: dois seguidos na mesma ERM carregam o mesmo
-        enlace."""
+        agora — e longe dos que estão em teste: a pelo menos
+        `iperf_distancia_min` metros de cada um e saindo por outra ERM.
+        Dois testes perto um do outro, ou pela mesma ERM, dividem o mesmo
+        canal: um mediria o outro, e a latência de quem está em volta
+        subiria por causa do teste. Já reserva o escolhido."""
         agora_m, agora = time.monotonic(), time.time()
         ant = self.testes[-1].get("saida") if self.testes else None
         cands = []
         with self.lock:
+            ativos = list(self.em_teste.values())
             for ip in self.alvos:
                 am = self.ultima_amostra.get(ip)
                 if (am is None or agora - (am.get("ts") or 0) > 60
-                        or ip in self.iperf_sem or ip == self.iperf_servidor):
+                        or ip in self.iperf_sem or ip == self.iperf_servidor
+                        or ip in self.em_teste
+                        or am.get("lat") is None or am.get("lon") is None):
                     continue
                 u = self.iperf_ultimo.get(ip)
                 if u is not None and agora_m - u < self.iperf_por_radio:
                     continue
+                perto = any(rm._dist_m(am["lat"], am["lon"], la, lo)
+                            < self.iperf_distancia_min for la, lo, _s in ativos)
+                mesma_erm = am.get("servidor") is not None and any(
+                    am.get("servidor") == sa for _la, _lo, sa in ativos)
+                if perto or mesma_erm:
+                    continue
                 cands.append(((u if u is not None else -1e18),
-                              am.get("servidor") == ant and ant is not None, ip))
-        if not cands:
-            return None
-        cands.sort(key=lambda c: (c[1], c[0]))
-        return cands[0][2]
+                              am.get("servidor") == ant and ant is not None, ip, am))
+            if not cands:
+                return None
+            cands.sort(key=lambda c: (c[1], c[0]))
+            _u, _m, ip, am = cands[0]
+            self.em_teste[ip] = (am["lat"], am["lon"], am.get("servidor"))
+            self.iperf_ultimo[ip] = agora_m
+            self.iperf_max_simultaneos = max(self.iperf_max_simultaneos,
+                                             len(self.em_teste))
+        return ip
 
     def _testar(self, ip):
         nome = self.alvos.get(ip, ip)
         reverso = (self.iperf_sentido == "recebimento" or
                    (self.iperf_sentido == "ambos" and self.iperf_inverter.get(ip, False)))
-        self.iperf_ultimo[ip] = time.monotonic()
-        self.em_teste = ip
-        am = dict(self.ultima_amostra.get(ip) or {})
+        with self.lock:
+            self.iperf_ultimo[ip] = time.monotonic()
+            if ip not in self.em_teste:       # chamado direto, sem a agenda
+                am0 = self.ultima_amostra.get(ip) or {}
+                self.em_teste[ip] = (am0.get("lat"), am0.get("lon"),
+                                     am0.get("servidor"))
+            am = dict(self.ultima_amostra.get(ip) or {})
         t0 = time.time()
+        if self.pinger is not None:
+            # O ping de quem está em teste mede o próprio teste: fica fora
+            # da latência e da perda dele.
+            self.pinger.excluir(ip, t0)
         ses = rm.SessaoRadio(ip, porta=self.porta, role=self.role,
                              senha=self.senha, timeout=self.timeout)
         try:
@@ -884,7 +927,10 @@ class Coleta:
         finally:
             try: ses.fechar()
             except Exception: pass
-            self.em_teste = None
+            with self.lock:
+                self.em_teste.pop(ip, None)
+            if self.pinger is not None:
+                self.pinger.excluir(ip, t0, time.time() + 2.0)
         self.iperf_inverter[ip] = not reverso
         t = {"radio": nome, "ip": ip, "ts": t0,
              "lat": am.get("lat"), "lon": am.get("lon"),
@@ -1279,8 +1325,13 @@ def main(argv=None):
                     help="liga o throughput: o iperf3 do próprio rádio até este "
                          "IP (outro BreadCrumb ou servidor iperf3)")
     ap.add_argument("--iperf-segundos", type=int, default=5)
-    ap.add_argument("--iperf-intervalo", type=float, default=60.0,
-                    help="segundos entre dois testes na malha (mínimo 10)")
+    ap.add_argument("--iperf-intervalo", type=float, default=10.0,
+                    help="segundos entre o início de um teste e o do próximo")
+    ap.add_argument("--iperf-paralelos", type=int, default=3,
+                    help="testes ao mesmo tempo, entre equipamentos distantes")
+    ap.add_argument("--iperf-distancia", type=float, default=300.0,
+                    help="distância mínima (m) entre dois equipamentos em "
+                         "teste ao mesmo tempo")
     ap.add_argument("--iperf-sentido", default="ambos",
                     choices=("envio", "recebimento", "ambos"))
     ap.add_argument("--testar-iperf", metavar="IP",
@@ -1331,7 +1382,9 @@ def main(argv=None):
                malha=achados, ping=not a.sem_ping,
                iperf_servidor=a.iperf_servidor, iperf_segundos=a.iperf_segundos,
                iperf_intervalo_s=a.iperf_intervalo,
-               iperf_sentido=a.iperf_sentido)
+               iperf_sentido=a.iperf_sentido,
+               iperf_paralelos=a.iperf_paralelos,
+               iperf_distancia_min_m=a.iperf_distancia)
     c.rodar(a.minutos)
     feitos = gravar_e_gerar(c, a.saida, aviso=print, areas=areas or [])
     print(f"\n{len(feitos)} arquivo(s) gerado(s).")
