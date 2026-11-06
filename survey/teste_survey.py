@@ -1410,12 +1410,13 @@ class TestKmlSurvey(unittest.TestCase):
         self.assertIn("<visibility>0</visibility>", txt)
 
     def test_cor_segue_a_faixa_da_grandeza(self):
-        # MetaGeek/Oscium (-90, -80, -70, -67) mais o -75 Modular, nas
-        # cores do Rajant MeshMapper. Um valor dentro de cada faixa.
-        for v, esperado in ((-95, "5C0000"), (-85, "B70404"),
-                            (-78, "FF0000"), (-72, "F26A00"),
-                            (-69, "DD9F17"), (-60, "3EAD30"),
-                            (-40, "3EAD30")):
+        # MetaGeek/Oscium (-90, -80, -70, -67), o -75 Modular e as divisões
+        # em -85 e -60. Um valor dentro de cada faixa.
+        for v, esperado in ((-95, "4A0E4E"), (-88, "5C0000"),
+                            (-83, "B70404"), (-78, "FF0000"),
+                            (-72, "F26A00"), (-69, "DD9F17"),
+                            (-64, "3EAD30"), (-55, "1E6B1E"),
+                            (-40, "1E6B1E")):
             self.assertEqual(rm.cor_da_leitura(v, "sinal"), esperado,
                              f"{v} dBm")
 
@@ -1648,7 +1649,7 @@ class TestKmlSurvey(unittest.TestCase):
         doc = zipfile.ZipFile(_io.BytesIO(dados)).read("doc.kml").decode()
         fitas = _re.findall(r"<styleUrl>#l([0-9A-F]{6})</styleUrl><LineString>"
                             r".*?<coordinates>([^<]*)</coordinates>", doc)
-        self.assertEqual([c for c, _ in fitas], ["3EAD30", "FF0000"],
+        self.assertEqual([c for c, _ in fitas], ["1E6B1E", "FF0000"],
                          "20 leituras em duas faixas viraram mais que 2 fitas")
         # Uma emenda na troca de cor, e cada fita com linha de verdade.
         a, b = ([tuple(p.split(",")[:2]) for p in xy.split()] for _, xy in fitas)
@@ -1705,7 +1706,7 @@ class TestKmlSurvey(unittest.TestCase):
                    {"lat": 0.0, "lon": 0.002, "sinal": -78.0},
                    {"lat": 0.0, "lon": 0.003, "sinal": -60.0}]
         f = rm._fita_por_amostra(corrida, "sinal", rm.FAIXAS_KML["sinal"])
-        self.assertEqual([c for c, _, _ in f], ["3EAD30", "FF0000", "3EAD30"])
+        self.assertEqual([c for c, _, _ in f], ["1E6B1E", "FF0000", "1E6B1E"])
         self.assertEqual(f[0][1][-1], (0.0, 0.0015))   # meio entre 2ª e 3ª
         self.assertEqual(f[1][1], [(0.0, 0.0015), (0.0, 0.002), (0.0, 0.0025)])
         self.assertEqual(f[2][1][0], (0.0, 0.0025))
@@ -3221,7 +3222,7 @@ class TestCalorPorFaixas(unittest.TestCase):
         img, cx = self._png(am)
         meio = self._px(img, cx, 0.0, 150 * self.K)
         self.assertGreater(meio[3], 150)
-        self.assertEqual(tuple(meio[:3]), (0x3E, 0xAD, 0x30))   # a cor exata
+        self.assertEqual(tuple(meio[:3]), (0x1E, 0x6B, 0x1E))   # a cor exata
 
     def test_buraco_de_medicao_fica_transparente(self):
         am = [{"radio": "CA-1", "ts": 10.0 * k, "lat": 0.0,
@@ -3266,10 +3267,11 @@ class TestCalorPorFaixas(unittest.TestCase):
         self.assertIn("10 leituras de 1 equipamentos", doc)
 
     def test_linha_do_requisito_na_fronteira_certa_da_legenda(self):
-        # Legenda do RSSI, melhor em cima: ≥-67, -70..-68, -74..-71 atendem;
-        # a linha vem antes de -80..-75.
-        self.assertEqual(rm._requisito_entre("sinal_cob"), 3)
-        self.assertEqual(rm._requisito_entre("snr"), 2)
+        # Legenda do RSSI, melhor em cima: ≥-60, -67..-61, -70..-68 e
+        # -74..-71 atendem; a linha vem antes de -80..-75. No SNR: ≥30,
+        # 25..29 e 21..24 atendem; a linha vem antes de 15..20.
+        self.assertEqual(rm._requisito_entre("sinal_cob"), 4)
+        self.assertEqual(rm._requisito_entre("snr"), 3)
 
 
 class TestTrilhaConsolidada(unittest.TestCase):
@@ -3290,7 +3292,7 @@ class TestTrilhaConsolidada(unittest.TestCase):
             am, "sinal", rm.FAIXAS_KML["sinal"])
         self.assertEqual(len(cadeias), 1)
         self.assertEqual(soltas, [])
-        self.assertEqual([c for c, _, _ in pecas], ["3EAD30"])
+        self.assertEqual([c for c, _, _ in pecas], ["1E6B1E"])
         # No meio da pista, não na de um nem na do outro.
         lat_m = [la / self.K for la, _ in cadeias[0]]
         self.assertTrue(all(-3 <= y <= 4 for y in lat_m), lat_m)
@@ -3380,28 +3382,44 @@ class TestReguaOficial(unittest.TestCase):
                           side_effect=lambda *a, **k: ditos.append(a[2])):
                 orig(os.path.join(d, "l.png"), "snr")
         self.assertIn("sem medição neste trecho", ditos)
-    def test_snr_e_a_regua_oficial_da_rajant(self):
-        # Limites e cores lidos do próprio MeshMapper: goodRSSI e
-        # greatRSSI no data.json (em dB de SNR), FF0000/F26A00/3EAD30 nos
-        # LineStyle do doc.kml que ele gera.
+    def test_snr_subdivide_a_regua_oficial_da_rajant(self):
+        # Os dois cortes do próprio MeshMapper (goodRSSI e greatRSSI no
+        # data.json, em dB de SNR) continuam sendo fronteiras de faixa, e
+        # acima do greatRSSI a cor é o verde que ele grava no doc.kml.
+        # Entre eles e abaixo, os cortes da Cisco Meraki (10, 15, 25).
         if not self.EXEMPLO.exists():
             self.skipTest("fixture do MeshMapper ausente")
         import json as _json
         lim = _json.loads(self.EXEMPLO.read_text(encoding="utf-8"))["configuration"]
-        self.assertEqual(rm.FAIXAS_KML["snr"],
-                         [(lim["goodRSSI"], "FF0000"),
-                          (lim["greatRSSI"], "F26A00"), (999, "3EAD30")])
+        lims = [l for l, _ in rm.FAIXAS_KML["snr"][:-1]]
+        self.assertIn(lim["goodRSSI"], lims)
+        self.assertIn(lim["greatRSSI"], lims)
+        self.assertEqual(lims, [10, 15, lim["goodRSSI"], 25, lim["greatRSSI"]])
+        self.assertEqual(rm.cor_da_leitura(lim["greatRSSI"], "snr"), "3EAD30")
+        self.assertEqual(rm.cor_da_leitura(lim["greatRSSI"] - 1, "snr"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(lim["goodRSSI"] - 1, "snr"), "FF0000")
+        self.assertEqual(len(rm.CLASSES_FAIXA["snr"]), len(rm.FAIXAS_KML["snr"]))
 
     def test_rssi_usa_os_cortes_da_convencao_e_o_do_requisito(self):
         lims = [l for l, _ in rm.FAIXAS_KML["sinal"][:-1]]
-        self.assertEqual(lims, [-90, -80, -75, -70, -67])
+        self.assertEqual(lims, [-90, -85, -80, -75, -70, -67, -60])
         self.assertEqual(rm.FAIXAS_KML["sinal_cob"], rm.FAIXAS_KML["sinal"])
+        self.assertEqual(len(rm.CLASSES_FAIXA["sinal"]), len(rm.FAIXAS_KML["sinal"]))
 
     def test_as_cores_sao_as_da_rajant(self):
+        # Fora das cinco da Rajant, só os três tons das pontas, que o
+        # comentário de FAIXAS_KML justifica. Cor nova exige justificar lá
+        # e acrescentar aqui.
         rajant = {"FF0000", "F26A00", "3EAD30", "DD9F17", "B70404"}
+        pontas = {"5C0000", "4A0E4E", "1E6B1E"}
         for campo in ("sinal", "sinal_cob", "snr", "ruido"):
-            fora = {c for _, c in rm.FAIXAS_KML[campo]} - rajant - {"5C0000"}
+            fora = {c for _, c in rm.FAIXAS_KML[campo]} - rajant - pontas
             self.assertFalse(fora, f"{campo}: cor sem origem {fora}")
+
+    def test_snr_e_ruido_usam_cores_do_rssi(self):
+        rssi = {c for _, c in rm.FAIXAS_KML["sinal"]}
+        for campo in ("snr", "ruido"):
+            self.assertLessEqual({c for _, c in rm.FAIXAS_KML[campo]}, rssi, campo)
 
     def _requisito(self, campo):
         return rm.limite_de(campo)
@@ -3432,15 +3450,27 @@ class TestReguaOficial(unittest.TestCase):
 
     def test_nos_demais_limites_vale_a_convencao(self):
         # -67 é o mínimo de "muito bom" na MetaGeek: -67 é muito bom.
-        # -90 já é inutilizável. SNR 30 é "great" na Rajant.
+        # -90 já é inutilizável. SNR 30 é "great" na Rajant. As divisões
+        # (-85, -60 e SNR 10, 15, 25) também são pisos da faixa de cima.
+        self.assertEqual(rm.cor_da_leitura(-60, "sinal"), "1E6B1E")
+        self.assertEqual(rm.cor_da_leitura(-61, "sinal"), "3EAD30")
         self.assertEqual(rm.cor_da_leitura(-67, "sinal"), "3EAD30")
         self.assertEqual(rm.cor_da_leitura(-68, "sinal"), "DD9F17")
         self.assertEqual(rm.cor_da_leitura(-70, "sinal"), "DD9F17")
         self.assertEqual(rm.cor_da_leitura(-80, "sinal"), "FF0000")
         self.assertEqual(rm.cor_da_leitura(-81, "sinal"), "B70404")
-        self.assertEqual(rm.cor_da_leitura(-90, "sinal"), "5C0000")
+        self.assertEqual(rm.cor_da_leitura(-85, "sinal"), "B70404")
+        self.assertEqual(rm.cor_da_leitura(-86, "sinal"), "5C0000")
+        self.assertEqual(rm.cor_da_leitura(-89, "sinal"), "5C0000")
+        self.assertEqual(rm.cor_da_leitura(-90, "sinal"), "4A0E4E")
         self.assertEqual(rm.cor_da_leitura(30, "snr"), "3EAD30")
-        self.assertEqual(rm.cor_da_leitura(29, "snr"), "F26A00")
+        self.assertEqual(rm.cor_da_leitura(29, "snr"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(25, "snr"), "DD9F17")
+        self.assertEqual(rm.cor_da_leitura(24, "snr"), "F26A00")
+        self.assertEqual(rm.cor_da_leitura(15, "snr"), "FF0000")
+        self.assertEqual(rm.cor_da_leitura(14, "snr"), "B70404")
+        self.assertEqual(rm.cor_da_leitura(10, "snr"), "B70404")
+        self.assertEqual(rm.cor_da_leitura(9, "snr"), "5C0000")
 
     def test_mudar_o_operador_muda_a_faixa_junto(self):
         # Se o requisito da Modular for >= 20, o SNR 20 passa a laranja —
@@ -3487,8 +3517,8 @@ class TestReguaOficial(unittest.TestCase):
         rot, pct, _un = rm.distribuicao(am, "sinal_cob")
         self.assertEqual(rot, [r for r, _c, _k in
                                rm._faixas_rotuladas("sinal_cob")])
-        # -90 | - | -80,-75,-75 | -74 | - | -67
-        self.assertEqual(pct, [16.7, 0.0, 50.0, 16.7, 0.0, 16.7])
+        # -90 | - | - | -80,-75,-75 | -74 | - | -67 | -
+        self.assertEqual(pct, [16.7, 0.0, 0.0, 50.0, 16.7, 0.0, 16.7, 0.0])
 
     def test_legenda_cita_a_fonte(self):
         import tempfile, os
@@ -6931,13 +6961,26 @@ class TestCoberturaEstimada(unittest.TestCase):
 
     def test_escala_continua_nas_cores_da_regua(self):
         import numpy as np
-        c = self.ce.cor_continua(np.array([-120.0, -95.0, -64.0, -40.0, -75.0]))
-        self.assertEqual(tuple(c[1].round()), (0x5C, 0x00, 0x00))
+        c = self.ce.cor_continua(np.array([-120.0, -95.0, -64.0, -40.0, -75.0,
+                                           -55.0, -87.5]))
+        self.assertEqual(tuple(c[1].round()), (0x4A, 0x0E, 0x4E))
         self.assertEqual(tuple(c[0].round()), tuple(c[1].round()))   # abaixo, satura
         self.assertEqual(tuple(c[2].round()), (0x3E, 0xAD, 0x30))
-        self.assertEqual(tuple(c[3].round()), tuple(c[2].round()))
+        self.assertEqual(tuple(c[5].round()), (0x1E, 0x6B, 0x1E))
+        self.assertEqual(tuple(c[3].round()), tuple(c[5].round()))   # acima, satura
+        self.assertEqual(tuple(c[6].round()), (0x5C, 0x00, 0x00))
         # −75: entre o vermelho (FF0000) e o laranja (F26A00) da régua.
         self.assertTrue(0xF2 <= c[4][0] <= 0xFF and 0 < c[4][1] < 0x6A)
+
+    def test_escala_continua_segue_a_regua_do_medido(self):
+        # Cada cor da régua do RSSI aparece no calor, na mesma ordem: mudar
+        # FAIXAS_KML muda o estimado junto, sem segunda tabela para esquecer.
+        self.assertEqual([c for _v, c in self.ce._ANCORAS_CALOR],
+                         [c for _l, c in rm.FAIXAS_KML["sinal"]])
+        xs = [v for v, _c in self.ce._ANCORAS_CALOR]
+        self.assertEqual(xs, sorted(xs))
+        for v, cor in self.ce._ANCORAS_CALOR:
+            self.assertEqual(rm.cor_da_leitura(round(v), "sinal"), cor, v)
 
     def test_calibracao_absorve_o_desvio_e_diz_o_erro(self):
         pares = [("E", "5.8 GHz", -60.0 + k % 3, -67.0 + k % 3) for k in range(30)]

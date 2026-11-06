@@ -737,8 +737,21 @@ def calibrar(pares, bandas, minimo=20, max_correcao=15.0):
 # passando de uma faixa para a outra sem degrau; a linha branca marca o
 # requisito (−75 dBm). O relevo do LAS sombreia a cor: a bancada e a
 # encosta continuam visíveis por baixo do calor.
-_ANCORAS_CALOR = ((-95.0, "5C0000"), (-85.0, "B70404"), (-77.5, "FF0000"),
-                  (-72.5, "F26A00"), (-69.0, "DD9F17"), (-64.0, "3EAD30"))
+def _ancoras_da_regua(campo="sinal"):
+    """Cada cor da régua no meio dos inteiros da sua faixa; as duas faixas
+    abertas, 5 dB para fora do último corte. Sai da própria FAIXAS_KML:
+    mudou a régua do medido, o calor do estimado muda junto."""
+    fx = rm.FAIXAS_KML[campo]
+    baixo = rm.limites_na_faixa_de_baixo(campo)
+    teto = [l if l in baixo else l - 1 for l, _c in fx[:-1]]
+    piso = [l + 1 if l in baixo else l for l, _c in fx[:-1]]
+    out = [(float(teto[0] - 5), fx[0][1])]
+    out += [((piso[k - 1] + teto[k]) / 2.0, fx[k][1]) for k in range(1, len(fx) - 1)]
+    out.append((float(piso[-1] + 5), fx[-1][1]))
+    return tuple(out)
+
+
+_ANCORAS_CALOR = _ancoras_da_regua()
 _ALFA_CALOR_EST = 0.72
 
 

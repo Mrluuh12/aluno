@@ -112,8 +112,10 @@ abertura dizendo isso; para simular uma, ponha-a na planilha com
 `proposta = sim`.
 
 **O mapa de calor.** A cor é **contínua** nas cores da régua do RSSI —
-do vermelho-escuro (−95) ao verde (−64), passando de uma faixa para a
-outra sem degrau —, e a **linha branca** marca o requisito, −75 dBm. O
+do roxo (−95) ao verde-escuro (−55), com cada cor no meio da sua faixa e
+passando de uma para a outra sem degrau —, e a **linha branca** marca o
+requisito, −75 dBm. As cores saem da própria régua do medido: mudou a
+régua, o estimado muda junto. O
 **relevo do LAS sombreia a cor**: a bancada, a encosta e a crista
 aparecem por baixo do calor, e dá para ver onde o morro faz sombra. Abaixo
 de −95 dBm a cor some aos poucos e fica só a imagem. A escala do slide é a
@@ -547,50 +549,74 @@ de 27/09/2026:
 
 ## A régua de cores: de onde vem cada valor
 
-Nada é inventado; a fonte de cada régua vai impressa no rodapé da legenda.
+A fonte de cada régua vai impressa no rodapé da legenda. Os cortes sem
+fonte publicada estão marcados como tal: só dividem faixas que ficavam
+largas demais para o que o rádio mede.
 
 **Cores** — as oficiais do Rajant MeshMapper, lidas do `doc.kml` que o
 BC|Commander 11.29.1 gerou na mina: `FF0000` (poor), `F26A00` (good),
 `3EAD30` (great). O amarelo `DD9F17` e o vermelho-escuro `B70404` são os
-tons dos alfinetes do mesmo MeshMapper. O `5C0000` da pior faixa é o único
-tom que não vem da Rajant: o vermelho dela escurecido.
+tons dos alfinetes do mesmo MeshMapper. Três tons não vêm da Rajant, todos
+nas pontas: `5C0000` (o vermelho dela escurecido), `1E6B1E` (o verde dela
+escurecido, a melhor faixa do RSSI) e `4A0E4E` (roxo-escuro, a pior do
+RSSI — um terceiro vermelho escuro não se distinguia sobre a imagem da
+cava). SNR e ruído usam só cores que o RSSI também usa.
 
 **RSSI (dBm)** — o MeshMapper **não** classifica o Signal: no balão dele o
 dBm sai sem cor (conferido em 11.216 células). A régua é a convenção de
 Wi-Fi mais citada, MetaGeek/Oscium (−67 muito bom, mínimo para voz e
 vídeo, a mesma borda de célula do guia de site survey da Cisco; −70 ok;
 −80 conectividade básica; −90 inutilizável), mais o −75 do requisito
-Modular.
+Modular. Os cortes em −85 e −60 não têm fonte: dividem as duas faixas mais
+largas onde o rádio de fato mede. Nos arquivos do MeshMapper da mina o
+melhor vizinho fica entre −84 e −86 dBm em 5,8 GHz e entre −61 e −53 dBm
+em 2,4 GHz — antes, tudo isso saía em duas cores só.
 
 | RSSI (dBm) | cor | leitura |
 |---|---|---|
-| ≥ −67 | verde `3EAD30` | muito bom |
+| ≥ −60 | verde-escuro `1E6B1E` | excelente |
+| −67 a −61 | verde `3EAD30` | muito bom |
 | −70 a −68 | amarelo `DD9F17` | ok |
 | −74 a −71 | laranja `F26A00` | atende o requisito |
 | **−80 a −75** | vermelho `FF0000` | **reprovado** |
-| −89 a −81 | `B70404` | abaixo da conectividade básica |
-| ≤ −90 | `5C0000` | inutilizável |
+| −85 a −81 | `B70404` | fraco |
+| −89 a −86 | `5C0000` | muito fraco |
+| ≤ −90 | roxo `4A0E4E` | inutilizável |
 
-**SNR (dB)** — a régua **oficial da Rajant**, gravada pelo MeshMapper no
-`data.json` (`goodRSSI = 20`, `greatRSSI = 30`; no vocabulário Rajant
-"RSSI" é o SNR em dB) e conferida célula a célula nos seus arquivos.
+O RSSI sozinho não diz se o enlace funciona: depende do ruído da banda. Na
+mina o piso medido é −107 a −109 dBm em 5,8 GHz e −93 a −98 dBm em
+2,4 GHz, então −86 dBm em 5,8 GHz ainda chega com SNR 23. Para a
+qualidade do enlace, o mapa que vale é o de SNR; o de RSSI é o do
+requisito Modular.
+
+**SNR (dB)** — parte da régua **oficial da Rajant**, gravada pelo
+MeshMapper no `data.json` (`goodRSSI = 20`, `greatRSSI = 30`; no
+vocabulário Rajant "RSSI" é o SNR em dB) e conferida célula a célula nos
+seus arquivos. Os dois cortes dela continuam; entre eles e abaixo entram
+os da Cisco Meraki (alertas de SNR em 10 e 15 dB; 25 dB como sinal bom).
+Nenhum atravessa um corte da Rajant nem o requisito Modular (> 20).
 
 | SNR (dB) | cor | leitura |
 |---|---|---|
 | ≥ 30 | verde `3EAD30` | ótimo |
-| 21 a 29 | laranja `F26A00` | bom |
-| ≤ 20 | vermelho `FF0000` | ruim |
+| 25 a 29 | amarelo `DD9F17` | bom |
+| 21 a 24 | laranja `F26A00` | atende, pouca margem |
+| **15 a 20** | vermelho `FF0000` | **reprovado** |
+| 10 a 14 | `B70404` | ruim |
+| ≤ 9 | `5C0000` | muito ruim |
 
 **Ruído (dBm)** — não existe régua oficial. É **derivado** das duas acima:
 um sinal no mínimo Modular (−75 dBm) sobre um ruído N chega com
-SNR = −75 − N, e leva a cor desse SNR. O corte antigo, −85, era incoerente
-com os próprios requisitos: −75 sobre −85 é SNR 10.
+SNR = −75 − N, e leva a cor desse SNR. Cada corte de SNR vira um de ruído.
 
 | Ruído (dBm) | cor | um sinal de −75 dBm chegaria com |
 |---|---|---|
 | ≤ −105 | verde | SNR ≥ 30 |
-| −104 a −96 | laranja | SNR 21 a 29 |
-| ≥ −95 | vermelho | SNR ≤ 20 |
+| −104 a −100 | amarelo | SNR 25 a 29 |
+| −99 a −96 | laranja | SNR 21 a 24 |
+| **−95 a −90** | vermelho | **SNR 15 a 20** |
+| −89 a −85 | `B70404` | SNR 10 a 14 |
+| ≥ −84 | `5C0000` | SNR ≤ 9 |
 
 ### A fronteira exata
 

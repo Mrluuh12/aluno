@@ -1125,10 +1125,12 @@ def fmt_leitura(v, campo, com_unidade=True):
 #   que o BC|Commander 11.29.1 gerou na mina: ff0000ff / ff006af2 /
 #   ff30ad3e (aabbggrr) = FF0000 poor, F26A00 good, 3EAD30 great. Amarelo
 #   e vermelho-escuro não existem chapados no MeshMapper; vêm do tom
-#   dominante dos alfinetes dele (yellow_pin DD9F17, red_pin B70404). O
-#   5C0000 da faixa inutilizável é o único tom que não é da Rajant: o
-#   vermelho dela escurecido, para a pior faixa não ser confundida com a
-#   penúltima.
+#   dominante dos alfinetes dele (yellow_pin DD9F17, red_pin B70404).
+#   Três tons não são da Rajant, todos nas pontas da escala: 5C0000 (o
+#   vermelho dela escurecido), 1E6B1E (o verde dela escurecido, a melhor
+#   faixa do RSSI) e 4A0E4E (roxo-escuro, a pior do RSSI: um terceiro
+#   vermelho escuro não se distinguia dos outros dois sobre a imagem da
+#   cava).
 #
 #   RSSI (dBm). O MeshMapper NÃO classifica o Signal — no balão ele sai
 #   sem cor, conferido em 11.216 células. A régua é a convenção de Wi-Fi
@@ -1137,25 +1139,38 @@ def fmt_leitura(v, campo, com_unidade=True):
 #   site survey da Cisco —; -70 ok, mínimo para entrega confiável; -80
 #   ruim, mínimo para conectividade básica; -90 inutilizável. Mais o -75
 #   do requisito Modular, para aprovado e reprovado não dividirem cor.
+#   E dois cortes sem fonte publicada, que só dividem as faixas largas
+#   onde o rádio realmente mede: -85 parte o -89..-81 (é onde fica o
+#   melhor vizinho em 5,8 GHz nos arquivos da mina, -84 a -86) e -60
+#   parte o >= -67 (o melhor vizinho em 2,4 GHz fica entre -61 e -53).
+#   Nenhum dos dois atravessa um corte da MetaGeek nem o requisito.
 #
 #   SNR (dB). A régua OFICIAL da Rajant, gravada pelo próprio MeshMapper
 #   no data.json (goodRSSI = 20, greatRSSI = 30 — no vocabulário Rajant
 #   "RSSI" é o SNR em dB) e conferida célula a célula: 19 vermelho, 20
-#   laranja, 29 laranja, 30 verde.
+#   laranja, 29 laranja, 30 verde. Os dois cortes dela ficam; entre eles
+#   e abaixo deles entram os da Cisco Meraki (10, 15, 25), e o 20 exato
+#   vai para o vermelho pelo requisito Modular (> 20).
 #
 #   RUÍDO (dBm). Sem régua oficial em lugar nenhum. É DERIVADO das duas
-#   oficiais: um sinal no mínimo Modular (-75) sobre ruído N chega com
-#   SNR = -75 - N, classificado pela régua Rajant. N <= -105 dá SNR >= 30;
-#   N >= -95 dá SNR <= 20. O corte de -85 que havia aqui era incoerente
-#   com os próprios requisitos: -75 sobre -85 é SNR 10, reprovado.
+#   de cima: um sinal no mínimo Modular (-75) sobre ruído N chega com
+#   SNR = -75 - N, classificado pela régua de SNR. Cada corte dela vira um
+#   de ruído: SNR 30, 25, 20, 15 e 10 são N = -105, -100, -95, -90 e -85.
 FAIXAS_KML = {
-    "sinal": [(-90, "5C0000"), (-80, "B70404"), (-75, "FF0000"),
-              (-70, "F26A00"), (-67, "DD9F17"), (999, "3EAD30")],
+    "sinal": [(-90, "4A0E4E"), (-85, "5C0000"), (-80, "B70404"),
+              (-75, "FF0000"), (-70, "F26A00"), (-67, "DD9F17"),
+              (-60, "3EAD30"), (999, "1E6B1E")],
     # Cobertura usa as MESMAS faixas do RSSI: e a mesma grandeza, lida de
     # outra fonte. Faixas proprias fariam duas reguas para o mesmo dBm.
-    "sinal_cob": [(-90, "5C0000"), (-80, "B70404"), (-75, "FF0000"),
-                  (-70, "F26A00"), (-67, "DD9F17"), (999, "3EAD30")],
-    "snr":   [(20, "FF0000"), (30, "F26A00"), (999, "3EAD30")],
+    "sinal_cob": [(-90, "4A0E4E"), (-85, "5C0000"), (-80, "B70404"),
+                  (-75, "FF0000"), (-70, "F26A00"), (-67, "DD9F17"),
+                  (-60, "3EAD30"), (999, "1E6B1E")],
+    # SNR em 6 faixas, com as mesmas cores do RSSI. Subdivide a régua da
+    # Rajant (goodRSSI 20, greatRSSI 30) sem atravessar nenhum dos cortes
+    # dela: 10, 15 e 25 são os da Cisco Meraki (alertas de SNR em 10 e 15
+    # dB; 25 dB como sinal bom). O 20 é também o requisito Modular.
+    "snr":   [(10, "5C0000"), (15, "B70404"), (20, "FF0000"), (25, "F26A00"),
+              (30, "DD9F17"), (999, "3EAD30")],
     "rtt":   [(20, "27AE60"), (50, "9ACD32"), (100, "F1C40F"),
               (200, "E67E22"), (400, "E74C3C"), (99999, "C0392B")],
     "perda": [(0.5, "27AE60"), (1, "9ACD32"), (2, "F1C40F"),
@@ -1163,7 +1178,8 @@ FAIXAS_KML = {
     "interf": [(5, "27AE60"), (10, "9ACD32"), (20, "F1C40F"),
                (35, "E67E22"), (50, "E74C3C"), (101, "C0392B")],
     # Piso de ruído: quanto mais negativo, mais limpo. Derivado — ver acima.
-    "ruido": [(-105, "3EAD30"), (-95, "F26A00"), (999, "FF0000")],
+    "ruido": [(-105, "3EAD30"), (-100, "DD9F17"), (-95, "F26A00"),
+              (-90, "FF0000"), (-85, "B70404"), (999, "5C0000")],
 }
 
 # Limites cujo valor EXATO pertence à faixa de BAIXO pela convenção de
@@ -1171,31 +1187,39 @@ FAIXAS_KML = {
 # pelo operador). O rádio reporta dBm e dB INTEIROS, então o valor exato
 # de cada limite é comum — e cada um tem de cair onde a fonte diz:
 #   -90 dBm   "unusable" na MetaGeek: o próprio -90 já é inutilizável.
-#   -105 dBm  derivado de SNR >= 30 (Rajant, inclusivo): -75 - (-105) = 30.
+#   Ruído -105, -100, -90 e -85: são SNR 30, 25, 15 e 10 sobre -75 dBm, e
+#   esses SNR são o piso da faixa melhor — ótimo, bom, reprovado e ruim.
+#   Em ruído "melhor" é a faixa de BAIXO, então o limite exato vai para
+#   ela. O -95 não entra: é SNR 20, que o requisito reprova.
 # Os demais limites de convenção são mínimos atingidos na igualdade
 # (-67 é muito bom, -70 é ok, -80 é conectividade básica, SNR 30 é great)
 # e ficam na faixa de cima, que é o comportamento padrão.
 _CONVENCAO_NA_FAIXA_DE_BAIXO = {
-    "sinal": {-90.0}, "sinal_cob": {-90.0}, "ruido": {-105.0},
+    "sinal": {-90.0}, "sinal_cob": {-90.0},
+    "ruido": {-105.0, -100.0, -90.0, -85.0},
 }
 
 # Classificação de cada faixa, na ordem de FAIXAS_KML (limite crescente).
 CLASSES_FAIXA = {
-    "sinal":     ["inutilizável", "abaixo da conectividade básica",
-                  "reprovado", "atende o requisito", "ok", "muito bom"],
-    "snr":       ["ruim", "bom", "ótimo"],
-    "ruido":     ["ótimo", "bom", "reprova"],
+    "sinal":     ["inutilizável", "muito fraco", "fraco", "reprovado",
+                  "atende o requisito", "ok", "muito bom", "excelente"],
+    "snr":       ["muito ruim", "ruim", "reprovado", "atende, pouca margem",
+                  "bom", "ótimo"],
+    "ruido":     ["ótimo", "bom", "atende, pouca margem", "reprovado",
+                  "ruim", "muito ruim"],
 }
 CLASSES_FAIXA["sinal_cob"] = CLASSES_FAIXA["sinal"]
 
 # Fonte de cada régua, impressa no rodapé da legenda do mapa e no slide
 # de Metodologia: a cor só é conferível se a régua for rastreável.
 FONTE_FAIXAS = {
-    "sinal": "Faixas: MetaGeek/Oscium (-90, -80, -70, -67) e requisito "
-             "Modular (-75). Cores: Rajant MeshMapper.",
-    "snr":   "Faixas e cores: Rajant MeshMapper (goodRSSI 20, greatRSSI 30).",
+    "sinal": "Faixas: MetaGeek/Oscium (-90, -80, -70, -67), requisito "
+             "Modular (-75) e -85/-60, que dividem as faixas largas. "
+             "Cores: Rajant MeshMapper; roxo e verde-escuro nas pontas.",
+    "snr":   "Faixas: Rajant MeshMapper (20, 30), requisito Modular (> 20) "
+             "e Cisco Meraki (10, 15, 25). Cores: as do RSSI.",
     "ruido": "Derivado: sinal de -75 dBm (Modular) sobre este ruído, "
-             "SNR pela régua Rajant.",
+             "classificado pela régua de SNR (-105 = SNR 30, -95 = SNR 20).",
 }
 FONTE_FAIXAS["sinal_cob"] = FONTE_FAIXAS["sinal"]
 
@@ -2058,8 +2082,10 @@ def _legenda_de_faixas_png(caminho, campo, banda=None):
     titulo = esc.get("rot", nome_da_aba(campo))
     lg = max(372, int(16 + larg(titulo, 11, True) + 10
                       + (larg(banda, 8, True) + 14 if banda else 0) + 18))
+    # 6,5 pt com entrelinha 1,35 ocupa ~14,3 px por linha a 100 dpi; com
+    # 12 px a sexta linha da nota saía cortada pela borda do cartão.
     alt = (58 + 26 * len(linhas) + (22 if corte is not None else 0)
-           + 14 + 12 * len(notas) + 12)
+           + 14 + 15 * len(notas) + 10)
     fig = plt.figure(figsize=(lg / 100, alt / 100), dpi=100)
     fig.patch.set_alpha(0)
     ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
