@@ -146,6 +146,12 @@ def verificar():
         except Exception as e:
             print(f"  FALHOU  {pacote}: {e}"); problemas.append(pacote)
 
+    try:
+        import laspy, lazrs  # noqa: F401
+        print("  ok      terreno LAS/LAZ (laspy)")
+    except Exception as e:
+        print(f"  FALHOU  terreno LAS/LAZ (laspy): {e}"); problemas.append("laspy")
+
     # GeoTIFF: importar não basta. No exe, o que costuma faltar são os
     # dados de projeção (proj.db), e aí só a conversão de coordenadas
     # quebra. Converte um ponto de UTM 23S para graus.
@@ -168,7 +174,7 @@ def verificar():
 def main():
     if "--verificar" in sys.argv[1:]:
         return verificar()
-    if "--testar-trace" in sys.argv[1:]:
+    if "--testar-trace" in sys.argv[1:] or "--testar-iperf" in sys.argv[1:]:
         # Diagnóstico de campo pela linha de comando, no mesmo executável:
         #   site_survey.exe --testar-trace 10.188.99.6 --senha ...
         import coleta_rajant as _col
@@ -307,8 +313,10 @@ def main():
         else:
             nomes = ", ".join(a["nome"] for a in ar)
             img = sum(1 for a in ar if a.get("imagem"))
+            ter = sum(1 for a in ar if a.get("terreno"))
             t = (f"{len(ar)} área(s)" + (f", {img} com imagem" if img else "")
-                 + ": " + (nomes if len(nomes) < 70 else nomes[:67] + "…"))
+                 + (f", {ter} com terreno" if ter else "")
+                 + ": " + (nomes if len(nomes) < 60 else nomes[:57] + "…"))
         lbl_areas.configure(text=t)
 
     def _ler_areas(arqs):
@@ -326,9 +334,10 @@ def main():
 
     def adicionar_areas():
         fs = filedialog.askopenfilenames(
-            title="Áreas: a imagem de cada área ou os polígonos",
-            filetypes=[("Áreas", "*.tif *.tiff *.kmz *.kml"),
+            title="Áreas: a imagem, o terreno (LAS) ou os polígonos de cada área",
+            filetypes=[("Áreas", "*.tif *.tiff *.las *.laz *.kmz *.kml"),
                        ("Imagem georreferenciada (GeoTIFF)", "*.tif *.tiff"),
+                       ("Terreno (LAS/LAZ)", "*.las *.laz"),
                        ("Google Earth", "*.kmz *.kml"),
                        ("Todos os arquivos", "*.*")])
         novos = [f for f in fs if f not in est["areas_arqs"]]
@@ -352,6 +361,32 @@ def main():
     ttk.Button(rod_ar, text="Adicionar áreas…",
                command=adicionar_areas).pack(side="left", padx=(25, 0))
     ttk.Button(rod_ar, text="Limpar", command=limpar_areas).pack(
+        side="left", padx=(6, 0))
+
+    def abrir_infra():
+        """A planilha das ERB/ERM da cobertura estimada (posição, altura
+        do mastro, potência, setor). Criada com o cabeçalho se não
+        existir; a busca e o survey acrescentam as que acharem."""
+        import cobertura_estimada as ce
+        cam = Path(cfg.get("cobertura", "infraestrutura",
+                           fallback=ce.INFRA_PADRAO) or ce.INFRA_PADRAO).resolve()
+        try:
+            if not cam.exists():
+                ce.completar_infraestrutura(cam, est.get("achados"))
+            if not cam.exists():
+                cam.write_text(";".join(ce.COLUNAS_INFRA) + "\n",
+                               encoding="utf-8-sig")
+            elif est.get("achados"):
+                n = ce.completar_infraestrutura(cam, est["achados"])
+                if n:
+                    escreve(f"{cam.name}: {n} ERB/ERM acrescentada(s) pela busca")
+        except Exception as e:
+            messagebox.showerror(TITULO, f"Planilha das ERB/ERM:\n{e}")
+            return
+        if not abrir_pasta(cam):
+            messagebox.showinfo(TITULO, f"Abra a planilha:\n{cam}")
+
+    ttk.Button(rod_ar, text="ERB/ERM…", command=abrir_infra).pack(
         side="left", padx=(6, 0))
     lbl_areas.pack(side="left", padx=(12, 0))
     if est["areas_arqs"]:
@@ -417,13 +452,52 @@ def main():
         b_tt = ttk.Button(lc, text="Testar trace")
         b_tt.pack(side="left")
 
+        # ── Testes ativos: latência/perda por ping e throughput pelo
+        # iperf3 do próprio rádio. O throughput pesa na malha, e por isso
+        # nasce desligado: um teste por vez, com intervalo, e pausa quando
+        # a latência do ping sobe.
+        l4 = ttk.Frame(baixo); l4.pack(fill="x", pady=(6, 0))
+        b_ti = ttk.Button(l4, text="Testar iperf")
+        b_ti.pack(side="right")
+        ttk.Label(l4, text="Testes ativos", style="Titulo.TLabel").pack(
+            side="left", padx=(0, 14))
+        v_ping = tk.BooleanVar(value=True)
+        ttk.Checkbutton(l4, text="Latência e perda (ping)",
+                        variable=v_ping).pack(side="left")
+        v_vaz = tk.BooleanVar(value=False)
+        ttk.Checkbutton(l4, text="Throughput (iperf3) até",
+                        variable=v_vaz).pack(side="left", padx=(14, 4))
+        v_srv = tk.StringVar(value=cfg.get("teste_ativo", "iperf_servidor",
+                                           fallback=""))
+        cb_srv = ttk.Combobox(l4, textvariable=v_srv, width=26)
+        cb_srv.pack(side="left", padx=(0, 12))
+        ttk.Label(l4, text="Sentido").pack(side="left")
+        v_sent = tk.StringVar(value="Os dois")
+        ttk.Combobox(l4, textvariable=v_sent, width=9, state="readonly",
+                     values=("Subida", "Descida", "Os dois")).pack(
+            side="left", padx=(6, 12))
+        ttk.Label(l4, text="Duração (s)").pack(side="left")
+        v_iseg = tk.StringVar(value="5")
+        ttk.Entry(l4, textvariable=v_iseg, width=4).pack(side="left", padx=(6, 12))
+        ttk.Label(l4, text="Intervalo (s)").pack(side="left")
+        v_iint = tk.StringVar(value="60")
+        ttk.Entry(l4, textvariable=v_iint, width=5).pack(side="left", padx=(6, 0))
+
+        def _ip_servidor():
+            """O IP do servidor do iperf3: "ERB-01 (10.188.96.30)" ou o IP."""
+            import re as _re
+            t = v_srv.get().strip()
+            m = _re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", t)
+            return m.group(1) if m else t
+
         # Métricas da coleta em blocos, um número por bloco.
         lm = ttk.Frame(baixo); lm.pack(fill="x", pady=(8, 0))
         metricas = {}
         for chave, rot in (("tempo", "Tempo"), ("amostras", "Amostras"),
                            ("equip", "Equipamentos"), ("ritmo", "Leituras/s"),
                            ("passo", "Passo real"), ("parados", "Parados"),
-                           ("falhas", "Falhas"), ("trace", "Trace")):
+                           ("falhas", "Falhas"), ("trace", "Trace"),
+                           ("latencia", "Latência"), ("vazao", "Throughput")):
             f = ttk.Frame(lm); f.pack(side="left", padx=(0, 22))
             ttk.Label(f, text=rot, style="Rotulo.TLabel").pack(anchor="w")
             v = tk.StringVar(value="—")
@@ -633,12 +707,31 @@ def main():
             areas = _areas_prontas()
             if areas is None:
                 return
+            srv = _ip_servidor() if v_vaz.get() else None
+            if v_vaz.get() and not srv:
+                messagebox.showwarning(TITULO, "Throughput: escolha o "
+                                       "servidor do iperf3 (um BreadCrumb da "
+                                       "lista ou o IP de um servidor iperf3).")
+                return
+            try:
+                iseg = int(float(v_iseg.get().replace(",", ".")))
+                iint = float(v_iint.get().replace(",", "."))
+                if iseg <= 0 or iint < 10: raise ValueError
+            except ValueError:
+                messagebox.showwarning(TITULO, "Throughput: duração maior que "
+                                       "zero e intervalo de no mínimo 10 s.")
+                return
             c = col.Coleta(alvos, role=v_role.get(), senha=v_senha.get(),
                            porta=int(v_porta.get() or 2300), passo_m=passo,
                            aviso=lambda t: fila.put(("log", t)),
                            trace_destino=(v_dest.get().strip()
                                           if v_trace.get() else None),
-                           malha=est["achados"])
+                           malha=est["achados"], ping=v_ping.get(),
+                           iperf_servidor=srv, iperf_segundos=iseg,
+                           iperf_intervalo_s=iint,
+                           iperf_sentido={"Subida": "envio",
+                                          "Descida": "recebimento"}.get(
+                                              v_sent.get(), "ambos"))
             est["coleta"] = c
             b_ini.configure(state="disabled")
             b_par.configure(state="normal")
@@ -691,6 +784,40 @@ def main():
                 fila.put(("teste_fim", None))
             threading.Thread(target=trab, daemon=True).start()
 
+        def testar_iperf():
+            sel = [i for i in arv.selection() if i in est["achados"]]
+            if not sel:
+                messagebox.showwarning(TITULO, "Selecione um rádio na lista.")
+                return
+            srv = _ip_servidor()
+            if not srv:
+                messagebox.showwarning(TITULO, "Escolha o servidor do iperf3.")
+                return
+            ip = sel[0]
+            b_ti.configure(state="disabled", text="Testando…")
+            role, senha = v_role.get(), v_senha.get()
+            porta = int(v_porta.get() or 2300)
+            pasta = v_saida.get()
+            try:
+                iseg = max(1, int(float(v_iseg.get().replace(",", "."))))
+            except ValueError:
+                iseg = 5
+            reverso = v_sent.get() == "Descida"
+
+            def trab():
+                try:
+                    alvo = col.testar_iperf(ip, srv, role=role, senha=senha,
+                                            porta=porta, pasta=pasta,
+                                            segundos=iseg, reverso=reverso,
+                                            aviso=lambda t: fila.put(("log", t)))
+                    fila.put(("log", f"\nArquivo do teste: {alvo}"))
+                except Exception as e:
+                    fila.put(("log", f"ERRO no teste: {e}"))
+                    fila.put(("log", traceback.format_exc()))
+                fila.put(("teste_iperf_fim", None))
+            threading.Thread(target=trab, daemon=True).start()
+
+        b_ti.configure(command=testar_iperf)
         b_desc.configure(command=descobrir)
         b_ini.configure(command=iniciar)
         b_par.configure(command=parar)
@@ -721,6 +848,8 @@ def main():
                     _resumo_areas()
                 elif tipo == "teste_fim":
                     b_tt.configure(state="normal", text="Testar trace")
+                elif tipo == "teste_iperf_fim":
+                    b_ti.configure(state="normal", text="Testar iperf")
                 elif tipo == "achados":
                     est["achados"] = val
                     for i in arv.get_children(): arv.delete(i)
@@ -742,6 +871,14 @@ def main():
                                    values=("☐", v["nome"], ip, gps,
                                            v.get("vizinhos") or "", obs))
                     marcar("gps")
+                    # Servidor do iperf3: os BreadCrumbs que responderam,
+                    # ERB/ERM primeiro (o lado fixo da malha).
+                    import re as _re
+                    vivos = [(ip, v) for ip, v in val.items() if not v.get("erro")]
+                    vivos.sort(key=lambda kv: (not _re.match(rm.PADRAO_INFRA,
+                                                             kv[1]["nome"] or "", _re.I),
+                                               kv[1]["nome"]))
+                    cb_srv.configure(values=[f"{v['nome']} ({ip})" for ip, v in vivos])
                     b_desc.configure(state="normal",
                                      text="Procurar equipamentos")
                 elif tipo in ("pronto_arq", "pronto_col"):
@@ -778,7 +915,15 @@ def main():
                     ("passo", f"{s['passo_m']:g} m" if s["passo_m"] else "—"),
                     ("parados", f"{s.get('parados', 0)}"),
                     ("falhas", f"{s['falhas']}"),
-                    ("trace", tr)):
+                    ("trace", tr),
+                    ("latencia", f"{s['ping_ms']:g} ms"
+                     if s.get("ping_ms") is not None else "—"),
+                    ("vazao", ("desligado" if s.get("iperf_parado")
+                               else "em pausa" if s.get("iperf_pausado")
+                               else f"testando {s['iperf_em_teste']}"
+                               if s.get("iperf_em_teste")
+                               else f"{s['iperf_ultimo']:g} Mbps · {s['iperf_ok']} ok"
+                               if s.get("iperf_ultimo") is not None else "—"))):
                 metricas[chave].set(valor)
         jan.after(300, bombear)
 

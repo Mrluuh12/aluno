@@ -160,7 +160,12 @@ class Coleta:
                  timeout_s=6,
                  cfg=None, nome=None, reencontro_s=60.0,
                  parado_s=INTERVALO_PARADO_S, aviso=print,
-                 trace_destino=rm.DESTINO_TRACE_PADRAO, malha=None):
+                 trace_destino=rm.DESTINO_TRACE_PADRAO, malha=None,
+                 ping=True, ping_intervalo_s=2.0,
+                 iperf_servidor=None, iperf_segundos=5, iperf_intervalo_s=60.0,
+                 iperf_por_radio_s=600.0, iperf_sentido="ambos",
+                 iperf_modo="TCP", iperf_limite_mbps=0,
+                 pausar_latencia_ms=200.0):
         self.alvos    = {ip: (nomes or ip) for ip, nomes in dict(alvos).items()}
         self.role     = role
         self.senha    = senha
@@ -234,6 +239,40 @@ class Coleta:
         for ip_a, n in self.alvos.items():
             if n and n != ip_a:
                 self.nome_ip[ip_a] = n
+        self.malha = dict(malha or {})
+        # LATÊNCIA E PERDA: ping do computador da coleta até cada
+        # equipamento, leve (um pacote a cada `ping_intervalo_s`). Cada
+        # amostra leva a mediana e a perda dos pings dos 10 s anteriores.
+        self.ping = bool(ping)
+        self.ping_intervalo = float(ping_intervalo_s)
+        self.pinger = None
+        # THROUGHPUT: o iperf3 do próprio rádio (tarefa IPERF3) até
+        # `iperf_servidor`. Pesa na malha — ocupa o canal e todos os
+        # saltos até o servidor —, então: um teste por vez na malha
+        # inteira, no mínimo `iperf_intervalo_s` entre testes, cada rádio
+        # no máximo a cada `iperf_por_radio_s`, e pausa enquanto a
+        # latência mediana do ping passar de `pausar_latencia_ms`.
+        self.iperf_servidor = (iperf_servidor or "").strip() or None
+        self.iperf_segundos = max(1, min(30, int(iperf_segundos)))
+        self.iperf_intervalo = max(10.0, float(iperf_intervalo_s))
+        self.iperf_por_radio = max(60.0, float(iperf_por_radio_s))
+        self.iperf_sentido = (iperf_sentido if iperf_sentido in
+                              ("envio", "recebimento", "ambos") else "ambos")
+        self.iperf_modo = (str(iperf_modo).upper()
+                           if str(iperf_modo).upper() in ("TCP", "UDP") else "TCP")
+        self.iperf_limite = float(iperf_limite_mbps or 0)
+        self.pausar_latencia = float(pausar_latencia_ms)
+        self.testes = []            # resultados de throughput
+        self.em_teste = None        # ip com iperf3 rodando agora
+        self.ultima_amostra = {}    # ip -> última amostra gravada
+        self.iperf_ultimo = {}      # ip -> quando foi testado (monotonic)
+        self.iperf_inverter = {}    # ip -> o próximo é de descida?
+        self.iperf_sem = {}         # ip -> motivo: rádios fora do teste
+        self.iperf_radio = {}       # ip -> {"ok", "falhas"}
+        self.iperf_motivos = {}
+        self.iperf_ok = self.iperf_falhas = self.iperf_ocupado = 0
+        self.iperf_parado = None
+        self.iperf_pausado = False
 
     def parar(self):
         self._parar.set()
@@ -307,7 +346,9 @@ class Coleta:
         """Por onde o rádio sai até o destino, ou None. Nunca derruba a
         leitura: sem trace, a amostra sai como antes."""
         if (not self.trace_destino or self.trace_parado
-                or ip in self.trace_sem):
+                or ip in self.trace_sem or ip == self.em_teste):
+            # Rádio com iperf3 rodando: a tarefa dele está ocupada, e o
+            # TRACE só voltaria "already running".
             return None
         try:
             t = ses.trace(self.trace_destino)
@@ -572,7 +613,10 @@ class Coleta:
         if not saida:
             return
         am, viz = saida
+        if self.pinger is not None:
+            am["rtt"], am["perda"] = self.pinger.rtt_e_perda(ip, am["ts"])
         with self.lock:
+            self.ultima_amostra[ip] = am
             # `ponto` é a POSIÇÃO da amostra na lista: `cobertura_disponivel`
             # casa vizinho e amostra por ela. Com várias leituras
             # terminando ao mesmo tempo, o número tem de sair da própria
@@ -634,6 +678,16 @@ class Coleta:
 
         for _ in range(self.max_thr):
             _novo()
+        if self.ping:
+            self.pinger = rm.Pinger(list(self.alvos), self.ping_intervalo).iniciar()
+        t_testes = None
+        if self.iperf_servidor:
+            t_testes = threading.Thread(target=self._laco_testes, args=(fim,),
+                                        daemon=True)
+            t_testes.start()
+            self.aviso(f"throughput: iperf3 do rádio até {self.iperf_servidor}, "
+                       f"{self.iperf_modo} {self.iperf_segundos} s, um teste "
+                       f"por vez a cada {self.iperf_intervalo:g} s no mínimo")
         repostos = 0
         try:
             while not self._parar.is_set():
@@ -656,6 +710,11 @@ class Coleta:
             prazo = time.monotonic() + self.timeout + 5
             for t in trabalhadores:
                 t.join(max(0.0, prazo - time.monotonic()))
+            if t_testes is not None:
+                # Um teste em curso termina por si (segundos + o resultado).
+                t_testes.join(self.iperf_segundos + 25)
+            if self.pinger is not None:
+                self.pinger.parar()
 
         self.fim = time.time()
         for ses in self.sessoes.values():
@@ -671,6 +730,35 @@ class Coleta:
                        f"falha(s), {self.trace_ocupado} ocupado, "
                        f"{len(self.trace_sem)} rádio(s) sem trace")
             for m, n in sorted(self.trace_motivos.items(),
+                               key=lambda kv: -kv[1])[:5]:
+                self.aviso(f"  {n}x  {m}")
+        if self.pinger is not None:
+            # Rádio que não respondeu a NENHUM ping a coleta inteira, mas
+            # respondeu à BCAPI, bloqueia ICMP: "100% de perda" nele seria
+            # mentira. Fica sem latência e sem perda — não medido.
+            mudos = sorted(self.alvos.get(ip, ip) for ip in self.alvos
+                           if not any(r is not None
+                                      for _t, r in self.pinger.hist.get(ip, ())))
+            if mudos:
+                ms = set(mudos)
+                for a in self.amostras:
+                    if a.get("radio") in ms:
+                        a["rtt"] = a["perda"] = None
+                self.aviso(f"{len(mudos)} equipamento(s) não responderam a "
+                           f"nenhum ping: latência e perda não medidas neles "
+                           f"({', '.join(mudos[:5])}"
+                           + (f" +{len(mudos) - 5}" if len(mudos) > 5 else "") + ")")
+        if self.pinger is not None and self.pinger.enviados:
+            self.aviso(f"ping: {self.pinger.enviados} enviados, "
+                       f"{self.pinger.perdidos} sem resposta "
+                       f"({self.pinger.perdidos * 100.0 / self.pinger.enviados:.1f}%)")
+        if self.iperf_servidor:
+            vs = sorted(t["mbps"] for t in self.testes)
+            self.aviso(f"throughput: {self.iperf_ok} teste(s) ok, "
+                       f"{self.iperf_falhas} falha(s), {self.iperf_ocupado} "
+                       f"ocupado" + (f" — mediana {vs[len(vs) // 2]:g} Mbps"
+                                     if vs else ""))
+            for m, n in sorted(self.iperf_motivos.items(),
                                key=lambda kv: -kv[1])[:5]:
                 self.aviso(f"  {n}x  {m}")
         self.aviso(f"coleta encerrada: {len(self.amostras)} amostras, "
@@ -701,7 +789,147 @@ class Coleta:
                 "trace_sem": len(self.trace_sem),
                 "trace_ocupado": self.trace_ocupado,
                 "passo_m": self._passo_real(),
+                "ping_ms": (self.pinger.mediana_recente(30)
+                            if self.pinger is not None else None),
+                "iperf_ok": self.iperf_ok, "iperf_falhas": self.iperf_falhas,
+                "iperf_em_teste": self.alvos.get(self.em_teste) if self.em_teste else None,
+                "iperf_ultimo": (self.testes[-1]["mbps"] if self.testes else None),
+                "iperf_pausado": self.iperf_pausado,
+                "iperf_parado": self.iperf_parado,
             }
+
+    # ── throughput: o agendador ──────────────────────────────
+    # Rádios sem nenhum sucesso que, somados, desligam o teste da coleta:
+    # aí o problema é o servidor ou o papel, não um rádio.
+    IPERF_RADIOS_PARA_DESLIGAR = 4
+
+    def _laco_testes(self, fim):
+        ultimo = -1e9
+        while not fim.is_set() and not self._parar.is_set():
+            fim.wait(1.0)
+            if fim.is_set() or self.iperf_parado:
+                continue
+            if time.monotonic() - ultimo < self.iperf_intervalo:
+                continue
+            if self.pinger is not None:
+                med = self.pinger.mediana_recente(30)
+                if med is not None and med > self.pausar_latencia:
+                    if not self.iperf_pausado:
+                        self.aviso(f"throughput em pausa: latência mediana "
+                                   f"{med:g} ms (acima de "
+                                   f"{self.pausar_latencia:g} ms) — rede carregada")
+                        self.iperf_pausado = True
+                    continue
+                if self.iperf_pausado:
+                    self.aviso("throughput: latência normal de novo, testes voltam")
+                    self.iperf_pausado = False
+            ip = self._proximo_teste()
+            if ip is None:
+                continue
+            ultimo = time.monotonic()
+            self._testar(ip)
+
+    def _proximo_teste(self):
+        """O rádio há mais tempo sem teste, entre os que estão sendo lidos
+        agora. Entre dois empatados, o que sai por outra ERM que a do
+        teste anterior: dois seguidos na mesma ERM carregam o mesmo
+        enlace."""
+        agora_m, agora = time.monotonic(), time.time()
+        ant = self.testes[-1].get("saida") if self.testes else None
+        cands = []
+        with self.lock:
+            for ip in self.alvos:
+                am = self.ultima_amostra.get(ip)
+                if (am is None or agora - (am.get("ts") or 0) > 60
+                        or ip in self.iperf_sem or ip == self.iperf_servidor):
+                    continue
+                u = self.iperf_ultimo.get(ip)
+                if u is not None and agora_m - u < self.iperf_por_radio:
+                    continue
+                cands.append(((u if u is not None else -1e18),
+                              am.get("servidor") == ant and ant is not None, ip))
+        if not cands:
+            return None
+        cands.sort(key=lambda c: (c[1], c[0]))
+        return cands[0][2]
+
+    def _testar(self, ip):
+        nome = self.alvos.get(ip, ip)
+        reverso = (self.iperf_sentido == "recebimento" or
+                   (self.iperf_sentido == "ambos" and self.iperf_inverter.get(ip, False)))
+        self.iperf_ultimo[ip] = time.monotonic()
+        self.em_teste = ip
+        am = dict(self.ultima_amostra.get(ip) or {})
+        t0 = time.time()
+        ses = rm.SessaoRadio(ip, porta=self.porta, role=self.role,
+                             senha=self.senha, timeout=self.timeout)
+        try:
+            bc = ses._abrir()
+            if not rm.bc_direto_disponivel(bc):
+                raise rm.IperfIndisponivel("sessão sem acesso direto à BCAPI")
+            r = rm.bc_iperf3(bc, self.iperf_servidor, self.iperf_segundos,
+                             self.iperf_modo, reverso, self.iperf_limite)
+        except rm.IperfOcupado as e:
+            with self.lock:
+                self.iperf_ocupado += 1
+                m = rm.motivo_curto(str(e))
+                self.iperf_motivos[m] = self.iperf_motivos.get(m, 0) + 1
+            # Volta para a fila logo: ocupado é passageiro.
+            self.iperf_ultimo[ip] = time.monotonic() - self.iperf_por_radio + 60
+            return None
+        except Exception as e:
+            self._iperf_falhou(ip, f"{type(e).__name__}: {e}",
+                               recusa=isinstance(e, rm.IperfRecusado))
+            return None
+        finally:
+            try: ses.fechar()
+            except Exception: pass
+            self.em_teste = None
+        self.iperf_inverter[ip] = not reverso
+        t = {"radio": nome, "ip": ip, "ts": t0,
+             "lat": am.get("lat"), "lon": am.get("lon"),
+             "banda": am.get("banda"), "saida": am.get("servidor"),
+             "servidor_iperf": self.iperf_servidor,
+             "sentido": "recebimento" if reverso else "envio",
+             "modo": self.iperf_modo, "segundos": self.iperf_segundos,
+             "mbps": r["mbps"], "mbps_enviado": r.get("mbps_enviado"),
+             "mbps_recebido": r.get("mbps_recebido"),
+             "retransmissoes": r.get("retransmissoes"),
+             "jitter_ms": r.get("jitter_ms"), "perda_pct": r.get("perda_pct")}
+        with self.lock:
+            self.testes.append(t)
+            self.iperf_ok += 1
+            st = self.iperf_radio.setdefault(ip, {"ok": 0, "falhas": 0})
+            st["ok"] += 1
+        self.aviso(f"throughput {nome}: {r['mbps']:g} Mbps "
+                   f"({'descida' if reverso else 'subida'})")
+        return t
+
+    def _iperf_falhou(self, ip, motivo, recusa=False):
+        """Mesma regra do trace: quem recusa sai; 3 falhas sem nenhum
+        sucesso, também; vários fora sem sucesso nenhum desliga o teste."""
+        nome = self.alvos.get(ip, ip)
+        motivo = rm.motivo_curto(motivo)
+        with self.lock:
+            self.iperf_falhas += 1
+            st = self.iperf_radio.setdefault(ip, {"ok": 0, "falhas": 0})
+            st["falhas"] += 1
+            novo = motivo not in self.iperf_motivos
+            self.iperf_motivos[motivo] = self.iperf_motivos.get(motivo, 0) + 1
+            sai = ip not in self.iperf_sem and (
+                recusa or (st["ok"] == 0 and st["falhas"] >= 3))
+            if sai:
+                self.iperf_sem[ip] = motivo
+            geral = (sai and self.iperf_ok == 0 and not self.iperf_parado
+                     and len(self.iperf_sem) >= self.IPERF_RADIOS_PARA_DESLIGAR)
+            if geral:
+                self.iperf_parado = motivo
+        if novo:
+            self.aviso(f"throughput em {nome} ({ip}): {motivo}")
+        if geral:
+            self.aviso(f"throughput desligado: {len(self.iperf_sem)} rádios "
+                       f"falharam e nenhum deu certo ({motivo}) — confira o "
+                       f"servidor {self.iperf_servidor}")
 
     def _passo_real(self):
         """Espaçamento que de fato saiu, por equipamento. É o número que
@@ -743,12 +971,16 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
     # regra aplicada ao conjunto, para o banco nunca receber o parado.
     am, pr, desc = rm.descartar_parados(am, pr)
     am_a, pr_a, info_a = rm.separar_por_area(am, pr, areas)
+    testes = list(getattr(coleta, "testes", None) or [])
     if areas and not am_a:
         aviso(f"  ! nenhuma das {info_a['lidas']} leituras caiu dentro das "
               f"áreas demarcadas: laudo sem áreas")
         areas, info_a = None, None
     else:
         am, pr = am_a, pr_a
+        if areas:
+            # Teste de throughput fora das áreas sai, como a leitura.
+            testes = rm.separar_por_area(testes, None, areas)[0]
     destino = Path(saida or ".").resolve()
     destino.mkdir(parents=True, exist_ok=True)
 
@@ -772,6 +1004,7 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
         if sv["destino_trace"]:
             rm.survey_destino_trace(con, sid, sv["destino_trace"])
         rm.survey_areas(con, sid, sv["areas"])
+        rm.vazao_gravar(con, sid, testes)
     finally:
         con.close()
 
@@ -786,7 +1019,7 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
         # que é a mesma regra: 2,4 e 5,8 GHz são malhas diferentes no
         # mesmo terreno e num arquivo só uma tapa a outra.
         feitos += _smm._kmz_por_banda(sv, am, pr, destino, cfg, campos, aviso,
-                                      areas)
+                                      areas, testes)
     if fazer_kmz and sitios:
         try:
             dados, nome = rm.gerar_kml_pontos_fixos(sitios, cfg=cfg)
@@ -799,7 +1032,7 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
         try:
             mapas, arq_m = rm.mapas_das_areas(am, areas,
                                               destino if fazer_mapas else None,
-                                              aviso)
+                                              aviso, testes=testes)
             feitos += arq_m
         except Exception as e:
             aviso(f"  ! mapas sobre as imagens não gerados: {e}")
@@ -812,10 +1045,12 @@ def gravar_e_gerar(coleta, saida, fazer_kmz=True, fazer_ppt=True,
             aviso(f"  ! PPT não gerado: {e}")
     if fazer_excel:
         try:
-            dados, nome = rm.excel_do_meshmapper(sv, am, pr, cfg)
+            dados, nome = rm.excel_do_meshmapper(sv, am, pr, cfg, testes=testes)
             alvo = destino / nome; alvo.write_bytes(dados); feitos.append(alvo)
         except Exception as e:
             aviso(f"  ! Excel não gerado: {e}")
+    feitos += _smm._estimativa(sv, am, pr, areas, destino, cfg,
+                               getattr(coleta, "malha", None), aviso)
     for f in feitos:
         aviso(f"  → {f.name}")
     return feitos
@@ -940,9 +1175,53 @@ def testar_trace(ip, destino=None, role="CO", senha="", porta=2300,
     return _gravar_teste(pasta, ip, linhas)
 
 
-def _gravar_teste(pasta, ip, linhas):
+def testar_iperf(ip, servidor, role="CO", senha="", porta=2300, pasta=".",
+                 segundos=5, modo="TCP", reverso=False, aviso=print):
+    """Pede UM teste de throughput (tarefa IPERF3) a um rádio e grava num
+    arquivo de texto tudo o que ele respondeu — inclusive a saída crua do
+    iperf3, que é o que confirma o formato no campo. Só a tarefa IPERF3 é
+    enviada. Devolve o caminho do arquivo gravado."""
+    import datetime as _dt
+    linhas = []
+    def reg(titulo, texto=""):
+        bloco = f"── {titulo}\n{texto}".rstrip()
+        linhas.append(bloco)
+        aviso(bloco if len(bloco) < 400 else bloco[:400] + " […]")
+
+    reg("teste de throughput", f"rádio {ip}:{porta}  papel {role}  servidor "
+        f"{servidor}  {modo} {segundos} s  "
+        f"{'descida (o rádio recebe)' if reverso else 'subida (o rádio envia)'}\n"
+        f"{_dt.datetime.now():%d/%m/%Y %H:%M:%S}")
+    try:
+        bc = rm.exigir_rajant_api()(host=ip, port=porta, role=role, password=senha)
+        etapas = []
+        rm.autenticar(bc, etapas=etapas)
+        reg("autenticação", "ok\n" + "\n".join(f"  {n}: {ms} ms" for n, ms in etapas))
+    except Exception as e:
+        reg("autenticação — FALHOU", f"{type(e).__name__}: {e}")
+        return _gravar_teste(pasta, ip, linhas, "iperf")
+    registro = []
+    t0 = time.monotonic()
+    try:
+        r = rm.bc_iperf3(bc, servidor, segundos, modo, reverso, registro=registro)
+        res = (f"OK em {time.monotonic() - t0:.1f} s\n"
+               + "\n".join(f"{k}: {v}" for k, v in r.items() if k != "texto"))
+    except Exception as e:
+        res = (f"FALHOU em {time.monotonic() - t0:.1f} s — "
+               f"{type(e).__name__}: {e}")
+    for rot, txt in registro:
+        reg(f"iperf3 · {rot}", txt)
+    reg("RESULTADO DO IPERF3", res)
+    conn = getattr(bc, "connection", None)
+    if conn is not None:
+        try: conn.close()
+        except Exception: pass
+    return _gravar_teste(pasta, ip, linhas, "iperf")
+
+
+def _gravar_teste(pasta, ip, linhas, tipo="trace"):
     alvo = Path(pasta or ".").resolve() / (
-        f"teste_trace_{ip.replace('.', '-')}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+        f"teste_{tipo}_{ip.replace('.', '-')}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
     alvo.write_text("\n\n".join(linhas) + "\n", encoding="utf-8")
     return alvo
 
@@ -994,10 +1273,32 @@ def main(argv=None):
                     help="as áreas: GeoTIFF de cada área (o nome do arquivo "
                          "é o da área) e/ou KMZ/KML com um polígono por "
                          "área. Leitura fora das áreas sai do laudo.")
+    ap.add_argument("--sem-ping", action="store_true",
+                    help="não medir latência e perda por ping")
+    ap.add_argument("--iperf-servidor", metavar="IP",
+                    help="liga o throughput: o iperf3 do próprio rádio até este "
+                         "IP (outro BreadCrumb ou servidor iperf3)")
+    ap.add_argument("--iperf-segundos", type=int, default=5)
+    ap.add_argument("--iperf-intervalo", type=float, default=60.0,
+                    help="segundos entre dois testes na malha (mínimo 10)")
+    ap.add_argument("--iperf-sentido", default="ambos",
+                    choices=("envio", "recebimento", "ambos"))
+    ap.add_argument("--testar-iperf", metavar="IP",
+                    help="diagnóstico de campo: um teste de throughput nesse "
+                         "rádio até --iperf-servidor, gravado num .txt")
     ap.add_argument("--testar-trace", metavar="IP",
                     help="diagnóstico de campo: pergunta a UM rádio como "
                          "ele responde à leitura e ao TRACE e grava um .txt")
     a = ap.parse_args(argv)
+    if a.testar_iperf:
+        if not a.iperf_servidor:
+            print("--testar-iperf precisa de --iperf-servidor"); return 2
+        alvo = testar_iperf(a.testar_iperf, a.iperf_servidor, role=a.role,
+                            senha=a.senha, porta=a.porta, pasta=a.saida,
+                            segundos=a.iperf_segundos,
+                            reverso=(a.iperf_sentido == "recebimento"))
+        print(f"\nArquivo gravado: {alvo}")
+        return 0
     if a.testar_trace:
         alvo = testar_trace(a.testar_trace, a.destino_trace, role=a.role,
                             senha=a.senha, porta=a.porta, pasta=a.saida)
@@ -1027,7 +1328,10 @@ def main(argv=None):
     c = Coleta(alvos, role=a.role, senha=a.senha, porta=a.porta,
                passo_m=a.passo_m, aviso=print,
                trace_destino=None if a.sem_trace else a.destino_trace,
-               malha=achados)
+               malha=achados, ping=not a.sem_ping,
+               iperf_servidor=a.iperf_servidor, iperf_segundos=a.iperf_segundos,
+               iperf_intervalo_s=a.iperf_intervalo,
+               iperf_sentido=a.iperf_sentido)
     c.rodar(a.minutos)
     feitos = gravar_e_gerar(c, a.saida, aviso=print, areas=areas or [])
     print(f"\n{len(feitos)} arquivo(s) gerado(s).")

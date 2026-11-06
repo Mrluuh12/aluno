@@ -25,13 +25,14 @@ coleta_rajant --seeds 10.188.96.140 --minutos 30 -o relatorios --areas areas.kmz
 ## Áreas demarcadas
 
 O laudo sai **por área**. Na janela, embaixo (vale para as duas abas):
-**Áreas → Adicionar áreas…**. Aceita dois tipos de arquivo, juntos ou
+**Áreas → Adicionar áreas…**. Aceita três tipos de arquivo, juntos ou
 separados:
 
 | arquivo | o que é a área |
 |---|---|
 | **GeoTIFF** (`.tif`) de cada área — ortofoto de drone, satélite | **o nome do arquivo é o nome da área** (`Cava Norte.tif` → "Cava Norte") e o contorno é a parte da imagem que tem dado: o que estiver sem dado (transparente/nodata) em volta fica fora. Imagem sem nodata vale o retângulo inteiro |
 | **KMZ/KML** do Google Earth | um polígono por área, desenhado com **Adicionar polígono**; o nome do polígono é o nome da área. Dois polígonos com o mesmo nome viram uma área em duas partes; buraco no polígono fica fora |
+| **LAS/LAZ** (nuvem de pontos do terreno) de cada área | o **terreno** da área, para a cobertura estimada (abaixo). Vai para a área de mesmo nome (`Cava Norte.las` com `Cava Norte.tif`) ou para a que ele cobre; sozinho, ele mesmo é a área |
 
 Com os dois juntos, **quem demarca são os polígonos**, e cada imagem vira
 o fundo da área que ela cobre.
@@ -90,6 +91,67 @@ janela da área: o mapa de uma área de 1,5 km sai com ~0,5 m por pixel,
 mais que o suficiente para o calor, que é calculado a cada 1 m ou mais.
 Imagem de satélite em 16 bits é esticada para a tela; imagem em tons de
 cinza ou com paleta também serve.
+
+## Cobertura estimada pelo relevo (LAS)
+
+Com o LAS das áreas, o programa estima a cobertura de cada ERB/ERM pelo
+relevo e mostra **sobre os tif das áreas**, na mesma régua de cores do
+RSSI medido. **Não é medição**: sai num deck próprio
+(`Cobertura_Estimada_*.pptx`), separado do laudo, que continua sendo só o
+que foi medido.
+
+**Como o número sai.** Em cada ponto, a melhor ERB/ERM:
+
+    RSSI = potência + ganho TX + ganho RX − perda de cabo
+           − espaço livre − difração no relevo + correção da calibração
+
+- o **terreno** é o ponto mais alto de cada célula de 3 m do LAS (o que
+  barra o sinal é a crista da bancada, a pilha, o prédio), sem os pontos
+  de ruído;
+- a **difração** é a do obstáculo dominante do perfil entre a antena da
+  ERB/ERM e a do veículo (gume de faca, ITU-R P.526), com a curvatura da
+  Terra;
+- a **calibração** compara o estimado com o que os veículos mediram de
+  cada ERB/ERM no survey (as mesmas leituras da pasta "Por repetidora")
+  e corrige a diferença mediana, por banda. O que sobra é o **erro do
+  modelo, em dB**, que vai escrito na página de premissas e em cada mapa.
+  Com menos de 20 leituras numa banda, ela fica sem correção — e o deck
+  diz.
+
+**As ERB/ERM.** A posição, as bandas e a potência de cada uma vêm da
+busca (o GPS e os rádios de cada BreadCrumb). O resto fica na planilha
+`infraestrutura.csv`, ao lado do programa — botão **ERB/ERM…** na janela,
+abre no Excel:
+
+| coluna | o que é |
+|---|---|
+| `nome` | como aparece na rede (ERM-08 PTP CAM) |
+| `lat`, `lon` | posição; vazio = a do GPS do rádio |
+| `altura_m` | **altura do mastro acima do terreno** — o que mais pesa |
+| `potencia_dbm` | vazio = a que o rádio informa |
+| `ganho_dbi`, `perda_cabo_db` | antena e cabo |
+| `banda` | se a linha vale só para uma banda (2.4 ou 5.8) |
+| `azimute`, `abertura` | antena setorial: para onde aponta e a abertura, em graus |
+| `proposta` | `sim` = ERB/ERM que ainda não existe: o "e se" de pôr uma nova ali |
+
+A busca e o survey **acrescentam** à planilha as ERB/ERM que acharem,
+sem mexer no que já estiver preenchido. O que não for informado usa os
+padrões do `[cobertura]` do `config.ini` (mastro de 9 m, antena no
+veículo a 4 m, 24 dBm…), e o deck diz quantas usaram o padrão.
+
+**O que sai:**
+
+| | |
+|---|---|
+| `Cobertura_Estimada_*.pptx` | premissas e erro do modelo, a tabela das ERB/ERM, e uma página por área e banda com o mapa sobre o tif, a área acima de −75 dBm estimada, a mediana e o medido nas rotas ao lado |
+| `estimativa/cobertura_estimada_*.tif` | o RSSI estimado em **dBm** (número, não cor), em toda a área dos LAS — para a engenharia estilizar no QGIS/ArcGIS |
+| `estimativa/<área>_cobertura_estimada_*.tif` | o mapa colorido sobre o tif da área |
+
+Área sem tif ganha o relevo sombreado do próprio LAS de fundo. O modelo
+não vê veículos nem equipamentos (não estão no LAS), reflexão nas paredes
+da cava nem a cava que mudou depois do LAS — onde estimado e medido
+divergem, vale o medido, e a divergência aponta altura, potência ou
+obstáculo a conferir.
 
 ## Coleta ao vivo: densidade de leituras
 
@@ -164,8 +226,65 @@ mesmo rádio no meio do nosso, a saída que chega pode ser a deles. A coleta
 confere que a saída é da **nossa tarefa** e do **nosso destino**; se não
 for, conta como TRACE ocupado e a próxima leitura tenta de novo.
 
-Só o TRACE é pedido ao rádio. As outras tarefas que a mesma mensagem da
-API aceita (REBOOT, ZEROIZE, CLEAR, KICK…) não existem no código.
+Ao rádio são pedidas só duas tarefas: o TRACE e o IPERF3 (abaixo). As
+outras que a mesma mensagem da API aceita (REBOOT, ZEROIZE, CLEAR, KICK,
+INSTALL…) não existem no código — a ação é sempre uma constante, e há
+teste que confere.
+
+## Testes ativos: latência, perda e throughput
+
+Na aba **Coleta**, linha **Testes ativos**.
+
+**Latência e perda (ping)** — ligado por padrão. O computador da coleta
+manda um ping a cada 2 s para cada equipamento (leve: um pacote pequeno
+por vez). Cada amostra leva a **mediana da latência e a perda dos pings
+dos 10 s anteriores**, e as duas viram aba no KMZ, página no PPT e coluna
+no Excel, contra o requisito Modular (latência < 100 ms, perda < 2%).
+Mede o caminho do computador até o equipamento: com o computador na rede
+do servidor, é o mesmo caminho que o Dispatch usa. Não precisa de
+administrador no Windows.
+
+Equipamento que não responde a **nenhum** ping a coleta inteira, mas
+responde à BCAPI, bloqueia ICMP: fica sem latência e sem perda (não
+medido) e o andamento avisa — "100% de perda" nele seria mentira.
+
+**Throughput (iperf3)** — desligado por padrão. É o mesmo "Test
+Performance" do BC|Commander: o **próprio rádio** roda o iperf3 até o
+servidor escolhido (outro BreadCrumb da lista — ERB/ERM aparecem primeiro
+— ou o IP de um servidor iperf3). É o teste que mais pesa na malha, então:
+
+| regra | por quê |
+|---|---|
+| **um teste por vez** na malha inteira | dois juntos dividem o canal e um mede o outro |
+| no mínimo **60 s** entre testes (ajustável, mínimo 10) | a malha carrega o Dispatch |
+| cada rádio no máximo a cada **10 min** | o teste se espalha pela frota |
+| **duração** de 5 s (ajustável) | curto o bastante para não segurar a malha |
+| sentido **subida, descida ou os dois** (alternando por rádio) | |
+| entre dois candidatos, o que sai por **outra ERM** que o teste anterior | dois seguidos na mesma ERM carregam o mesmo enlace |
+| **pausa** enquanto a latência mediana do ping passar de 200 ms | rede carregada: o teste só pioraria |
+| durante o teste, o rádio fica **sem TRACE** | o rádio roda uma tarefa por vez |
+
+Quem recusa o teste sai dele (o andamento diz o motivo); com 4 rádios
+recusando e nenhum sucesso, o throughput desliga para a coleta toda — o
+problema aí é o servidor ou o papel, não um rádio. O resultado de cada
+teste é o que **chegou** do outro lado, em Mbps, com a posição do veículo
+no início do teste e por onde ele saía.
+
+Onde aparece: um ponto por teste no KMZ (pasta "Throughput (iperf3)",
+azul na subida, laranja na descida), uma página por área no PPT — com o
+mapa sobre o tif da área quando há —, e a aba **Throughput** do Excel.
+Não há requisito de throughput no contrato, então nada ali é "dentro" ou
+"fora": é o medido.
+
+**Testar iperf** (botão ao lado) faz um teste num rádio selecionado na
+lista e grava `teste_iperf_<ip>_<data>.txt` com tudo o que o rádio
+respondeu, inclusive a saída crua do iperf3. O formato dessa saída é o
+que falta confirmar no campo: mande o arquivo do primeiro teste. Pela
+linha de comando:
+
+```
+site_survey.exe --testar-iperf 10.188.99.6 --iperf-servidor 10.188.96.30 --senha <senha>
+```
 
 **A falha é decidida rádio a rádio.** Na v16, a primeira falha de trace de
 qualquer rádio, antes de algum sucesso, desligava o trace da coleta
@@ -307,8 +426,9 @@ existem no código.
 | `Survey_*_24GHz.kmz` | trajeto de 2,4 GHz, uma aba por grandeza (com uma pasta por área), a pasta Áreas e a legenda na tela |
 | `Survey_*_58GHz.kmz` | idem, 5,8 GHz |
 | `mapas/*.tif` | com GeoTIFF nas áreas: o mapa de cada área, grandeza e banda sobre a imagem, georreferenciado |
-| `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, resumo por área, uma seção por área (com uma página por grandeza/banda) e duas páginas em branco para diagnóstico e conclusões |
-| `Survey_*.xlsx` | origens, resumo, por grandeza, por área e amostras |
+| `Site_Survey_*.pptx` | capa, índice, sumário, metodologia, resumo por área, uma seção por área (com uma página por grandeza/banda e a de throughput) e duas páginas em branco para diagnóstico e conclusões |
+| `Survey_*.xlsx` | origens, resumo, por grandeza, por área, throughput e amostras |
+| `Cobertura_Estimada_*.pptx`, `estimativa/*.tif` | com LAS nas áreas: a cobertura estimada pelo relevo (ver acima) |
 
 **Juntar tudo num relatório só** (padrão) produz um conjunto com todas as
 capturas — é o caso da campanha cobrindo a mina. Desmarcado, sai um
@@ -533,9 +653,10 @@ com a pior das duas pontas — é ela que limita.
 
 ## O que o MeshMapper não fornece
 
-Latência, perda de pacotes e interferência. Essas grandezas **não viram
-slide nem aba**: uma página com escala, requisito e gráfico vazio lê-se
-como *"medi e deu tudo fora"*, que é o oposto de *"não medi"*.
+Latência, perda de pacotes, interferência e throughput — na coleta ao
+vivo, as quatro são medidas. Grandeza sem medição **não vira slide nem
+aba**: uma página com escala, requisito e gráfico vazio lê-se como *"medi
+e deu tudo fora"*, que é o oposto de *"não medi"*.
 
 ## Instalação
 
@@ -555,7 +676,7 @@ a saída; o erro também fica em `site_survey_erro.txt`, ao lado do exe.
 Para rodar direto pelo Python:
 
 ```
-pip install matplotlib numpy scipy python-pptx openpyxl lxml rasterio
+pip install matplotlib numpy scipy python-pptx openpyxl lxml rasterio "laspy[lazrs]"
 pip install rajant-api --no-deps && pip install "protobuf==4.23.4"
 python site_survey.py
 ```
@@ -567,7 +688,9 @@ python site_survey.py
 | `site_survey.py` | a janela: só a interface |
 | `coleta_rajant.py` | a coleta ao vivo dos rádios |
 | `survey_meshmapper.py` | a leitura de arquivos do MeshMapper |
-| `motor_survey.py` | o motor de KMZ, PPT e Excel, a leitura dos rádios e das áreas |
+| `motor_survey.py` | o motor de KMZ, PPT e Excel, a leitura dos rádios e das áreas, o ping e o iperf3 |
+| `cobertura_estimada.py` | a cobertura estimada pelo relevo (LAS) |
+| `infraestrutura.csv` | as ERB/ERM da estimativa (criada pelo programa; você completa a altura do mastro) |
 | `marca/` | logos usados nos decks |
 | `exemplos/` | uma captura de veículo e uma de repetidora, usadas pelos testes |
 | `build/` | spec do PyInstaller e o `.bat` |

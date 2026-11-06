@@ -113,7 +113,7 @@ def _um(arq, destino, cfg, nome, bandas, kmz, ppt, xls, aviso, areas=None,
 
 
 def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso,
-                   areas=None):
+                   areas=None, testes=None):
     """Um KMZ por banda. Devolve os arquivos gravados.
 
     2,4 e 5,8 GHz são malhas diferentes no mesmo terreno: num arquivo só,
@@ -134,7 +134,8 @@ def _kmz_por_banda(sv, amostras, peers, destino, cfg, campos, aviso,
         try:
             dados, nome = rm.gerar_kml_survey(
                 sv, amostras, cfg=cfg, campos=campos, banda=b,
-                peers=(peers if com_viz else None), areas=areas)
+                peers=(peers if com_viz else None), areas=areas,
+                testes=testes)
         except Exception as e:
             aviso(f"  ! KMZ de {b or 'todas as bandas'} não gerado: {e}")
             continue
@@ -215,9 +216,27 @@ def _saidas(sv, amostras, peers, sid, destino, cfg, bandas,
             alvo.write_bytes(dados); feitos.append(alvo)
         except Exception as e:
             aviso(f"  ! Excel não gerado: {e}")
+    feitos += _estimativa(sv, amostras, peers, areas, destino, cfg, None, aviso)
     for f in feitos:
         aviso(f"  → {f.name}")
     return feitos
+
+
+def _estimativa(sv, amostras, peers, areas, destino, cfg, malha, aviso):
+    """Com LAS nas áreas: a cobertura estimada, num deck à parte. Falhar
+    aqui nunca derruba o laudo, que já está gravado."""
+    if not any(a.get("terreno") for a in (areas or [])):
+        return []
+    try:
+        import cobertura_estimada as ce
+        from datetime import datetime
+        return ce.gerar(amostras, peers, areas, destino, cfg, malha=malha,
+                        nome=sv.get("nome"), aviso=aviso,
+                        quando=(datetime.fromtimestamp(sv["inicio"])
+                                if sv.get("inicio") else None))
+    except Exception as e:
+        aviso(f"  ! cobertura estimada não gerada: {e}")
+        return []
 
 
 def _aviso_areas(sv, amostras, aviso):

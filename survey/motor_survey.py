@@ -63,6 +63,22 @@ porta_bcapi             = 2300
 # nome do polígono é o nome da área). O laudo sai por área e a leitura
 # fora de todas elas é descartada. Vazio = laudo sem áreas.
 areas                   =
+
+[cobertura]
+# Cobertura estimada pelo relevo (com LAS nas áreas). A planilha das
+# ERB/ERM (posição, altura do mastro, potência, setor) é esta:
+infraestrutura          = infraestrutura.csv
+# O que vale quando a ERB/ERM não informa:
+altura_tx_m             = 9
+altura_rx_m             = 4
+ganho_tx_dbi            = 6
+ganho_rx_dbi            = 5
+perda_cabo_db           = 1
+potencia_dbm            = 24
+raio_m                  = 3000
+celula_m                = 3
+# LAS sem sistema de coordenadas gravado (ex.: EPSG:31983):
+crs_las                 =
 """
 
 def carregar_config():
@@ -1753,6 +1769,9 @@ def trilha_consolidada(amostras, campo, faixas, celula_m=TRILHA_CELULA_M,
 # Cor e nome do trecho cuja leitura não tem valor da grandeza. Nunca zero,
 # nunca a cor de uma faixa: cinza, e dito na legenda.
 COR_SEM_VALOR = "808080"
+# Testes de throughput: não há requisito de throughput no contrato, então
+# o ponto não leva cor de régua — só o sentido do teste.
+COR_SUBIDA, COR_DESCIDA = "1F6FD1", "E67E22"
 
 
 def sem_valor_txt(campo):
@@ -2101,7 +2120,8 @@ def _legenda_de_faixas_png(caminho, campo, banda=None):
 def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
                      campo="sinal", max_pontos=8000, comprimir=True,
                      grade_zonas=50.0, banda=None, campos=None,
-                     peers=None, max_repetidoras=12, areas=None):
+                     peers=None, max_repetidoras=12, areas=None,
+                     testes=None):
     """KML/KMZ do survey para abrir no Google Earth.
 
     `peers` (a lista de vizinhos da captura) acrescenta uma pasta por
@@ -2586,6 +2606,56 @@ def gerar_kml_survey(sv, amostras, fixos=None, manuais=None, cfg=None,
     abas = [_aba(cp, visivel=(i == 0)) for i, cp in enumerate(campos)]
     pastas.append(f"<Folder><name>Grandeza</name><open>1</open>"
                   f"<styleUrl>#radio</styleUrl>{''.join(abas)}</Folder>")
+
+    # ── Throughput: os testes de iperf3, um ponto por teste ──
+    tv = [t for t in (testes or [])
+          if t.get("lat") is not None and t.get("lon") is not None
+          and t.get("mbps") is not None
+          and (not banda or not t.get("banda")
+               or _norm_banda(t.get("banda")) == banda)]
+    if areas:
+        tv = [t if t.get("area") else dict(t, area=area_do_ponto(
+                  areas, t["lat"], t["lon"])) for t in tv]
+        tv = [t for t in tv if t.get("area")]
+    if tv:
+        for nome_e, cor in (("tSubida", COR_SUBIDA), ("tDescida", COR_DESCIDA)):
+            estilos.append(
+                f'<Style id="{nome_e}"><IconStyle><color>{_kml_cor(cor)}</color>'
+                f'<scale>0.9</scale><Icon><href>{ico_pt}</href></Icon>'
+                f'<hotSpot x="0.5" y="0.5" xunits="fraction" yunits="fraction"/>'
+                f'</IconStyle><LabelStyle><scale>0.8</scale></LabelStyle></Style>')
+        def _pm_teste(t):
+            linhas = [("Equipamento", t.get("radio")),
+                      ("Hora", datetime.fromtimestamp(t["ts"]).strftime("%d/%m %H:%M:%S")
+                       if t.get("ts") else "—"),
+                      ("Sentido", "subida (rádio envia)" if t.get("sentido") != "recebimento"
+                       else "descida (rádio recebe)"),
+                      ("Throughput", f"{t['mbps']:g} Mbps"),
+                      ("Teste", f"iperf3 {t.get('modo') or ''} {t.get('segundos') or ''} s "
+                                f"até {t.get('servidor_iperf') or t.get('servidor') or '?'}"),
+                      ("Saía por", t.get("saida") or "—")]
+            if t.get("retransmissoes") is not None:
+                linhas.append(("Retransmissões", str(t["retransmissoes"])))
+            if t.get("perda_pct") is not None:
+                linhas.append(("Perda (UDP)", f"{t['perda_pct']:g}%"))
+            tab = "".join(f"<tr><td>{_esc(k)}</td><td><b>{_esc(v)}</b></td></tr>"
+                          for k, v in linhas)
+            return _placemark(f"{t['mbps']:g} Mbps",
+                              f"<![CDATA[<table style='font-size:12px'>{tab}</table>]]>",
+                              "tDescida" if t.get("sentido") == "recebimento"
+                              else "tSubida", ponto=(t["lat"], t["lon"]))
+        if areas:
+            dentro_t = "".join(
+                f"<Folder><name>{_esc(n)} ({len(ts_)})</name><open>0</open>"
+                f"{''.join(_pm_teste(t) for t in ts_)}</Folder>"
+                for n in nomes_area
+                for ts_ in [[t for t in tv if t.get("area") == n]] if ts_)
+        else:
+            dentro_t = "".join(_pm_teste(t) for t in tv)
+        pastas.append(f"<Folder><name>Throughput (iperf3) ({len(tv)})</name>"
+                      f"<open>0</open><description><![CDATA[Medido pelo próprio "
+                      f"rádio. Azul: subida (o rádio envia); laranja: descida "
+                      f"(o rádio recebe).]]></description>{dentro_t}</Folder>")
 
     # ── Áreas demarcadas: contorno, nome e números de cada uma ──
     if areas:
@@ -3413,7 +3483,7 @@ def _mm_intervalo_real(amostras):
     return round(difs[len(difs) // 2], 2)
 
 
-def excel_do_meshmapper(sv, amostras, peers, cfg=None):
+def excel_do_meshmapper(sv, amostras, peers, cfg=None, testes=None):
     """Excel da captura do MeshMapper: quatro abas.
 
     Nao reaproveita o workbook semanal porque aquele e um relatorio de
@@ -3607,6 +3677,29 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                         r.get("pct_ok")], zebra=(lin % 2 == 0))
         ws.freeze_panes = "A5"
 
+    # ── 2c. Throughput (iperf3 do rádio) ──
+    if testes:
+        ws = wb.create_sheet("Throughput")
+        t0 = testes[0]
+        _cab(ws, "Testes de throughput",
+             f"iperf3 do próprio rádio até {t0.get('servidor_iperf') or t0.get('servidor') or '?'}"
+             f" · {t0.get('modo') or 'TCP'} · {len(testes)} teste(s)", 12)
+        lin = 4
+        cab_t = ["Hora (UTC)", "Equipamento", "Área", "Banda", "Sentido",
+                 "Mbps", "Enviado (Mbps)", "Recebido (Mbps)", "Retransmissões",
+                 "Perda UDP (%)", "Saía por", "Latitude", "Longitude"]
+        _th(ws, lin, cab_t, [19, 18, 20, 10, 12, 9, 14, 15, 14, 13, 22, 12, 12])
+        lin += 1
+        for t in sorted(testes, key=lambda x: x.get("ts") or 0):
+            lin = _td(ws, lin, [dt(t.get("ts")), t.get("radio"), t.get("area"),
+                                t.get("banda"),
+                                "descida" if t.get("sentido") == "recebimento" else "subida",
+                                t.get("mbps"), t.get("mbps_enviado"),
+                                t.get("mbps_recebido"), t.get("retransmissoes"),
+                                t.get("perda_pct"), t.get("saida"),
+                                t.get("lat"), t.get("lon")], zebra=(lin % 2 == 0))
+        ws.freeze_panes = "A5"
+
     # ── 3. Amostras ──
     ws = wb.create_sheet("Amostras")
     _cab(ws, "Trajeto medido", f"{len(amostras)} pontos", 14)
@@ -3623,6 +3716,10 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
     larg_am = [6, 19, 12, 12, 9, 10, 8, 19, 10, 12, 12, 10, 22, 24, 22, 15]
     if nomes_area:
         cab_am.insert(2, "Área"); larg_am.insert(2, 22)
+    com_ping = any(a.get("rtt") is not None or a.get("perda") is not None
+                   for a in amostras)
+    if com_ping:
+        cab_am += ["Latência (ms)", "Perda (%)"]; larg_am += [13, 10]
     _th(ws, lin, cab_am, larg_am)
     lin += 1
     for i, a in enumerate(sorted(amostras, key=lambda x: x.get("ts") or 0), 1):
@@ -3634,7 +3731,9 @@ def excel_do_meshmapper(sv, amostras, peers, cfg=None):
                             a.get("taxa"), a.get("peers"),
                             a.get("servidor"),
                             a.get("sinal_cob"), a.get("servidor_cob"),
-                            a.get("delta_cob")], estilo=False)
+                            a.get("delta_cob")]
+                           + ([a.get("rtt"), a.get("perda")] if com_ping else []),
+                  estilo=False)
     ws.freeze_panes = "A5"
 
     # ── 4. Censo de vizinhos (opcional) ──
@@ -4074,7 +4173,11 @@ def carregar_areas(fonte=None, cfg=None, aviso=None):
     Cada GeoTIFF é uma área: o nome do arquivo é o nome dela e o contorno é
     a parte da imagem que tem dado. Com polígonos de KMZ/KML junto, quem
     demarca são os polígonos, e cada imagem vira o fundo da área que ela
-    cobre."""
+    cobre.
+
+    LAS/LAZ é o terreno da área, para a cobertura estimada: vai para a
+    área de mesmo nome (`Cava Norte.las` → "Cava Norte") ou para a que
+    ele cobre; sozinho, sem imagem nem polígono, ele mesmo é a área."""
     if isinstance(fonte, list):
         # Lista vazia é "sem áreas" de propósito: não cai no config.
         if not fonte:
@@ -4087,24 +4190,62 @@ def carregar_areas(fonte=None, cfg=None, aviso=None):
         fonte = [x.strip() for x in str(fonte).split(";") if x.strip()]
     if not fonte:
         return None
-    poligonos, imagens = [], []
+    poligonos, imagens, terrenos, las = [], [], [], []
     for f in fonte:
         if e_geotiff(f):
             if aviso:
                 aviso(f"lendo {Path(f).name}…")
             imagens.append(ler_area_geotiff(f))
+        elif Path(str(f)).suffix.lower() in (".las", ".laz"):
+            las.append(f)
         else:
             poligonos.extend(ler_areas(f))
+    # O LAS por último: sem sistema de coordenadas gravado, ele usa o da
+    # imagem da mesma área.
+    for f in las:
+        import cobertura_estimada as _ce
+        if aviso:
+            aviso(f"lendo o terreno {Path(f).name}…")
+        par = next((im for im in imagens if Path(im["imagem"]).stem.casefold()
+                    == Path(str(f)).stem.casefold()), None)
+        crs_im = None
+        if par is not None:
+            try:
+                rio = _rasterio()
+                with rio.open(par["imagem"]) as ds:
+                    crs_im = ds.crs.to_wkt() if ds.crs else None
+            except Exception:
+                crs_im = None
+        terrenos.append(_ce.area_do_las(f, crs=crs_im or _ce.crs_padrao_las()))
+    if poligonos:
+        areas = poligonos
+        for a in areas:
+            a["imagem"] = _imagem_que_cobre(a, imagens)
+    elif imagens:
+        areas = imagens
+    else:
+        areas, terrenos = terrenos, []
     if not poligonos:
         vistos = {}
-        for a in imagens:
+        for a in areas:
             n = vistos[a["nome"].casefold()] = vistos.get(a["nome"].casefold(), 0) + 1
             if n > 1:
                 a["nome"] = f"{a['nome']} ({n})"
-        return imagens
-    for a in poligonos:
-        a["imagem"] = _imagem_que_cobre(a, imagens)
-    return poligonos
+    for t in terrenos:
+        # Pelo nome primeiro (o LAS e o tif da mesma área); senão, a área
+        # que ele cobre.
+        dona = next((a for a in areas if a["nome"].casefold() == t["nome"].casefold()), None)
+        if dona is None:
+            cob = [dict(t, caixa_imagem=t["caixa"], imagem=t["terreno"])]
+            dona = next((a for a in areas
+                         if _imagem_que_cobre(a, cob) == t["terreno"]), None)
+        if dona is not None and not dona.get("terreno"):
+            dona["terreno"] = t["terreno"]
+            dona["crs_terreno"] = t.get("crs_terreno")
+        elif aviso:
+            aviso(f"  ! {Path(t['terreno']).name}: nenhuma área com esse nome "
+                  f"nem coberta por ele — terreno não usado")
+    return areas
 
 
 def _imagem_que_cobre(area, imagens):
@@ -4411,9 +4552,16 @@ def mapa_sobre_imagem(area, amostras, campo, fundo):
                      np.where(valido, 255, 0).astype("uint8")])
     # Contorno da área: branco sobre sombra escura, legível em qualquer chão.
     im = Image.fromarray(out, "RGBA")
+    _desenhar_contorno(im, area, fundo)
+    return np.array(im)
+
+
+def _desenhar_contorno(im, area, fundo):
+    from rasterio import warp
+    from PIL import ImageDraw
     dr = ImageDraw.Draw(im)
     inv = ~fundo["transform"]
-    larg = max(2, round(max(w, h) / 900))
+    larg = max(2, round(max(im.size) / 900))
     for g in area["poligonos"]:
         for anel in [g["externo"]] + g["buracos"]:
             xs, ys = warp.transform("EPSG:4326", fundo["crs"],
@@ -4422,6 +4570,36 @@ def mapa_sobre_imagem(area, amostras, campo, fundo):
             pts.append(pts[0])
             dr.line(pts, fill=(0, 0, 0, 255), width=larg + 2)
             dr.line(pts, fill=(255, 255, 255, 255), width=larg)
+
+
+def mapa_de_testes(area, testes, fundo):
+    """Os testes de throughput sobre a imagem da área: um ponto por teste,
+    azul na subida e laranja na descida, com o valor em Mbps. RGBA."""
+    import numpy as np
+    from rasterio import warp
+    from PIL import Image, ImageDraw
+    ts = [t for t in testes if t.get("lat") is not None and t.get("mbps") is not None]
+    if not ts:
+        return None
+    rgb = fundo["rgb"]
+    out = np.dstack([rgb, np.where(fundo["valido"], 255, 0).astype("uint8")])
+    im = Image.fromarray(out, "RGBA")
+    _desenhar_contorno(im, area, fundo)
+    dr = ImageDraw.Draw(im)
+    W, H = im.size
+    raio = max(5, round(max(W, H) / 220))
+    fonte = _fonte_pil(max(14, round(max(W, H) / 75)))
+    xs, ys = warp.transform("EPSG:4326", fundo["crs"],
+                            [t["lon"] for t in ts], [t["lat"] for t in ts])
+    inv = ~fundo["transform"]
+    for t, x, y in zip(ts, xs, ys):
+        c, l = inv * (x, y)
+        cor = COR_DESCIDA if t.get("sentido") == "recebimento" else COR_SUBIDA
+        rgbc = tuple(int(cor[i:i + 2], 16) for i in (0, 2, 4))
+        dr.ellipse([c - raio, l - raio, c + raio, l + raio], fill=rgbc + (255,),
+                   outline=(255, 255, 255, 255), width=max(1, raio // 3))
+        dr.text((c + raio + 3, l - raio - 2), f"{t['mbps']:g}", fill=(26, 26, 26, 255),
+                font=fonte, stroke_width=2, stroke_fill=(255, 255, 255, 255))
     return np.array(im)
 
 
@@ -4504,9 +4682,13 @@ GRANDEZAS_DAS_PAGINAS = (("sinal_cob", "Intensidade de Sinal (RSSI)"),
                          ("rtt", "Latência (RTT)"))
 
 
-def mapas_das_areas(amostras, areas, destino=None, aviso=None, max_px=3000):
+def mapas_das_areas(amostras, areas, destino=None, aviso=None, max_px=3000,
+                    testes=None):
     """Para cada área com imagem, cada banda e cada grandeza medida: o mapa
     sobre a imagem. Grava os GeoTIFF em `destino`/mapas (se `destino`).
+
+    `testes`: os de throughput; cada área com teste ganha também o mapa
+    deles, na chave (área, "vazao", None).
 
     Devolve ({(área, campo, banda): {"png", "imagem"}}, [arquivos gravados]).
     """
@@ -4531,6 +4713,16 @@ def mapas_das_areas(amostras, areas, destino=None, aviso=None, max_px=3000):
         if fundo is None:
             aviso(f"  ! a imagem de {area['nome']} não cobre a área")
             continue
+        ts_ar = [t for t in (testes or []) if (t.get("area") or area_do_ponto(
+            [area], t.get("lat"), t.get("lon"))) == area["nome"]]
+        if ts_ar:
+            try:
+                mt = mapa_de_testes(area, ts_ar, fundo)
+                if mt is not None:
+                    pngs[(area["nome"], "vazao", None)] = {
+                        "png": png_do_mapa(mt, fundo), "imagem": fundo["arquivo"]}
+            except Exception as e:
+                aviso(f"  ! mapa de throughput de {area['nome']} falhou: {e}")
         for b in bandas:
             am_b = ([a for a in am_ar if _norm_banda(a.get("banda")) == b]
                     if b else am_ar)
@@ -5018,6 +5210,23 @@ CREATE TABLE IF NOT EXISTS medicao_manual (
     obs       TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_manual_survey ON medicao_manual(survey_id);
+CREATE TABLE IF NOT EXISTS teste_vazao (
+    survey_id  INTEGER NOT NULL REFERENCES survey(id) ON DELETE CASCADE,
+    radio      TEXT NOT NULL,
+    ts         REAL NOT NULL,
+    lat        REAL, lon REAL,
+    area       TEXT,
+    banda      TEXT,
+    saida      TEXT,          -- vizinho por onde o rádio saía no teste
+    servidor   TEXT,          -- o outro lado do iperf3
+    sentido    TEXT,          -- 'envio' (subida) | 'recebimento' (descida)
+    modo       TEXT,          -- TCP | UDP
+    segundos   REAL,
+    mbps       REAL,          -- o que chegou do outro lado
+    mbps_enviado REAL, mbps_recebido REAL,
+    retransmissoes INTEGER, jitter_ms REAL, perda_pct REAL
+);
+CREATE INDEX IF NOT EXISTS ix_vazao_survey ON teste_vazao(survey_id);
 """
 
 
@@ -5111,6 +5320,30 @@ def amostras_gravar(con, sid, linhas):
         [tuple([sid] + [l.get(c) for c in cols]) for l in linhas])
     con.commit()
     return len(linhas)
+
+
+_COLS_VAZAO = ["radio", "ts", "lat", "lon", "area", "banda", "saida",
+               "servidor", "sentido", "modo", "segundos", "mbps",
+               "mbps_enviado", "mbps_recebido", "retransmissoes",
+               "jitter_ms", "perda_pct"]
+
+
+def vazao_gravar(con, sid, testes):
+    """Os testes de throughput da coleta (`Coleta.testes`)."""
+    if not testes:
+        return 0
+    linhas = [tuple([sid] + [dict(t, servidor=t.get("servidor_iperf",
+                                                    t.get("servidor"))).get(c)
+                             for c in _COLS_VAZAO]) for t in testes]
+    con.executemany(f"INSERT INTO teste_vazao (survey_id,{','.join(_COLS_VAZAO)}) "
+                    f"VALUES (?,{','.join('?' * len(_COLS_VAZAO))})", linhas)
+    con.commit()
+    return len(linhas)
+
+
+def vazao_listar(con, sid):
+    return [dict(r) for r in con.execute(
+        "SELECT * FROM teste_vazao WHERE survey_id=? ORDER BY ts", (sid,))]
 
 
 def survey_obter(con, sid):
@@ -5305,10 +5538,9 @@ def _milhar(n):
 # ══════════════════════════════════════════════════════════════
 # MEDIÇÕES MANUAIS — iperf e trace
 # ══════════════════════════════════════════════════════════════
-# Teste de banda não existe na BC API: as tarefas possíveis são só
-# REBOOT, INSTALL, SNAPSHOT, ZEROIZE, FCC, CTM, TRACE, CLEAR e KICK.
-# O throughput por iperf e o resultado do trace são lançados à mão; o
-# programa recebe, guarda e usa nos relatórios.
+# Lançadas à mão; o programa recebe, guarda e usa nos relatórios. O
+# throughput medido pelo próprio rádio, na coleta, é o `teste_vazao`
+# (ver "TESTES ATIVOS").
 #
 # Sem lançamento, as seções saem com os campos EM BRANCO — nunca com
 # número inventado.
@@ -5830,6 +6062,16 @@ def descobrir_malha(seeds, role="CO", senha="", porta=2300, timeout_s=6,
                     "radios": n_radios,
                     "vizinhos_com_ip": len(ips),
                     "bytes_state": len(txt or ""),
+                    # Posição e rádios: é o que a cobertura estimada usa
+                    # para a ERB/ERM (onde está, em que banda e com que
+                    # potência transmite).
+                    "lat": s.get("gps_lat") if s.get("gps_fix") else None,
+                    "lon": s.get("gps_lon") if s.get("gps_fix") else None,
+                    "alt": s.get("gps_alt") if s.get("gps_fix") else None,
+                    "wlans": [{"nome": r.get("nome"), "freq": r.get("freq"),
+                               "canal": r.get("canal"),
+                               "txpwr": r.get("txpwr") or None}
+                              for r in d.get("radios") or []],
                     "erro": None,
                 }
             return ips
@@ -6659,6 +6901,378 @@ def bc_trace(bc, destino, espera_s=3.0, registro=None):
 
 
 # ══════════════════════════════════════════════════════════════
+# TESTES ATIVOS: latência e perda (ping) e throughput (iperf3 do rádio)
+# ══════════════════════════════════════════════════════════════
+# TAREFAS QUE ESTE PROGRAMA PEDE AOS RÁDIOS: TRACE e IPERF3, e nenhuma
+# outra. A mesma mensagem (`runTask`) pede REBOOT, ZEROIZE, CLEAR, KICK,
+# INSTALL… — a ação é sempre uma constante no código, nunca parâmetro.
+TAREFAS_PERMITIDAS = ("TRACE", "IPERF3")
+
+
+def ping_icmp(ip, timeout_s=1.0):
+    """Tempo de ida e volta até `ip`, em ms, ou None se não respondeu.
+
+    Sem administrador: no Windows, pela IcmpSendEcho do sistema (a mesma
+    do ping.exe); fora dele, pelo socket ICMP sem privilégio ou, sem
+    ele, pelo comando ping."""
+    if sys.platform.startswith("win"):
+        return _ping_windows(ip, timeout_s)
+    return _ping_posix(ip, timeout_s)
+
+
+def _ping_windows(ip, timeout_s):
+    import ctypes, socket as _so
+    from ctypes import wintypes as _wt
+
+    class _OPT(ctypes.Structure):
+        _fields_ = [("Ttl", ctypes.c_ubyte), ("Tos", ctypes.c_ubyte),
+                    ("Flags", ctypes.c_ubyte), ("OptionsSize", ctypes.c_ubyte),
+                    ("OptionsData", ctypes.c_void_p)]
+
+    class _REPLY(ctypes.Structure):
+        _fields_ = [("Address", ctypes.c_ulong), ("Status", ctypes.c_ulong),
+                    ("RoundTripTime", ctypes.c_ulong),
+                    ("DataSize", ctypes.c_ushort), ("Reserved", ctypes.c_ushort),
+                    ("Data", ctypes.c_void_p), ("Options", _OPT)]
+    icmp = ctypes.windll.iphlpapi
+    icmp.IcmpCreateFile.restype = _wt.HANDLE
+    icmp.IcmpSendEcho.argtypes = [_wt.HANDLE, ctypes.c_ulong, ctypes.c_void_p,
+                                  ctypes.c_ushort, ctypes.c_void_p,
+                                  ctypes.c_void_p, _wt.DWORD, _wt.DWORD]
+    icmp.IcmpCloseHandle.argtypes = [_wt.HANDLE]
+    h = icmp.IcmpCreateFile()
+    try:
+        dado = b"site_survey" + b"\x00" * 21
+        buf = ctypes.create_string_buffer(ctypes.sizeof(_REPLY) + len(dado) + 8)
+        destino = int.from_bytes(_so.inet_aton(ip), "little")
+        n = icmp.IcmpSendEcho(h, destino, dado, len(dado), None, buf,
+                              len(buf), int(timeout_s * 1000))
+        if not n:
+            return None
+        rep = _REPLY.from_buffer_copy(buf)
+        return float(rep.RoundTripTime) if rep.Status == 0 else None
+    finally:
+        icmp.IcmpCloseHandle(h)
+
+
+def _ping_posix(ip, timeout_s):
+    import socket as _so, struct, os as _os, select
+    cru = False
+    try:
+        sk = _so.socket(_so.AF_INET, _so.SOCK_DGRAM, _so.IPPROTO_ICMP)
+    except (PermissionError, OSError):
+        try:
+            # Socket cru: só com privilégio; a resposta vem com o
+            # cabeçalho IP (20 bytes) na frente.
+            sk = _so.socket(_so.AF_INET, _so.SOCK_RAW, _so.IPPROTO_ICMP)
+            cru = True
+        except (PermissionError, OSError):
+            return _ping_comando(ip, timeout_s)
+    try:
+        corpo = b"site_survey!"                 # tamanho par
+        ident = _os.getpid() & 0xFFFF
+        cab = struct.pack("!BBHHH", 8, 0, 0, ident, 1)
+        soma = sum(struct.unpack("!%dH" % ((len(cab) + len(corpo)) // 2),
+                                 cab + corpo))
+        soma = (soma >> 16) + (soma & 0xFFFF)
+        soma += soma >> 16
+        cab = struct.pack("!BBHHH", 8, 0, ~soma & 0xFFFF, ident, 1)
+        t0 = time.perf_counter()
+        sk.sendto(cab + corpo, (ip, 0))
+        while True:
+            resto = timeout_s - (time.perf_counter() - t0)
+            if resto <= 0 or not select.select([sk], [], [], resto)[0]:
+                return None
+            pacote, quem = sk.recvfrom(1024)
+            if cru:
+                pacote = pacote[(pacote[0] & 0x0F) * 4:]
+                if quem[0] != ip or pacote[4:6] != struct.pack("!H", ident):
+                    continue
+            if pacote and pacote[0] == 0:          # echo reply
+                return round((time.perf_counter() - t0) * 1000.0, 2)
+    finally:
+        sk.close()
+
+
+def _ping_comando(ip, timeout_s):
+    import subprocess
+    try:
+        r = subprocess.run(["ping", "-c", "1", "-W", str(max(1, round(timeout_s))), ip],
+                           capture_output=True, text=True,
+                           timeout=timeout_s + 2)
+    except Exception:
+        return None
+    m = re.search(r"time[=<]\s*([\d.]+)\s*ms", r.stdout or "")
+    return float(m.group(1)) if (r.returncode == 0 and m) else None
+
+
+class Pinger:
+    """Ping contínuo e leve dos equipamentos da coleta: um pacote por
+    equipamento a cada `intervalo_s`, por poucos trabalhadores. Dá a
+    latência e a perda de cada amostra (`rtt_e_perda`) e o estado da
+    rede (`mediana_recente`), que pausa os testes de throughput quando
+    ela está carregada."""
+
+    def __init__(self, ips, intervalo_s=2.0, timeout_s=1.0, trabalhadores=8,
+                 pingar=None):
+        from collections import deque
+        self.ips = list(dict.fromkeys(ips))
+        self.intervalo = float(intervalo_s)
+        self.timeout = float(timeout_s)
+        self.n_trab = max(1, int(trabalhadores))
+        self.pingar = pingar or ping_icmp
+        self.hist = {ip: deque(maxlen=600) for ip in self.ips}
+        self.lock = threading.Lock()
+        self._fim = threading.Event()
+        self._fila = []
+        self._threads = []
+        self.enviados = 0
+        self.perdidos = 0
+
+    def iniciar(self):
+        agora = time.monotonic()
+        # Espalha os primeiros pings no intervalo: todos juntos seria uma
+        # rajada a cada ciclo.
+        n = max(1, len(self.ips))
+        self._prox = {ip: agora + self.intervalo * k / n
+                      for k, ip in enumerate(self.ips)}
+        for _ in range(min(self.n_trab, n)):
+            t = threading.Thread(target=self._trabalhar, daemon=True)
+            t.start(); self._threads.append(t)
+        return self
+
+    def parar(self):
+        # Sem esperar o ping em curso: ele termina sozinho no timeout.
+        self._fim.set()
+        for t in self._threads:
+            t.join(0.3)
+
+    def _vez(self):
+        with self.lock:
+            if not self._prox:
+                return None, 0.5
+            ip = min(self._prox, key=self._prox.get)
+            espera = self._prox[ip] - time.monotonic()
+            if espera > 0:
+                return None, min(espera, 0.5)
+            self._prox[ip] = time.monotonic() + self.intervalo
+            return ip, 0
+
+    def _trabalhar(self):
+        while not self._fim.is_set():
+            ip, espera = self._vez()
+            if ip is None:
+                self._fim.wait(espera)
+                continue
+            try:
+                rtt = self.pingar(ip, self.timeout)
+            except Exception:
+                rtt = None
+            with self.lock:
+                self.hist[ip].append((time.time(), rtt))
+                self.enviados += 1
+                if rtt is None:
+                    self.perdidos += 1
+
+    def rtt_e_perda(self, ip, ts=None, janela_s=10.0, minimo=3):
+        """(latência mediana em ms, perda em %) dos pings até `ip` nos
+        `janela_s` antes de `ts`. Com menos de `minimo` pings, (None,
+        None): pouco ping não é medição. Sem resposta nenhuma, latência
+        None e perda 100."""
+        ts = ts if ts is not None else time.time()
+        with self.lock:
+            ps = [r for t, r in self.hist.get(ip, ()) if ts - janela_s <= t <= ts + 0.5]
+        if len(ps) < minimo:
+            return None, None
+        ok = sorted(r for r in ps if r is not None)
+        perda = round((len(ps) - len(ok)) * 100.0 / len(ps), 1)
+        if not ok:
+            return None, perda
+        m = len(ok) // 2
+        med = ok[m] if len(ok) % 2 else (ok[m - 1] + ok[m]) / 2.0
+        return round(med, 1), perda
+
+    def mediana_recente(self, janela_s=30.0):
+        """Latência mediana de todos os equipamentos nos últimos
+        `janela_s`, ou None sem resposta."""
+        t0 = time.time() - janela_s
+        with self.lock:
+            ok = sorted(r for h in self.hist.values() for t, r in h
+                        if t >= t0 and r is not None)
+        return ok[len(ok) // 2] if ok else None
+
+
+class IperfIndisponivel(RuntimeError):
+    """O rádio não entregou o resultado do iperf3."""
+
+
+class IperfRecusado(IperfIndisponivel):
+    """O rádio recusou a tarefa (papel sem permissão, firmware sem
+    iperf3) — não adianta pedir de novo a este rádio."""
+
+
+class IperfOcupado(IperfIndisponivel):
+    """Outra tarefa rodando no rádio (um TRACE, ou outro cliente):
+    passageiro, tenta-se de novo mais tarde."""
+
+
+_UNID_BITS = {"": 1e-6, "K": 1e-3, "M": 1.0, "G": 1e3}
+_RX_IPERF_LINHA = re.compile(
+    r"\[\s*(?P<id>\d+|SUM)\]\s+[\d.]+-(?P<fim>[\d.]+)\s+sec\s+[\d.]+\s+[KMG]?Bytes\s+"
+    r"(?P<taxa>[\d.]+)\s+(?P<un>[KMG]?)bits/sec(?P<resto>.*)$")
+
+
+def iperf_de_texto(txt):
+    """A saída do iperf3 → {"mbps", "mbps_enviado", "mbps_recebido",
+    "retransmissoes", "jitter_ms", "perda_pct", "segundos"} ou None.
+
+    Lê o JSON (`-J`) e o texto: as linhas de resumo `sender` e
+    `receiver` (a soma [SUM] quando há várias conexões). O número do
+    laudo é o do lado que RECEBEU — o que de fato chegou."""
+    txt = (txt or "").replace("\x00", "")
+    j = None
+    if txt.lstrip().startswith("{"):
+        try:
+            j = json.loads(txt)
+        except ValueError:
+            j = None
+    if isinstance(j, dict) and isinstance(j.get("end"), dict):
+        fim = j["end"]
+        if j.get("error"):
+            return {"erro": str(j["error"])}
+        env = fim.get("sum_sent") or {}
+        rec = fim.get("sum_received") or {}
+        udp = fim.get("sum") or {}
+        def _m(d):
+            v = d.get("bits_per_second")
+            return round(v / 1e6, 2) if isinstance(v, (int, float)) else None
+        out = {"mbps_enviado": _m(env) or _m(udp), "mbps_recebido": _m(rec),
+               "retransmissoes": env.get("retransmits"),
+               "jitter_ms": udp.get("jitter_ms"),
+               "perda_pct": udp.get("lost_percent"),
+               "segundos": env.get("seconds") or udp.get("seconds")}
+        out["mbps"] = out["mbps_recebido"] if out["mbps_recebido"] is not None else out["mbps_enviado"]
+        return out if out["mbps"] is not None else None
+    erro = re.search(r"iperf3?:\s*error\s*-\s*(.+)", txt)
+    linhas = {}
+    for l in txt.splitlines():
+        m = _RX_IPERF_LINHA.search(l.strip())
+        if not m:
+            continue
+        lado = ("receiver" if "receiver" in m.group("resto")
+                else "sender" if "sender" in m.group("resto") else None)
+        if not lado:
+            continue
+        chave = (lado, m.group("id") == "SUM")
+        linhas[chave] = m          # a última (o resumo final) vale
+    def _linha(lado):
+        return linhas.get((lado, True)) or linhas.get((lado, False))
+    env, rec = _linha("sender"), _linha("receiver")
+    if not env and not rec:
+        return {"erro": erro.group(1).strip()} if erro else None
+    def _mbps(m):
+        return round(float(m.group("taxa")) * _UNID_BITS[m.group("un")], 2) if m else None
+    out = {"mbps_enviado": _mbps(env), "mbps_recebido": _mbps(rec),
+           "retransmissoes": None, "jitter_ms": None, "perda_pct": None,
+           "segundos": float((rec or env).group("fim"))}
+    if env:
+        r = re.match(r"\s*(\d+)\s+sender", env.group("resto"))
+        if r:
+            out["retransmissoes"] = int(r.group(1))
+    u = rec or env
+    mu = re.search(r"([\d.]+)\s*ms\s+(\d+)/(\d+)\s*\(([\d.]+)%\)", u.group("resto"))
+    if mu:
+        out["jitter_ms"] = float(mu.group(1))
+        out["perda_pct"] = float(mu.group(4))
+    out["mbps"] = out["mbps_recebido"] if out["mbps_recebido"] is not None else out["mbps_enviado"]
+    return out
+
+
+def bc_iperf3(bc, servidor, segundos=5, modo="TCP", reverso=False,
+              limite_mbps=0, registro=None, espera_extra_s=15.0):
+    """Throughput medido pelo PRÓPRIO rádio: a tarefa IPERF3 (o "Test
+    Performance" do BC|Commander), com este rádio de cliente e `servidor`
+    (IP de outro BreadCrumb ou de um servidor iperf3) do outro lado.
+
+    `reverso`: o servidor envia e o rádio recebe (descida). `limite_mbps`:
+    teto de taxa (0 = sem teto). Pede SÓ a tarefa IPERF3; a ação é uma
+    constante aqui, nunca um parâmetro.
+
+    A saída tem de ser DESTA tarefa: com outra tarefa no rádio, a saída
+    que volta pode ser a dela — aí sai IperfOcupado. Devolve o dict de
+    `iperf_de_texto`, mais "texto" (a saída crua)."""
+    def _reg(rotulo, msg):
+        if registro is not None:
+            registro.append((rotulo, str(msg)))
+    segundos = max(1, min(60, int(segundos)))
+
+    def montar(m):
+        m.runTask.action = type(m.runTask).IPERF3
+        cfg = m.runTask.iperf3
+        cfg.server = servidor
+        cfg.testMode = {"UDP": type(cfg).UDP, "AUTO_UDP": type(cfg).AUTO_UDP
+                        }.get(str(modo).upper(), type(cfg).TCP)
+        cfg.time = segundos
+        cfg.reverse = bool(reverso)
+        if limite_mbps:
+            cfg.bitrate = int(float(limite_mbps) * 1e6)
+    _reg("pedido runTask", f"action: IPERF3\nserver: {servidor}\nmodo: {modo}"
+                           f"\ntempo: {segundos} s\nreverso: {bool(reverso)}"
+                           f"\nlimite: {limite_mbps or 'sem'} Mbps")
+    r = bc_pedir(bc, montar, lambda r: r.HasField("runTaskResult"))
+    res = r.runTaskResult
+    _reg("runTaskResult", res)
+    if res.status == type(res).FAILURE:
+        desc = res.description or "o rádio recusou a tarefa"
+        if _RX_OCUPADO.search(desc):
+            raise IperfOcupado(desc)
+        raise IperfRecusado(desc)
+    tid = res.id if res.HasField("id") else None
+    # O teste dura `segundos`; perguntar antes disso só gasta a malha.
+    time.sleep(segundos)
+    prazo = time.monotonic() + espera_extra_s
+    dados, pos, ultimo = b"", 0, None
+    while True:
+        def montar_saida(m, pos=pos):
+            m.taskOutputRequest.position = pos
+            if tid is not None:
+                m.taskOutputRequest.id = tid
+        r = bc_pedir(bc, montar_saida, lambda r: r.HasField("taskOutputResponse"))
+        o = r.taskOutputResponse
+        _reg(f"taskOutputResponse (posição {pos})",
+             f"status: {type(o).Status.Name(o.status) if o.HasField('status') else '?'}"
+             f"\nbytes: {len(o.data)}")
+        ultimo = o
+        if tid is not None and o.HasField("id") and o.id and o.id != tid:
+            raise IperfOcupado(f"a saída devolvida é da tarefa {o.id}, não "
+                               f"da nossa ({tid}): outra tarefa no rádio")
+        if o.status == type(o).FRAGMENT:
+            dados += o.data
+            pos = o.position or (pos + len(o.data))
+            continue
+        if o.status == type(o).SUCCESS:
+            dados += o.data
+            break
+        if time.monotonic() >= prazo:
+            raise IperfIndisponivel("resultado do iperf3 indisponível: "
+                                    + type(o).Status.Name(o.status))
+        time.sleep(0.5)
+    compressao = (ultimo.output.compression
+                  if ultimo is not None and ultimo.HasField("output")
+                  and ultimo.output.HasField("compression") else None)
+    texto = _descomprimir_saida(dados, compressao).decode("utf-8", "replace")
+    _reg("saída (texto)", texto.replace("\x00", ""))
+    t = iperf_de_texto(texto)
+    if t is None or t.get("erro"):
+        dito = " ".join(texto.replace("\x00", "").split())
+        raise IperfIndisponivel(
+            (f"iperf3: {t['erro']}" if t and t.get("erro")
+             else f"saída do iperf3 sem resultado: {dito[:160]!r}"))
+    t["texto"] = texto.replace("\x00", "")
+    return t
+
+
+# ══════════════════════════════════════════════════════════════
 # IDENTIDADE ANGLO AMERICAN
 # Extraída do Dashboard_Transporte que o cliente forneceu: as medidas
 # abaixo são as DELE, não aproximações — logo, título e régua caem nos
@@ -6802,6 +7416,8 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None, mapas=None):
         am = survey_amostras(con, sid)
         try:    mn = manual_listar(con, sid)
         except Exception: mn = []
+        try:    tv = vazao_listar(con, sid)
+        except Exception: tv = []
     finally:
         con.close()
     if not am:
@@ -6921,8 +7537,25 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None, mapas=None):
           + (f": próximo salto até {sv['destino_trace']}"
              if sv.get("destino_trace") else ""))
          if tem_saida else "não identificado (sem trace)"],
-        ["Grandezas não medidas", "latência e perda de pacotes"],
     ]
+    tem_rtt = any(a.get("rtt") is not None for a in am)
+    tem_perda = any(a.get("perda") is not None for a in am)
+    if tem_rtt or tem_perda:
+        ficha.append(["Latência e perda",
+                      "ping do computador da coleta até cada equipamento; "
+                      "cada amostra leva a mediana e a perda dos pings dos "
+                      "10 s anteriores"])
+    if tv:
+        t0 = tv[0]
+        ficha.append(["Throughput",
+                      f"iperf3 do próprio rádio até {t0.get('servidor') or '?'} · "
+                      f"{t0.get('modo') or 'TCP'} {(t0.get('segundos') or 0):g} s · "
+                      f"{len(tv)} teste{'s' if len(tv) != 1 else ''}, um por vez "
+                      f"na malha"])
+    nao = [n for ok, n in ((tem_rtt, "latência"), (tem_perda, "perda de pacotes"),
+                           (bool(tv), "throughput")) if not ok]
+    if nao:
+        ficha.append(["Grandezas não medidas", ", ".join(nao)])
     if nomes_area:
         ficha.insert(4, [
             "Áreas demarcadas",
@@ -7102,15 +7735,63 @@ def ppt_survey_anglo(sid, cfg=None, bandas=None, sitios=None, mapas=None):
     # ── Molduras para o print do Google Earth ──
     # Com áreas demarcadas, as páginas saem por área (abaixo); sem elas,
     # do survey inteiro.
+    def _pagina_vazao(tv_x, area=None):
+        """Os testes de throughput: o mapa (sobre a imagem da área, quando
+        há) e os números. Sem requisito de throughput no contrato, nada
+        aqui é "dentro" ou "fora" — só o medido."""
+        if not tv_x:
+            return []
+        t0 = tv_x[0]
+        s = slide_anglo(p, (f"{area} · " if area else "") + "Throughput (iperf3)",
+                        f"Medido pelo próprio rádio até {t0.get('servidor') or '?'}"
+                        f"  ·  {t0.get('modo') or 'TCP'}, "
+                        f"{(t0.get('segundos') or 0):g} s por teste")
+        sub = [t["mbps"] for t in tv_x if t.get("sentido") != "recebimento"]
+        des = [t["mbps"] for t in tv_x if t.get("sentido") == "recebimento"]
+        def _med(v):
+            v = sorted(v)
+            return f"{v[len(v) // 2]:g} Mbps" if v else "—"
+        mapa = (mapas or {}).get((area, "vazao", None))
+        ordem = sorted(tv_x, key=lambda t: t["mbps"])
+        if mapa:
+            _mapa_anglo(s, 0.55, 1.45, 7.3, 5.4, mapa["png"],
+                        f"Imagem: {mapa['imagem']}   ·   azul: subida   ·   "
+                        f"laranja: descida   ·   valor em Mbps")
+            x_t, w_t, lin_max = 8.05, 4.75, 6
+        else:
+            x_t, w_t, lin_max = 0.55, 7.3, 14
+        y = 1.45
+        for k, (rot, val) in enumerate((("Testes", str(len(tv_x))),
+                                        ("Mediana — subida", _med(sub)),
+                                        ("Mediana — descida", _med(des)),
+                                        ("Menor resultado", f"{ordem[0]['mbps']:g} Mbps"))):
+            _cartao_anglo(s, 8.05 + (k % 2) * 2.45, y + (k // 2) * 0.9, 2.3, 0.8,
+                          rot, val)
+        linhas = [[t.get("radio") or "—",
+                   datetime.fromtimestamp(t["ts"]).strftime("%H:%M") if t.get("ts") else "—",
+                   "descida" if t.get("sentido") == "recebimento" else "subida",
+                   f"{t['mbps']:g}", t.get("saida") or "—"]
+                  for t in ordem[:lin_max]]
+        _txt_anglo(s, x_t, 3.4 if mapa else 1.45, w_t, 0.3,
+                   "Os menores resultados" if len(tv_x) > lin_max else "Testes",
+                   10.5, True, ANGLO["texto"])
+        _tabela_anglo(s, x_t, 3.75 if mapa else 1.8, w_t,
+                      ["Equipamento", "Hora", "Sentido", "Mbps", "Saía por"],
+                      linhas, tam=9)
+        return [s]
+
     secoes = {}
     if not nomes_area:
         _paginas(am)
+        _pagina_vazao(tv)
     else:
         _resumo_por_area(p, am, nomes_area, bandas, info_ar)
         for nome_ar in nomes_area:
             am_ar = [a for a in am if a.get("area") == nome_ar]
             cab = _abertura_da_area(p, nome_ar, am_ar, bandas)
             pags = _paginas(am_ar, area=nome_ar)
+            pags += _pagina_vazao([t for t in tv if t.get("area") == nome_ar],
+                                  area=nome_ar)
             _indice_da_area(cab, pags, nome_ar)
             for sl in pags:
                 secoes[sl.slide_id] = cab

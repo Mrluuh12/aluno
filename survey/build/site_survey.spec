@@ -37,6 +37,8 @@ try:
     from PyInstaller.utils.hooks import collect_data_files, collect_submodules
     datas += collect_data_files("rasterio")
     rio_mods = collect_submodules("rasterio")
+    # Terreno LAS/LAZ da cobertura estimada: laspy e o descompressor LAZ.
+    rio_mods += collect_submodules("laspy") + ["lazrs"]
 except Exception:
     pass
 
@@ -59,7 +61,7 @@ a = Analysis(
     hiddenimports=["rajant_api", "rajant_api.Common_pb2",
                    "rajant_api.Message_pb2", "rajant_api.State_pb2",
                    "google.protobuf.text_format",
-                   "coleta_rajant", "survey_meshmapper",
+                   "coleta_rajant", "survey_meshmapper", "cobertura_estimada",
                    "motor_survey",
                    "tkinter", "tkinter.ttk", "tkinter.filedialog",
                    "tkinter.messagebox", "tkinter.constants",
