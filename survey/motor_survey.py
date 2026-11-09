@@ -7234,6 +7234,57 @@ def iperf_de_texto(txt):
     return out
 
 
+def iperf_de_proto(dados, segundos=None, modo="TCP"):
+    """A saída da tarefa IPERF3 como o rádio de fato a devolve: a mensagem
+    `Iperf3Result` do Common.proto da rajant-api, e não o texto do iperf3
+    (CA-1017, 09/11/2026: 68 bytes binários com os dois IPs no começo).
+
+        sender, receiver   IP de quem enviou e de quem recebeu
+        latency            float; o .proto não diz a unidade
+        bcUtilization      uint32; idem
+        sendresults,       Result de cada lado: bps (bits/s), retransmits,
+        receiveresults     jitter, packetLossPercent, coreUtilization
+
+    Devolve o mesmo dict de `iperf_de_texto`, ou None se os bytes não são
+    um Iperf3Result com taxa. Jitter e perda só em UDP e retransmissões
+    só em TCP: o que o modo não mede fica None, não 0."""
+    try:
+        from rajant_api import Common_pb2
+    except ImportError:
+        return None
+    if not dados:
+        return None
+    r = Common_pb2.Iperf3Result()
+    try:
+        r.ParseFromString(bytes(dados))
+    except Exception:
+        return None
+    lados = {c: getattr(r, c) for c in ("sendresults", "receiveresults")
+             if r.HasField(c) and getattr(r, c).HasField("bps")}
+    if not lados:
+        return None
+
+    def _v(campo_lado, campo, casas):
+        x = lados.get(campo_lado)
+        return round(float(getattr(x, campo)), casas) if x is not None and x.HasField(campo) else None
+    udp = str(modo).upper() in ("UDP", "AUTO_UDP")
+    env = _v("sendresults", "bps", 0)
+    rec = _v("receiveresults", "bps", 0)
+    out = {"mbps_enviado": None if env is None else round(env / 1e6, 2),
+           "mbps_recebido": None if rec is None else round(rec / 1e6, 2),
+           "retransmissoes": None if udp else (
+               lados["sendresults"].retransmits
+               if "sendresults" in lados and lados["sendresults"].HasField("retransmits")
+               else None),
+           "jitter_ms": _v("receiveresults", "jitter", 3) if udp else None,
+           "perda_pct": _v("receiveresults", "packetLossPercent", 2) if udp else None,
+           "segundos": segundos,
+           "origem": r.sender or None, "destino": r.receiver or None,
+           "latencia": round(float(r.latency), 2) if r.HasField("latency") else None}
+    out["mbps"] = out["mbps_recebido"] if out["mbps_recebido"] is not None else out["mbps_enviado"]
+    return out
+
+
 def bc_iperf3(bc, servidor, segundos=5, modo="TCP", reverso=False,
               limite_mbps=0, registro=None, espera_extra_s=15.0):
     """Throughput medido pelo PRÓPRIO rádio: a tarefa IPERF3 (o "Test
@@ -7303,10 +7354,24 @@ def bc_iperf3(bc, servidor, segundos=5, modo="TCP", reverso=False,
             raise IperfIndisponivel("resultado do iperf3 indisponível: "
                                     + type(o).Status.Name(o.status))
         time.sleep(0.5)
-    compressao = (ultimo.output.compression
-                  if ultimo is not None and ultimo.HasField("output")
-                  and ultimo.output.HasField("compression") else None)
-    texto = _descomprimir_saida(dados, compressao).decode("utf-8", "replace")
+    saida = ultimo.output if ultimo is not None and ultimo.HasField("output") else None
+    compressao = (saida.compression if saida is not None
+                  and saida.HasField("compression") else None)
+    bruto = _descomprimir_saida(dados, compressao)
+    # O firmware devolve um Iperf3Result (protobuf). Só se o rádio disser
+    # que é TEXTO a saída vai direto para o leitor de texto/JSON.
+    eh_texto = (saida is not None and saida.HasField("content")
+                and saida.content == type(saida).TEXT)
+    t = None if eh_texto else iperf_de_proto(bruto, segundos, modo)
+    if t is not None:
+        from google.protobuf import text_format
+        from rajant_api import Common_pb2
+        msg = Common_pb2.Iperf3Result(); msg.ParseFromString(bruto)
+        texto = text_format.MessageToString(msg, as_utf8=True)
+        _reg("saída (Iperf3Result)", texto)
+        t["texto"] = texto
+        return t
+    texto = bruto.decode("utf-8", "replace")
     _reg("saída (texto)", texto.replace("\x00", ""))
     t = iperf_de_texto(texto)
     if t is None or t.get("erro"):

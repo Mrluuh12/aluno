@@ -4299,7 +4299,10 @@ class _RadioBCAPI:
                     r.runTaskResult.status = r.runTaskResult.FAILURE
                     r.runTaskResult.description = self.recusa_iperf
                 else:
-                    saida = gzip.compress(self.saida_iperf.encode())
+                    # bytes = o Iperf3Result cru, como o rádio devolve;
+                    # texto = a saída do iperf3, em gzip.
+                    saida = (self.saida_iperf if isinstance(self.saida_iperf, bytes)
+                             else gzip.compress(self.saida_iperf.encode()))
                     tam = max(1, -(-len(saida) // self.fragmentos))
                     partes = [saida[i:i + tam] for i in range(0, len(saida), tam)]
                     r.runTaskResult.status = r.runTaskResult.SUCCESS
@@ -6517,6 +6520,44 @@ class TestIperfNoRadio(_ComBCAPIReal, unittest.TestCase):
         with self.assertRaises(rm.IperfOcupado):
             rm.bc_iperf3(_bc_de_teste(_RadioBCAPI(id_saida=99)), "10.0.0.1",
                          segundos=1)
+
+    @staticmethod
+    def _iperf3result(udp=False):
+        """Um Iperf3Result como o do CA-1017 (09/11/2026): binário, com os
+        dois IPs no começo — e não o texto do iperf3."""
+        from rajant_api import Common_pb2
+        r = Common_pb2.Iperf3Result()
+        r.sender, r.receiver = "10.188.99.17", "10.188.96.140"
+        r.latency, r.bcUtilization = 12.5, 25
+        r.sendresults.bps = 48.3e6
+        r.receiveresults.bps = 47.9e6
+        if udp:
+            r.receiveresults.jitter, r.receiveresults.packetLossPercent = 1.2, 0.5
+        else:
+            r.sendresults.retransmits = 7
+        return r.SerializeToString()
+
+    def test_resultado_em_protobuf_como_o_radio_devolve(self):
+        reg = []
+        r = rm.bc_iperf3(_bc_de_teste(_RadioBCAPI(saida_iperf=self._iperf3result())),
+                         "10.188.96.140", segundos=1, registro=reg)
+        self.assertEqual((r["mbps"], r["mbps_enviado"], r["mbps_recebido"]), (47.9, 48.3, 47.9))
+        self.assertEqual(r["retransmissoes"], 7)
+        # TCP não mede jitter nem perda: None, e não 0.
+        self.assertEqual((r["jitter_ms"], r["perda_pct"]), (None, None))
+        self.assertEqual((r["origem"], r["destino"], r["segundos"]),
+                         ("10.188.99.17", "10.188.96.140", 1))
+        self.assertIn('sender: "10.188.99.17"', r["texto"])
+        self.assertIn("saída (Iperf3Result)", [rot for rot, _ in reg])
+
+    def test_resultado_em_protobuf_udp_traz_jitter_e_perda(self):
+        r = rm.bc_iperf3(_bc_de_teste(_RadioBCAPI(saida_iperf=self._iperf3result(udp=True))),
+                         "10.188.96.140", segundos=1, modo="UDP")
+        self.assertEqual((r["jitter_ms"], r["perda_pct"], r["retransmissoes"]), (1.2, 0.5, None))
+
+    def test_texto_do_iperf3_nao_passa_por_protobuf(self):
+        self.assertIsNone(rm.iperf_de_proto(SAIDA_IPERF_TCP.encode()))
+        self.assertIsNone(rm.iperf_de_proto(b""))
 
     def test_saida_sem_resultado_explica(self):
         with self.assertRaises(rm.IperfIndisponivel) as ctx:

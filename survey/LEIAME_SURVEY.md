@@ -337,9 +337,12 @@ Não há requisito de throughput no contrato, então nada ali é "dentro" ou
 
 **Testar iperf** (botão ao lado) faz um teste num rádio selecionado na
 lista e grava `teste_iperf_<ip>_<data>.txt` com tudo o que o rádio
-respondeu, inclusive a saída crua do iperf3. O formato dessa saída é o
-que falta confirmar no campo: mande o arquivo do primeiro teste. Pela
-linha de comando:
+respondeu. O rádio **não** devolve o texto do iperf3: devolve a mensagem
+`Iperf3Result` da rajant-api (confirmado no CA-1017 em 09/11/2026) —
+quem enviou e quem recebeu, a taxa (bits/s), retransmissões, jitter e
+perda de cada lado, mais latência e utilização. O arquivo mostra essa
+mensagem já legível. Jitter e perda só valem em UDP e retransmissões só
+em TCP: o que o modo não mede fica vazio, não zero. Pela linha de comando:
 
 ```
 site_survey.exe --testar-iperf 10.188.99.6 --iperf-servidor 10.188.96.30 --senha <senha>
