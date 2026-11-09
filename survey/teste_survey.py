@@ -6950,6 +6950,63 @@ class TestCoberturaEstimada(unittest.TestCase):
         self.assertAlmostEqual(setor[0][3], omni[0][3], delta=0.5)
         self.assertAlmostEqual(omni[1][3] - setor[1][3], 20.0, delta=0.5)
 
+    def test_abertura_vertical_atenua_quem_esta_muito_abaixo(self):
+        # Mastro de 60 m em terreno plano. A 50 m o veículo está ~48° abaixo
+        # da antena, fora do feixe de 15°: 20 dB a menos. A 600 m, ~5,3°
+        # abaixo, dentro dele: 12·(5,3/15)² = 1,5 dB.
+        las = _las_sintetico(self.tmp / "plano.las", -50, 760, crista=None)
+        mos = self.ce.mosaico([las])
+        med = [("ERM-08 PTP CAM", "5.8 GHz", *self._xy(mos, x), -60.0) for x in (150, 700)]
+        res = {}
+        for nome, kw in (("omni", {}), ("vert", {"abertura_vertical": 15}),
+                         ("incl", {"abertura_vertical": 15, "inclinacao": 5})):
+            _, pares, usados = self.ce.estimar(mos, [self._tx(altura_m=60, **kw)],
+                                               ["5.8 GHz"], self.ce.PADROES, med)
+            res[nome] = [p[3] for p in pares]
+        self.assertAlmostEqual(res["omni"][0] - res["vert"][0], 20.0, delta=0.5)
+        self.assertAlmostEqual(res["omni"][1] - res["vert"][1], 1.5, delta=0.5)
+        # Inclinado 5° para baixo, o feixe aponta para quem está a 600 m.
+        self.assertAlmostEqual(res["omni"][1] - res["incl"][1], 0.0, delta=0.3)
+        self.assertEqual(usados[0]["abertura_v_usada"], 15)
+
+    def test_meia_abertura_vertical_perde_3_db(self):
+        self.assertEqual(list(self.ce.perda_vertical_db([0, -7.5, 7.5, -60], 15)),
+                         [0.0, 3.0, 3.0, 20.0])
+
+    def test_planilha_com_abertura_vertical_e_potencia_por_banda(self):
+        cam = self.tmp / "infra.csv"
+        cam.write_text(";".join(self.ce.COLUNAS_INFRA) + "\n"
+                       "ERM-08 PTP CAM;-18,92;-43,42;6;24;;20;6;;;;;15;;\n",
+                       encoding="utf-8-sig")
+        l = self.ce.ler_infraestrutura(cam)
+        self.assertEqual((l[0]["abertura_vertical"], l[0]["potencia_banda"]),
+                         (15.0, {"5.8 GHz": 20.0}))
+        t = self.ce.transmissores(None, l)[0]
+        # A coluna da banda vale mais que a geral; a geral fica para a outra.
+        self.assertEqual(t["potencia"], {"2.4 GHz": 24.0, "5.8 GHz": 20.0})
+        self.assertEqual(t["abertura_vertical"], 15.0)
+
+    def test_nome_com_espaco_no_fim_e_a_mesma_erb(self):
+        # O BC|Commander guarda "ERB-02 " (com espaço); a planilha, "ERB-02".
+        # Antes viravam duas ERB no cálculo, uma sem altura e outra sem GPS.
+        cam = self.tmp / "infra.csv"
+        cam.write_text("nome;lat;lon;altura_m;potencia_24_dbm;potencia_58_dbm\n"
+                       "ERB-02;;;8;;\n"
+                       "ERM-17;-18,5;-43,5;6;;\n", encoding="utf-8-sig")
+        malha = {"10.1": {"nome": "ERB-02 ", "lat": -18.9, "lon": -43.4,
+                          "wlans": [{"freq": 2437, "txpwr": 21}, {"freq": 5825, "txpwr": 29}]},
+                 "10.2": {"nome": "ERM-17", "lat": -18.0, "lon": -43.0}}
+        t = self.ce.transmissores(malha, self.ce.ler_infraestrutura(cam))
+        self.assertEqual([(x["nome"], x["altura_m"], x["lat"]) for x in t],
+                         [("ERB-02", 8.0, -18.9), ("ERM-17", 6.0, -18.5)])
+        # A busca preenche o que está vazio e não toca no que foi digitado.
+        self.assertEqual(self.ce.completar_infraestrutura(cam, malha), 0)
+        l = self.ce.ler_infraestrutura(cam)
+        self.assertEqual([(x["nome"], x["lat"], x["potencia_banda"]) for x in l],
+                         [("ERB-02", -18.9, {"2.4 GHz": 21.0, "5.8 GHz": 29.0}),
+                          ("ERM-17", -18.5, {})])
+        self.assertEqual(l[0]["altura_m"], 8.0)
+
     def test_correcao_grande_demais_e_rejeitada(self):
         # +40 dB não é ganho de antena: é ERB/ERM no lugar errado, ou
         # altura ou potência erradas. Não se aplica, e o deck diz.
@@ -7012,6 +7069,20 @@ class TestCoberturaEstimada(unittest.TestCase):
         self.assertEqual([(x["nome"], x["altura_m"]) for x in l],
                          [("ERM-08", 12.0), ("ERM-28 PTP", None)])
 
+    def test_planilha_salva_pelo_excel_em_windows_1252(self):
+        # "CSV (separado por vírgulas)" do Excel no Windows grava em
+        # Windows-1252, sem BOM. Um acento no nome derrubava a leitura.
+        cam = self.tmp / "infra.csv"
+        cam.write_bytes("nome;lat;lon;altura_m\n"
+                        "ERB-02 Britagem Pátio;-18,92;-43,42;9,5\n".encode("cp1252"))
+        l = self.ce.ler_infraestrutura(cam)
+        self.assertEqual((l[0]["nome"], l[0]["altura_m"]), ("ERB-02 Britagem Pátio", 9.5))
+        # E o que a busca acrescenta sai na mesma codificação do arquivo.
+        self.assertEqual(self.ce.completar_infraestrutura(cam, None, {"ERM-28 Expansão"}), 1)
+        self.assertEqual([x["nome"] for x in self.ce.ler_infraestrutura(cam)],
+                         ["ERB-02 Britagem Pátio", "ERM-28 Expansão"])
+        cam.read_bytes().decode("cp1252")
+
     def test_busca_completa_a_planilha_sem_apagar_nada(self):
         cam = self.tmp / "infra.csv"
         malha = {"10.188.97.80": {"nome": "ERM-08 PTP CAM", "lat": -18.92, "lon": -43.42,
@@ -7019,7 +7090,8 @@ class TestCoberturaEstimada(unittest.TestCase):
                  "10.188.99.6": {"nome": "CA-1006", "lat": -18.9, "lon": -43.4}}
         self.assertEqual(self.ce.completar_infraestrutura(cam, malha, {"ERM-28 PTP"}), 2)
         txt = cam.read_text(encoding="utf-8-sig")
-        self.assertIn("ERM-08 PTP CAM;-18,9200000;-43,4200000;;23", txt)
+        # Potência na coluna da banda (5785 MHz → 5,8 GHz), não na geral.
+        self.assertIn("ERM-08 PTP CAM;-18,9200000;-43,4200000;;;;23", txt)
         self.assertNotIn("CA-1006", txt)              # veículo não é ERB/ERM
         # A altura preenchida à mão fica; a busca de novo não duplica.
         cam.write_text(txt.replace("ERM-08 PTP CAM;-18,9200000;-43,4200000;;",

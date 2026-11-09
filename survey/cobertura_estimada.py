@@ -17,6 +17,10 @@ O modelo, em cada ponto:
     da ERB/ERM e a do veículo (gume de faca, ITU-R P.526), com a
     curvatura da Terra (k = 4/3);
   • setor com azimute e abertura, quando informados;
+  • diagrama VERTICAL da antena da ERB/ERM, quando a abertura vertical é
+    informada: 12·((elevação + inclinação)/abertura)², até 20 dB
+    (3GPP TR 36.814). Numa cava pesa muito: o veículo dez bancadas abaixo
+    da ERM, perto dela, está fora do feixe de uma omni de 15°;
   • a correção é a mediana de (medido − estimado) nas leituras do survey
     em que os veículos ouviram aquela banda das ERB/ERM — o que absorve
     ganho de antena e perda de cabo que ninguém informou. O que sobra
@@ -48,11 +52,26 @@ PADROES = {
     "k": 4.0 / 3.0,          # raio efetivo da Terra
     "min_calibracao": 20,    # leituras para calibrar uma banda
     "max_correcao_db": 15.0, # correção maior que isto não é calibração: é dado errado
+    # Diagrama vertical da antena da ERB/ERM. 0 = não considerado (antena
+    # vista igual em qualquer elevação), que era o comportamento antes.
+    "abertura_vertical_graus": 0.0,
+    "inclinacao_graus": 0.0,          # para baixo é positivo
+    "atenuacao_vertical_max_db": 20.0,
 }
 FREQ_MHZ = {"2.4 GHz": 2437.0, "5.8 GHz": 5785.0}
 COLUNAS_INFRA = ["nome", "lat", "lon", "altura_m", "potencia_dbm",
-                 "ganho_dbi", "perda_cabo_db", "banda", "azimute",
-                 "abertura", "proposta"]
+                 "potencia_24_dbm", "potencia_58_dbm", "ganho_dbi",
+                 "perda_cabo_db", "banda", "azimute", "abertura",
+                 "abertura_vertical", "inclinacao", "proposta"]
+# Coluna de potência de uma banda só, e a banda dela.
+_POT_BANDA = {"potencia_24_dbm": "2.4 GHz", "potencia_58_dbm": "5.8 GHz"}
+
+
+def _chave(nome):
+    """O nome para comparar. O rádio informa o nome como foi digitado no
+    BC|Commander — "ERB-02 " com espaço no fim — e a planilha o grava sem:
+    comparando cru, a mesma ERB entrava duas vezes no cálculo."""
+    return (nome or "").strip().casefold()
 
 
 def e_las(caminho):
@@ -338,6 +357,17 @@ def _num(v):
         return None
 
 
+def _texto_da_planilha(p):
+    """(texto, codificação) do CSV. O programa grava em UTF-8, mas o Excel
+    do Windows, no "CSV (separado por vírgulas)", salva em Windows-1252:
+    lido como UTF-8, qualquer acento derrubava a leitura."""
+    dados = Path(p).read_bytes()
+    try:
+        return dados.decode("utf-8-sig"), "utf-8"
+    except UnicodeDecodeError:
+        return dados.decode("cp1252", errors="replace"), "cp1252"
+
+
 def ler_infraestrutura(caminho):
     """A planilha das ERB/ERM (`infraestrutura.csv`, separada por ";" ou
     ","): nome, lat, lon, altura do mastro, potência, ganho, perda de
@@ -346,7 +376,7 @@ def ler_infraestrutura(caminho):
     p = Path(caminho)
     if not p.exists():
         return []
-    txt = p.read_text(encoding="utf-8-sig")
+    txt, _cod = _texto_da_planilha(p)
     sep = ";" if txt.count(";") >= txt.count(",") else ","
     linhas = []
     for r in csv.DictReader(txt.splitlines(), delimiter=sep):
@@ -361,62 +391,104 @@ def ler_infraestrutura(caminho):
             "nome": nome, "lat": _num(r.get("lat")), "lon": _num(r.get("lon")),
             "altura_m": _num(r.get("altura_m")),
             "potencia_dbm": _num(r.get("potencia_dbm")),
+            "potencia_banda": {b: _num(r.get(c)) for c, b in _POT_BANDA.items()
+                               if _num(r.get(c)) is not None},
             "ganho_dbi": _num(r.get("ganho_dbi")),
             "perda_cabo_db": _num(r.get("perda_cabo_db")),
             "banda": rm._norm_banda(r.get("banda")) if r.get("banda") else None,
             "azimute": _num(r.get("azimute")), "abertura": _num(r.get("abertura")),
+            "abertura_vertical": _num(r.get("abertura_vertical")),
+            "inclinacao": _num(r.get("inclinacao")),
             "proposta": (r.get("proposta") or "").lower() in ("sim", "s", "1", "x", "yes"),
         })
     return linhas
 
 
+def _potencia_por_banda(wlans):
+    """{banda: maior potência de TX} das interfaces informadas pela busca."""
+    pot = {}
+    for w in wlans or []:
+        b = rm._norm_banda(w.get("freq")) if w.get("freq") else None
+        if b and w.get("txpwr"):
+            pot[b] = max(pot.get(b, -999.0), float(w["txpwr"]))
+    return pot
+
+
 def completar_infraestrutura(caminho, malha=None, nomes=None):
     """Acrescenta à planilha as ERB/ERM que a busca achou (com a posição
-    do GPS delas) e as que o survey ouviu, sem mexer no que já estiver
-    preenchido. Cria a planilha se ela não existir. Devolve quantas
-    entraram."""
+    do GPS delas e a potência de cada banda) e as que o survey ouviu. Nas
+    linhas que já existem, só preenche o que estiver VAZIO — posição e
+    potência por banda —; o que alguém digitou fica. Cria a planilha se
+    ela não existir. Devolve quantas linhas entraram."""
     p = Path(caminho)
-    existentes = {l["nome"].casefold() for l in ler_infraestrutura(p)}
-    rx = re.compile(rm.PADRAO_INFRA, re.I)
-    novas = []
-    for ip, v in (malha or {}).items():
-        n = (v or {}).get("nome")
-        if not n or n == ip or not rx.search(n) or n.casefold() in existentes:
-            continue
-        existentes.add(n.casefold())
-        pot = [w.get("txpwr") for w in (v.get("wlans") or []) if w.get("txpwr")]
-        novas.append({"nome": n, "lat": v.get("lat"), "lon": v.get("lon"),
-                      "potencia_dbm": max(pot) if pot else None})
-    for n in sorted(nomes or []):
-        if n and rx.search(n) and n.casefold() not in existentes:
-            existentes.add(n.casefold())
-            novas.append({"nome": n})
-    if not novas:
-        return 0
-    txt = p.read_text(encoding="utf-8-sig") if p.exists() else ""
+    txt, cod = _texto_da_planilha(p) if p.exists() else ("", "utf-8")
     novo = not txt.strip()
     # Segue o cabeçalho e o separador que a planilha já tem: quem a editou
     # pode ter tirado colunas.
     if novo:
-        sep, cols = ";", COLUNAS_INFRA
+        sep, cols, linhas = ";", list(COLUNAS_INFRA), []
     else:
         prim = txt.splitlines()[0]
         sep = ";" if prim.count(";") >= prim.count(",") else ","
-        cols = [c.strip().lower() for c in prim.split(sep)]
+        todas = list(csv.reader(txt.splitlines(), delimiter=sep))
+        cols = [c.strip().lower() for c in todas[0]]
+        linhas = [l for l in todas[1:] if any(x.strip() for x in l)]
     dec = (lambda v: f"{v:.7f}".replace(".", ",")) if sep == ";" else (lambda v: f"{v:.7f}")
-    with open(p, "a", encoding="utf-8-sig" if novo else "utf-8", newline="") as fh:
-        if not novo and not txt.endswith("\n"):
-            fh.write("\n")
-        w = csv.writer(fh, delimiter=sep)
-        if novo:
-            w.writerow(cols)
-        for r in novas:
-            val = {"nome": r.get("nome"),
-                   "lat": "" if r.get("lat") is None else dec(r["lat"]),
-                   "lon": "" if r.get("lon") is None else dec(r["lon"]),
-                   "potencia_dbm": "" if r.get("potencia_dbm") is None
-                   else f"{r['potencia_dbm']:g}"}
-            w.writerow([val.get(c, "") for c in cols])
+    tem_banda = any(c in cols for c in _POT_BANDA)
+
+    rx = re.compile(rm.PADRAO_INFRA, re.I)
+    achadas = {}
+    for ip, v in (malha or {}).items():
+        n = ((v or {}).get("nome") or "").strip()
+        if n and n != ip and rx.search(n):
+            achadas[_chave(n)] = dict(v, nome=n)
+
+    def valores(v):
+        """Os campos que a busca sabe, já no formato da planilha."""
+        pot = _potencia_por_banda(v.get("wlans"))
+        out = {"nome": v["nome"],
+               "lat": "" if v.get("lat") is None else dec(v["lat"]),
+               "lon": "" if v.get("lon") is None else dec(v["lon"])}
+        if tem_banda:
+            for c, b in _POT_BANDA.items():
+                out[c] = f"{pot[b]:g}" if b in pot else ""
+        elif pot:
+            out["potencia_dbm"] = f"{max(pot.values()):g}"
+        return out
+
+    mudou = False
+    i_nome = cols.index("nome") if "nome" in cols else 0
+    existentes = set()
+    for l in linhas:
+        l += [""] * (len(cols) - len(l))
+        k = _chave(l[i_nome])
+        existentes.add(k)
+        if k not in achadas:
+            continue
+        for c, v in valores(achadas[k]).items():
+            if c != "nome" and v and c in cols and not l[cols.index(c)].strip():
+                l[cols.index(c)] = v
+                mudou = True
+    novas = []
+    for k, v in achadas.items():
+        if k not in existentes:
+            existentes.add(k)
+            novas.append(valores(v))
+    for n in sorted(nomes or []):
+        n = (n or "").strip()
+        if n and rx.search(n) and _chave(n) not in existentes:
+            existentes.add(_chave(n))
+            novas.append({"nome": n})
+    if not novas and not mudou:
+        return 0
+    linhas += [[r.get(c, "") for c in cols] for r in novas]
+    # Regrava na codificação que o arquivo já tem: misturar as duas
+    # deixaria metade dos acentos trocados.
+    with open(p, "w", encoding="utf-8-sig" if cod == "utf-8" else cod,
+              newline="", errors="replace") as fh:
+        w = csv.writer(fh, delimiter=sep, lineterminator="\r\n")
+        w.writerow(cols)
+        w.writerows(linhas)
     return len(novas)
 
 
@@ -428,25 +500,22 @@ def transmissores(malha=None, infra=None, prm=None):
     rx = re.compile(rm.PADRAO_INFRA, re.I)
     da_malha = {}
     for ip, v in (malha or {}).items():
-        n = (v or {}).get("nome")
+        n = ((v or {}).get("nome") or "").strip()
         if n and n != ip and rx.search(n):
-            pot = {}
-            for w in v.get("wlans") or []:
-                b = rm._norm_banda(w.get("freq")) if w.get("freq") else None
-                if b and w.get("txpwr"):
-                    pot[b] = max(pot.get(b, -999), float(w["txpwr"]))
-            da_malha[n.casefold()] = {"nome": n, "lat": v.get("lat"),
-                                      "lon": v.get("lon"), "alt": v.get("alt"),
-                                      "potencia": pot}
+            da_malha[_chave(n)] = {"nome": n, "lat": v.get("lat"),
+                                   "lon": v.get("lon"), "alt": v.get("alt"),
+                                   "potencia": _potencia_por_banda(v.get("wlans"))}
     out, vistos = [], set()
     for l in infra or []:
-        m = da_malha.get(l["nome"].casefold(), {})
+        m = da_malha.get(_chave(l["nome"]), {})
         pot = dict(m.get("potencia") or {})
         if l.get("potencia_dbm") is not None:
             for b in (l["banda"],) if l.get("banda") else FREQ_MHZ:
                 pot[b] = l["potencia_dbm"]
+        # A coluna da banda vale mais que a geral.
+        pot.update(l.get("potencia_banda") or {})
         out.append({
-            "nome": l["nome"],
+            "nome": l["nome"].strip(),
             "lat": l["lat"] if l.get("lat") is not None else m.get("lat"),
             "lon": l["lon"] if l.get("lon") is not None else m.get("lon"),
             "alt": m.get("alt"),
@@ -454,12 +523,15 @@ def transmissores(malha=None, infra=None, prm=None):
             "perda_cabo_db": l.get("perda_cabo_db"), "potencia": pot,
             "bandas": [l["banda"]] if l.get("banda") else None,
             "azimute": l.get("azimute"), "abertura": l.get("abertura"),
+            "abertura_vertical": l.get("abertura_vertical"),
+            "inclinacao": l.get("inclinacao"),
             "proposta": l.get("proposta", False)})
-        vistos.add(l["nome"].casefold())
+        vistos.add(_chave(l["nome"]))
     for k, m in da_malha.items():
         if k not in vistos:
             out.append(dict(m, altura_m=None, ganho_dbi=None, perda_cabo_db=None,
-                            bandas=None, azimute=None, abertura=None, proposta=False))
+                            bandas=None, azimute=None, abertura=None,
+                            abertura_vertical=None, inclinacao=None, proposta=False))
     return out
 
 
@@ -543,11 +615,24 @@ def _geometria(mos, tx_xy, h_tx, prm):
     nu2 = np.where(np.isfinite(T_ant),
                    a1 * (T_ant - t_rx) * np.sqrt(2 * (1 / a1 + 1 / a2)), -np.inf)
     d3 = np.sqrt(d[None, :] ** 2 + (h_rx - h_tx) ** 2)
+    # Desnível antena → veículo (negativo: o veículo está abaixo), para o
+    # diagrama vertical da antena.
+    dz = (h_rx - h_tx).astype("float32")
     return {"n_rad": n_rad, "K": K, "cel": cel, "d3": d3, "nu1": nu1, "nu2": nu2,
-            "ok": ok, "ang": ang}
+            "ok": ok, "ang": ang, "dz": dz}
 
 
-def _rssi_polar(geo, f_mhz, base_db, azimute=None, abertura=None):
+def perda_vertical_db(elevacao_graus, abertura, inclinacao=0.0, maximo=20.0):
+    """Diagrama vertical da antena (3GPP TR 36.814): 12·(desvio/abertura)²,
+    até `maximo`. Elevação positiva é para cima; inclinação (downtilt)
+    positiva aponta o feixe para baixo."""
+    import numpy as np
+    desvio = np.asarray(elevacao_graus, dtype="float64") + float(inclinacao or 0.0)
+    return np.minimum(12.0 * (desvio / float(abertura)) ** 2, float(maximo))
+
+
+def _rssi_polar(geo, f_mhz, base_db, azimute=None, abertura=None,
+                abertura_v=None, inclinacao=0.0, max_v=20.0):
     import numpy as np
     raiz = math.sqrt(299.792458 / f_mhz)
     fspl = 20 * np.log10(geo["d3"]) + 20 * math.log10(f_mhz) - 27.55
@@ -559,6 +644,10 @@ def _rssi_polar(geo, f_mhz, base_db, azimute=None, abertura=None):
         rumo = (90.0 - np.degrees(geo["ang"])) % 360.0
         dif = np.abs((rumo - azimute + 180.0) % 360.0 - 180.0)
         rssi = rssi - np.minimum(12.0 * (dif / abertura) ** 2, 20.0)[:, None]
+    if abertura_v and "dz" in geo:
+        with np.errstate(invalid="ignore"):
+            elev = np.degrees(np.arcsin(np.clip(geo["dz"] / geo["d3"], -1, 1)))
+        rssi = rssi - perda_vertical_db(elev, abertura_v, inclinacao, max_v)
     return np.where(geo["ok"], rssi, np.nan).astype("float32")
 
 
@@ -589,7 +678,7 @@ def calcular(mos, txs, bandas, prm, medidas=None, aviso=None):
     polares, pares, usados = {}, [], []
     por_tx = {}
     for m in medidas or []:
-        por_tx.setdefault(m[0].casefold(), []).append(m)
+        por_tx.setdefault(_chave(m[0]), []).append(m)
     for tx in txs:
         if tx.get("lat") is None or tx.get("lon") is None:
             aviso(f"  · {tx['nome']}: sem posição, fora da estimativa")
@@ -607,8 +696,13 @@ def calcular(mos, txs, bandas, prm, medidas=None, aviso=None):
         else:
             h_tx = z0 + altura
         geo = _geometria(mos, xy, h_tx, prm)
+        ab_v = (tx["abertura_vertical"] if tx.get("abertura_vertical") is not None
+                else prm.get("abertura_vertical_graus") or None)
+        incl = (tx["inclinacao"] if tx.get("inclinacao") is not None
+                else prm.get("inclinacao_graus", 0.0))
         usados.append(dict(tx, altura_usada=altura,
-                           altura_padrao=tx.get("altura_m") is None))
+                           altura_padrao=tx.get("altura_m") is None,
+                           abertura_v_usada=ab_v, inclinacao_usada=incl))
         info = {"xy": xy, "geo": {k: geo[k] for k in ("n_rad", "K", "cel")}}
         for b in bandas:
             if tx.get("bandas") and b not in tx["bandas"]:
@@ -620,8 +714,9 @@ def calcular(mos, txs, bandas, prm, medidas=None, aviso=None):
                     - (tx["perda_cabo_db"] if tx.get("perda_cabo_db") is not None
                        else prm["perda_cabo_db"]))
             polar = _rssi_polar(geo, FREQ_MHZ.get(b, 5785.0), base,
-                                tx.get("azimute"), tx.get("abertura"))
-            ms = [m for m in por_tx.get(tx["nome"].casefold(), []) if m[1] == b]
+                                tx.get("azimute"), tx.get("abertura"), ab_v, incl,
+                                prm.get("atenuacao_vertical_max_db", 20.0))
+            ms = [m for m in por_tx.get(_chave(tx["nome"]), []) if m[1] == b]
             if ms:
                 est = _no_polar(info["geo"], xy, [m[2] for m in ms], [m[3] for m in ms], polar)
                 pares += [(tx["nome"], b, m[4], float(e)) for m, e in zip(ms, est)
@@ -1056,7 +1151,7 @@ def gerar(amostras, peers, areas, destino, cfg=None, malha=None, nome=None,
                 if v is None:
                     continue
                 pc_t, md_t = _pct(v)
-                med_t = [m[4] for m in medidas if m[0].casefold() == t["nome"].casefold()
+                med_t = [m[4] for m in medidas if _chave(m[0]) == _chave(t["nome"])
                          and m[1] == b and rm._na_area(area, m[5], m[6])]
                 mapa_t = mapa_de_calor(grade, v, usados, t["nome"], req)
                 sec["paginas"].append({
@@ -1124,6 +1219,7 @@ def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
                    "caminho (Deygout, ITU-R P.526), curvatura da Terra k = 4/3"],
         ["Antena no veículo", f"{prm['altura_rx_m']:g} m acima do terreno, "
                               f"{prm['ganho_rx_dbi']:g} dBi"],
+        ["Antena da ERB/ERM", _txt_vertical(usados, prm)],
         ["ERB/ERM", f"{len(usados)} no cálculo"
                     + (f" · {n_pad} com altura padrão ({prm['altura_tx_m']:g} m)"
                        if n_pad else "")],
@@ -1149,8 +1245,10 @@ def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
         linhas.append([t["nome"] + (" (proposta)" if t.get("proposta") else ""), area_t,
                        f"{t['altura_usada']:g} m" + (" (padrão)" if t.get("altura_padrao") else ""),
                        pot or f"{prm['potencia_dbm']:g} (padrão)",
-                       f"{t['azimute']:g}° / {t['abertura']:g}°" if t.get("azimute") is not None
-                       and t.get("abertura") else "omni",
+                       (f"{t['azimute']:g}° / {t['abertura']:g}°" if t.get("azimute") is not None
+                        and t.get("abertura") else "omni")
+                       + (f" · {t['abertura_v_usada']:g}° vert." if t.get("abertura_v_usada")
+                          else ""),
                        err or "—"])
     for k in range(0, max(1, len(linhas)), 14):
         s = rm.slide_anglo(p, "ERB/ERM no cálculo" + (f" ({k // 14 + 1})" if len(linhas) > 14 else ""),
@@ -1231,6 +1329,22 @@ def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
     buf = _io.BytesIO(); p.save(buf)
     seguro = re.sub(r"[^\w\-]+", "_", nome_sv)[:40]
     return buf.getvalue(), f"Cobertura_Estimada_{seguro}_{quando:%Y%m%d}.pptx"
+
+
+def _txt_vertical(usados, prm):
+    """A linha das premissas sobre o diagrama vertical da antena."""
+    com = [t for t in usados if t.get("abertura_v_usada")]
+    if not com:
+        return ("diagrama vertical não considerado (sem abertura vertical na "
+                "planilha): a antena é vista igual em qualquer elevação")
+    abs_ = sorted({t["abertura_v_usada"] for t in com})
+    inc = sorted({t.get("inclinacao_usada") or 0.0 for t in com})
+    txt = (f"abertura vertical de {' / '.join(f'{a:g}°' for a in abs_)}, inclinação "
+           f"{' / '.join(f'{i:g}°' for i in inc)}: perde 12·(desvio/abertura)², até "
+           f"{prm.get('atenuacao_vertical_max_db', 20.0):g} dB (3GPP TR 36.814)")
+    if len(com) < len(usados):
+        txt += f" · {len(usados) - len(com)} ERB/ERM sem abertura vertical: não considerado"
+    return txt
 
 
 def _txt_calibracao(c, prm):

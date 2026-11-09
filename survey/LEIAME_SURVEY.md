@@ -134,6 +134,12 @@ mesma barra contínua.
   dominante vista da antena e, entre ela e o veículo, a próxima — numa
   cava o sinal costuma passar por mais de uma bancada. Curvatura da Terra
   incluída;
+- o **diagrama vertical** da antena da ERB/ERM, quando a planilha informa
+  a abertura vertical: perde 12·(desvio/abertura)², até 20 dB
+  (3GPP TR 36.814). Com uma omni de 15°, meia abertura (7,5° abaixo da
+  antena) já custa 3 dB, e o veículo várias bancadas abaixo, perto da
+  ERM, fica fora do feixe. Sem a abertura vertical, a antena é vista igual
+  em qualquer elevação — e a cava perto do mastro sai otimista;
 - a **calibração** compara o estimado com o que os veículos mediram de
   cada ERB/ERM no survey e corrige a diferença mediana, por banda. O que
   sobra é o **erro do modelo, em dB**, escrito nas premissas e em cada
@@ -144,24 +150,34 @@ mesma barra contínua.
 
 **As ERB/ERM.** A posição, as bandas e a potência de cada uma vêm da
 busca (o GPS e os rádios de cada BreadCrumb). O resto fica na planilha
-`infraestrutura.csv`, ao lado do programa — botão **ERB/ERM…** na janela,
-abre no Excel:
+`infraestrutura.csv`, **na mesma pasta do programa** (junto do
+`site_survey.exe` e do `config.ini`). O botão **ERB/ERM…** na janela
+cria a planilha se ela não existir e a abre no Excel — é o jeito certo de
+saber qual arquivo o programa está usando.
 
 | coluna | o que é |
 |---|---|
-| `nome` | como aparece na rede (ERM-08 PTP CAM) |
-| `lat`, `lon` | posição; vazio = a do GPS do rádio |
-| `altura_m` | **altura do mastro acima do terreno** — o que mais pesa |
-| `potencia_dbm` | vazio = a que o rádio informa |
+| `nome` | como aparece na rede (ERM-08 PTP CAM); espaço no fim não importa |
+| `lat`, `lon` | posição, em graus com vírgula (-18,8940720); vazio = a do GPS do rádio |
+| `altura_m` | **altura da antena acima do terreno** — o que mais pesa |
+| `potencia_dbm` | potência de TX para as duas bandas; vazio = a que o rádio informa |
+| `potencia_24_dbm`, `potencia_58_dbm` | potência de TX de uma banda só; vale mais que a geral |
 | `ganho_dbi`, `perda_cabo_db` | antena e cabo |
 | `banda` | se a linha vale só para uma banda (2.4 ou 5.8) |
-| `azimute`, `abertura` | antena setorial: para onde aponta e a abertura, em graus |
+| `azimute`, `abertura` | antena setorial: para onde aponta e a abertura **horizontal**, em graus |
+| `abertura_vertical`, `inclinacao` | abertura **vertical** da antena e inclinação para baixo, em graus |
 | `proposta` | `sim` = ERB/ERM que ainda não existe: o "e se" de pôr uma nova ali |
 
-A busca e o survey **acrescentam** à planilha as ERB/ERM que acharem,
-sem mexer no que já estiver preenchido. O que não for informado usa os
-padrões do `[cobertura]` do `config.ini` (mastro de 9 m, antena no
-veículo a 4 m, 24 dBm…), e o deck diz quantas usaram o padrão.
+Coluna a mais (uma de observação, por exemplo) é ignorada e fica onde
+está. Pode salvar pelo Excel como "CSV (separado por vírgulas)": o Excel
+em português grava com ";", e o programa lê nos dois formatos de texto
+que o Excel usa.
+
+A busca e o survey **acrescentam** à planilha as ERB/ERM que acharem e,
+nas linhas que já existem, **só preenchem o que estiver vazio** — posição
+do GPS e potência de cada banda. O que alguém digitou fica. O que não for
+informado usa os padrões do `[cobertura]` do `config.ini` (mastro de 9 m,
+antena no veículo a 4 m, 24 dBm…), e o deck diz quantas usaram o padrão.
 
 **Os arquivos:**
 

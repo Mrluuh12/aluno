@@ -77,6 +77,10 @@ perda_cabo_db           = 1
 potencia_dbm            = 24
 raio_m                  = 3000
 celula_m                = 3
+# Diagrama vertical da antena da ERB/ERM quando a planilha não informa
+# (0 = não considerado). Inclinação para baixo é positiva.
+abertura_vertical_graus = 0
+inclinacao_graus        = 0
 # LAS sem sistema de coordenadas gravado (ex.: EPSG:31983):
 crs_las                 =
 """
