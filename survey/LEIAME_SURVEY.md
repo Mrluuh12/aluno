@@ -162,10 +162,17 @@ saber qual arquivo o programa está usando.
 | `altura_m` | **altura da antena acima do terreno** — o que mais pesa |
 | `potencia_dbm` | potência de TX para as duas bandas; vazio = a que o rádio informa |
 | `potencia_24_dbm`, `potencia_58_dbm` | potência de TX de uma banda só; vale mais que a geral |
-| `ganho_dbi`, `perda_cabo_db` | antena e cabo |
+| `ganho_dbi`, `perda_cabo_db` | ganho da antena e perda no cabo |
+| `ganho_24_dbi`, `ganho_58_dbi` | ganho de uma banda só; vale mais que o geral |
 | `banda` | se a linha vale só para uma banda (2.4 ou 5.8) |
 | `azimute`, `abertura` | antena setorial: para onde aponta e a abertura **horizontal**, em graus |
 | `abertura_vertical`, `inclinacao` | abertura **vertical** da antena e inclinação para baixo, em graus |
+| `abertura_vertical_24`, `abertura_vertical_58` | abertura vertical de uma banda só; vale mais que a geral |
+
+Antena dual band tem ganho e abertura vertical diferentes em cada banda.
+A Rajant RFI-2450-5-7-NM, por exemplo, tem 5 dBi e 25° em 2,4 GHz e
+7 dBi e 15° em 5 GHz — nas colunas `_24` e `_58`. O deck mostra, por
+ERB/ERM, o ganho e a abertura usados em cada banda.
 | `proposta` | `sim` = ERB/ERM que ainda não existe: o "e se" de pôr uma nova ali |
 
 Coluna a mais (uma de observação, por exemplo) é ignorada e fica onde

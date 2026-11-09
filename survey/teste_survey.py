@@ -6967,7 +6967,36 @@ class TestCoberturaEstimada(unittest.TestCase):
         self.assertAlmostEqual(res["omni"][1] - res["vert"][1], 1.5, delta=0.5)
         # Inclinado 5° para baixo, o feixe aponta para quem está a 600 m.
         self.assertAlmostEqual(res["omni"][1] - res["incl"][1], 0.0, delta=0.3)
-        self.assertEqual(usados[0]["abertura_v_usada"], 15)
+        self.assertEqual(usados[0]["abertura_v_usada"], {"5.8 GHz": 15})
+
+    def test_ganho_e_abertura_vertical_por_banda(self):
+        # Dual band (Rajant RFI-2450-5-7-NM): 5 dBi e 25° em 2,4 GHz; 7 dBi
+        # e 15° em 5 GHz. A coluna da banda vale mais que a geral (6 dBi).
+        import math as _m
+        las = _las_sintetico(self.tmp / "plano.las", -50, 760, crista=None)
+        mos = self.ce.mosaico([las])
+        med = [("ERM-08 PTP CAM", b, *self._xy(mos, x), -60.0)
+               for b in ("2.4 GHz", "5.8 GHz") for x in (200, 150)]
+        tx = self._tx(altura_m=60, ganho_dbi=6, potencia={"2.4 GHz": 24.0, "5.8 GHz": 24.0},
+                      ganho_banda={"2.4 GHz": 5, "5.8 GHz": 7},
+                      abertura_v_banda={"2.4 GHz": 25, "5.8 GHz": 15})
+        _, pares, usados = self.ce.estimar(mos, [tx], ["2.4 GHz", "5.8 GHz"],
+                                           self.ce.PADROES, med)
+        v = {(b, round(e)): est for (_n, b, _m_, est), e in
+             zip(pares, [200, 150, 200, 150])}
+        u = usados[0]
+        self.assertEqual(u["ganho_usado"], {"2.4 GHz": 5, "5.8 GHz": 7})
+        self.assertEqual(u["abertura_v_usada"], {"2.4 GHz": 25, "5.8 GHz": 15})
+        # A 100 m e 56 m abaixo (29° de elevação): 20 dB a menos com 15°;
+        # com 25°, 12·(29,2/25)² = 16,4 dB.
+        for b, f, g, perda_v in (("2.4 GHz", 2437, 5, 16.4), ("5.8 GHz", 5785, 7, 20.0)):
+            d3 = _m.hypot(100, 56)
+            livre = 24 + g + 5 - 1 - (20 * _m.log10(d3) + 20 * _m.log10(f) - 27.55)
+            self.assertAlmostEqual(v[(b, 200)], livre - perda_v, delta=0.6, msg=b)
+        txt = self.ce._txt_antena(usados, self.ce.PADROES)
+        self.assertIn("ganho 2.4 GHz: 5 dBi · 5.8 GHz: 7 dBi", txt)
+        self.assertIn("abertura vertical 2.4 GHz: 25° · 5.8 GHz: 15°", txt)
+        self.assertEqual(self.ce._txt_antena_tx(u), "omni · 2.4: 5 dBi 25° · 5.8: 7 dBi 15°")
 
     def test_meia_abertura_vertical_perde_3_db(self):
         self.assertEqual(list(self.ce.perda_vertical_db([0, -7.5, 7.5, -60], 15)),
@@ -6975,12 +7004,17 @@ class TestCoberturaEstimada(unittest.TestCase):
 
     def test_planilha_com_abertura_vertical_e_potencia_por_banda(self):
         cam = self.tmp / "infra.csv"
+        val = {"nome": "ERM-08 PTP CAM", "lat": "-18,92", "lon": "-43,42", "altura_m": "6",
+               "potencia_dbm": "24", "potencia_58_dbm": "20", "ganho_dbi": "6",
+               "ganho_24_dbi": "5", "abertura_vertical": "15", "abertura_vertical_24": "25"}
         cam.write_text(";".join(self.ce.COLUNAS_INFRA) + "\n"
-                       "ERM-08 PTP CAM;-18,92;-43,42;6;24;;20;6;;;;;15;;\n",
+                       + ";".join(val.get(c, "") for c in self.ce.COLUNAS_INFRA) + "\n",
                        encoding="utf-8-sig")
         l = self.ce.ler_infraestrutura(cam)
         self.assertEqual((l[0]["abertura_vertical"], l[0]["potencia_banda"]),
                          (15.0, {"5.8 GHz": 20.0}))
+        self.assertEqual((l[0]["ganho_banda"], l[0]["abertura_v_banda"]),
+                         ({"2.4 GHz": 5.0}, {"2.4 GHz": 25.0}))
         t = self.ce.transmissores(None, l)[0]
         # A coluna da banda vale mais que a geral; a geral fica para a outra.
         self.assertEqual(t["potencia"], {"2.4 GHz": 24.0, "5.8 GHz": 20.0})

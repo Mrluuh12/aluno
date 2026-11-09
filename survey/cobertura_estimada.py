@@ -61,10 +61,30 @@ PADROES = {
 FREQ_MHZ = {"2.4 GHz": 2437.0, "5.8 GHz": 5785.0}
 COLUNAS_INFRA = ["nome", "lat", "lon", "altura_m", "potencia_dbm",
                  "potencia_24_dbm", "potencia_58_dbm", "ganho_dbi",
-                 "perda_cabo_db", "banda", "azimute", "abertura",
-                 "abertura_vertical", "inclinacao", "proposta"]
-# Coluna de potência de uma banda só, e a banda dela.
+                 "ganho_24_dbi", "ganho_58_dbi", "perda_cabo_db", "banda",
+                 "azimute", "abertura", "abertura_vertical",
+                 "abertura_vertical_24", "abertura_vertical_58", "inclinacao",
+                 "proposta"]
+# Colunas de uma banda só, e a banda de cada uma. Valem mais que a coluna
+# geral da mesma grandeza: uma antena dual band tem ganho e abertura
+# vertical diferentes em 2,4 e 5 GHz (a Rajant RFI-2450-5-7-NM: 5 dBi e
+# 25° em 2,4 GHz; 7 dBi e 15° em 5 GHz).
 _POT_BANDA = {"potencia_24_dbm": "2.4 GHz", "potencia_58_dbm": "5.8 GHz"}
+_GANHO_BANDA = {"ganho_24_dbi": "2.4 GHz", "ganho_58_dbi": "5.8 GHz"}
+_ABV_BANDA = {"abertura_vertical_24": "2.4 GHz", "abertura_vertical_58": "5.8 GHz"}
+
+
+def _por_banda(r, colunas):
+    """{banda: valor} das colunas de uma banda só que vieram preenchidas."""
+    return {b: _num(r.get(c)) for c, b in colunas.items() if _num(r.get(c)) is not None}
+
+
+def _da_banda(tx, por_banda, geral, banda, padrao):
+    """O valor da banda; senão o geral da linha; senão o padrão."""
+    v = (tx.get(por_banda) or {}).get(banda)
+    if v is None:
+        v = tx.get(geral)
+    return padrao if v is None else v
 
 
 def _chave(nome):
@@ -391,9 +411,10 @@ def ler_infraestrutura(caminho):
             "nome": nome, "lat": _num(r.get("lat")), "lon": _num(r.get("lon")),
             "altura_m": _num(r.get("altura_m")),
             "potencia_dbm": _num(r.get("potencia_dbm")),
-            "potencia_banda": {b: _num(r.get(c)) for c, b in _POT_BANDA.items()
-                               if _num(r.get(c)) is not None},
+            "potencia_banda": _por_banda(r, _POT_BANDA),
             "ganho_dbi": _num(r.get("ganho_dbi")),
+            "ganho_banda": _por_banda(r, _GANHO_BANDA),
+            "abertura_v_banda": _por_banda(r, _ABV_BANDA),
             "perda_cabo_db": _num(r.get("perda_cabo_db")),
             "banda": rm._norm_banda(r.get("banda")) if r.get("banda") else None,
             "azimute": _num(r.get("azimute")), "abertura": _num(r.get("abertura")),
@@ -520,6 +541,8 @@ def transmissores(malha=None, infra=None, prm=None):
             "lon": l["lon"] if l.get("lon") is not None else m.get("lon"),
             "alt": m.get("alt"),
             "altura_m": l.get("altura_m"), "ganho_dbi": l.get("ganho_dbi"),
+            "ganho_banda": dict(l.get("ganho_banda") or {}),
+            "abertura_v_banda": dict(l.get("abertura_v_banda") or {}),
             "perda_cabo_db": l.get("perda_cabo_db"), "potencia": pot,
             "bandas": [l["banda"]] if l.get("banda") else None,
             "azimute": l.get("azimute"), "abertura": l.get("abertura"),
@@ -529,7 +552,8 @@ def transmissores(malha=None, infra=None, prm=None):
         vistos.add(_chave(l["nome"]))
     for k, m in da_malha.items():
         if k not in vistos:
-            out.append(dict(m, altura_m=None, ganho_dbi=None, perda_cabo_db=None,
+            out.append(dict(m, altura_m=None, ganho_dbi=None, ganho_banda={},
+                            abertura_v_banda={}, perda_cabo_db=None,
                             bandas=None, azimute=None, abertura=None,
                             abertura_vertical=None, inclinacao=None, proposta=False))
     return out
@@ -696,20 +720,26 @@ def calcular(mos, txs, bandas, prm, medidas=None, aviso=None):
         else:
             h_tx = z0 + altura
         geo = _geometria(mos, xy, h_tx, prm)
-        ab_v = (tx["abertura_vertical"] if tx.get("abertura_vertical") is not None
-                else prm.get("abertura_vertical_graus") or None)
         incl = (tx["inclinacao"] if tx.get("inclinacao") is not None
                 else prm.get("inclinacao_graus", 0.0))
+        # Por banda: o deck escreve o que foi usado em cada uma.
+        ganho_usado, ab_usada = {}, {}
         usados.append(dict(tx, altura_usada=altura,
                            altura_padrao=tx.get("altura_m") is None,
-                           abertura_v_usada=ab_v, inclinacao_usada=incl))
+                           ganho_usado=ganho_usado, abertura_v_usada=ab_usada,
+                           inclinacao_usada=incl))
         info = {"xy": xy, "geo": {k: geo[k] for k in ("n_rad", "K", "cel")}}
         for b in bandas:
             if tx.get("bandas") and b not in tx["bandas"]:
                 continue
             pot = (tx.get("potencia") or {}).get(b, prm["potencia_dbm"])
-            base = (pot + (tx["ganho_dbi"] if tx.get("ganho_dbi") is not None
-                           else prm["ganho_tx_dbi"])
+            ganho = _da_banda(tx, "ganho_banda", "ganho_dbi", b, prm["ganho_tx_dbi"])
+            ab_v = _da_banda(tx, "abertura_v_banda", "abertura_vertical", b,
+                             prm.get("abertura_vertical_graus") or None)
+            ganho_usado[b] = ganho
+            if ab_v:
+                ab_usada[b] = ab_v
+            base = (pot + ganho
                     + prm["ganho_rx_dbi"]
                     - (tx["perda_cabo_db"] if tx.get("perda_cabo_db") is not None
                        else prm["perda_cabo_db"]))
@@ -1219,7 +1249,7 @@ def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
                    "caminho (Deygout, ITU-R P.526), curvatura da Terra k = 4/3"],
         ["Antena no veículo", f"{prm['altura_rx_m']:g} m acima do terreno, "
                               f"{prm['ganho_rx_dbi']:g} dBi"],
-        ["Antena da ERB/ERM", _txt_vertical(usados, prm)],
+        ["Antena da ERB/ERM", _txt_antena(usados, prm)],
         ["ERB/ERM", f"{len(usados)} no cálculo"
                     + (f" · {n_pad} com altura padrão ({prm['altura_tx_m']:g} m)"
                        if n_pad else "")],
@@ -1245,17 +1275,14 @@ def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
         linhas.append([t["nome"] + (" (proposta)" if t.get("proposta") else ""), area_t,
                        f"{t['altura_usada']:g} m" + (" (padrão)" if t.get("altura_padrao") else ""),
                        pot or f"{prm['potencia_dbm']:g} (padrão)",
-                       (f"{t['azimute']:g}° / {t['abertura']:g}°" if t.get("azimute") is not None
-                        and t.get("abertura") else "omni")
-                       + (f" · {t['abertura_v_usada']:g}° vert." if t.get("abertura_v_usada")
-                          else ""),
+                       _txt_antena_tx(t),
                        err or "—"])
     for k in range(0, max(1, len(linhas)), 14):
         s = rm.slide_anglo(p, "ERB/ERM no cálculo" + (f" ({k // 14 + 1})" if len(linhas) > 14 else ""),
-                           "Área, altura do mastro, potência por banda (dBm), setor e o "
+                           "Área, altura do mastro, potência e antena por banda, e o "
                            "erro do modelo em cada uma (leituras)")
         rm._tabela_anglo(s, 0.55, 1.5, 12.25,
-                         ["ERB/ERM", "Área", "Altura", "Potência (dBm)", "Setor",
+                         ["ERB/ERM", "Área", "Altura", "Potência (dBm)", "Antena",
                           "Erro do modelo"], linhas[k:k + 14], tam=9.5)
 
     navegar = {}
@@ -1331,19 +1358,44 @@ def ppt_estimativa(nome_sv, secoes, bandas, usados, cal, prm, mos, quando=None):
     return buf.getvalue(), f"Cobertura_Estimada_{seguro}_{quando:%Y%m%d}.pptx"
 
 
-def _txt_vertical(usados, prm):
-    """A linha das premissas sobre o diagrama vertical da antena."""
+def _por_banda_txt(usados, campo, un):
+    """'2.4 GHz: 5 dBi · 5.8 GHz: 7 dBi' com os valores distintos usados."""
+    vals = {}
+    for t in usados:
+        for b, v in (t.get(campo) or {}).items():
+            vals.setdefault(b, set()).add(v)
+    return " · ".join(f"{b}: {' / '.join(f'{v:g}{un}' for v in sorted(vs))}"
+                      for b, vs in sorted(vals.items()))
+
+
+def _txt_antena(usados, prm):
+    """A linha das premissas sobre a antena da ERB/ERM: ganho e diagrama
+    vertical, por banda."""
+    ganho = _por_banda_txt(usados, "ganho_usado", " dBi")
+    txt = f"ganho {ganho}" if ganho else ""
     com = [t for t in usados if t.get("abertura_v_usada")]
     if not com:
-        return ("diagrama vertical não considerado (sem abertura vertical na "
-                "planilha): a antena é vista igual em qualquer elevação")
-    abs_ = sorted({t["abertura_v_usada"] for t in com})
+        return (txt + " · " if txt else "") + (
+            "diagrama vertical não considerado (sem abertura vertical na "
+            "planilha): a antena é vista igual em qualquer elevação")
     inc = sorted({t.get("inclinacao_usada") or 0.0 for t in com})
-    txt = (f"abertura vertical de {' / '.join(f'{a:g}°' for a in abs_)}, inclinação "
-           f"{' / '.join(f'{i:g}°' for i in inc)}: perde 12·(desvio/abertura)², até "
-           f"{prm.get('atenuacao_vertical_max_db', 20.0):g} dB (3GPP TR 36.814)")
+    txt += ((" · " if txt else "")
+            + f"abertura vertical {_por_banda_txt(com, 'abertura_v_usada', '°')}, "
+            f"inclinação {' / '.join(f'{i:g}°' for i in inc)}: perde "
+            f"12·(desvio/abertura)², até {prm.get('atenuacao_vertical_max_db', 20.0):g} dB "
+            f"(3GPP TR 36.814)")
     if len(com) < len(usados):
         txt += f" · {len(usados) - len(com)} ERB/ERM sem abertura vertical: não considerado"
+    return txt
+
+
+def _txt_antena_tx(t):
+    """A célula 'Antena' de uma ERB/ERM: setor, e ganho/abertura por banda."""
+    txt = (f"{t['azimute']:g}° / {t['abertura']:g}°" if t.get("azimute") is not None
+           and t.get("abertura") else "omni")
+    for b, g in sorted((t.get("ganho_usado") or {}).items()):
+        ab = (t.get("abertura_v_usada") or {}).get(b)
+        txt += f" · {b.split()[0]}: {g:g} dBi" + (f" {ab:g}°" if ab else "")
     return txt
 
 
