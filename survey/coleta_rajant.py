@@ -694,8 +694,10 @@ class Coleta:
                                         daemon=True)
             t_testes.start()
             self.aviso(f"throughput: iperf3 do rádio até {self.iperf_servidor}, "
-                       f"{self.iperf_modo} {self.iperf_segundos} s, um teste "
-                       f"por vez a cada {self.iperf_intervalo:g} s no mínimo")
+                       f"{self.iperf_modo} {self.iperf_segundos} s, até "
+                       f"{self.iperf_paralelos} ao mesmo tempo (a "
+                       f"{self.iperf_distancia_min:g} m ou mais um do outro), "
+                       f"um início a cada {self.iperf_intervalo:g} s no mínimo")
         repostos = 0
         try:
             while not self._parar.is_set():

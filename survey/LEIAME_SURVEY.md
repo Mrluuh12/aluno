@@ -318,6 +318,7 @@ Como o teste pesa na malha, vários ao mesmo tempo só entre equipamentos
 | sentido | subida, descida ou os dois (alternando por rádio) | |
 | **pausa** com a latência mediana do ping acima de 200 ms | — | rede carregada: o teste só pioraria |
 | durante o teste, o rádio fica **sem TRACE** | — | o rádio roda uma tarefa por vez |
+| **espera pelo resultado** depois do fim do teste | 30 s + 2× a duração | o rádio demora para montar a saída (9 s num teste de 5 s; mais de 15 s num de 10 s); passou disso, "indisponível: UNAVAILABLE" |
 
 **O ping do rádio em teste não conta** na latência e na perda dele (nem
 na mediana que decide a pausa): ele mediria o próprio teste. As amostras

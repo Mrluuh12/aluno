@@ -4341,6 +4341,9 @@ class _RadioBCAPI:
                     o.id = self.id_saida
                 if self.formato == "texto":
                     o.output.totalSize = len(saida)   # e só isso, como em campo
+                elif self.formato == "marcado_texto":
+                    # Rádio que declara TEXT numa saída que é protobuf.
+                    o.output.content = o.output.TEXT
                 else:
                     o.output.compression = o.output.GZIP
                     o.output.content = o.output.PROTO
@@ -6558,6 +6561,45 @@ class TestIperfNoRadio(_ComBCAPIReal, unittest.TestCase):
     def test_texto_do_iperf3_nao_passa_por_protobuf(self):
         self.assertIsNone(rm.iperf_de_proto(SAIDA_IPERF_TCP.encode()))
         self.assertIsNone(rm.iperf_de_proto(b""))
+
+    def test_resultado_marcado_como_texto_ainda_e_lido(self):
+        # 13/11/2026, ERM-30 PTP: o resultado era protobuf e saía como "sem
+        # resultado". O `content` que o rádio declara não decide nada.
+        r = rm.bc_iperf3(_bc_de_teste(_RadioBCAPI(saida_iperf=self._iperf3result(),
+                                                  formato="marcado_texto")),
+                         "10.188.96.140", segundos=1)
+        self.assertEqual(r["mbps"], 47.9)
+
+    def test_bytes_como_vieram_do_campo(self):
+        # Os 68 bytes do ERM-30 PTP reconstruídos do log (os bytes acima de
+        # 127 perderam o valor; os demais são exatos), com um campo 8 que
+        # a rajant-api 0.1.1 não conhece. Tem de ser lido mesmo assim.
+        X = 0x80
+        b = bytearray(b"\x0a\x0d10.188.97.139\x12\x0d10.188.96.140")
+        b += b"\x1d" + bytes([X, 0x70, 0x2b, 0x41]) + b"\x20\x00"
+        env = b"\x09" + bytes([X, 0x5a, 0x04, 0x58, X, 0x18, 0x74, 0x41]) + b"\x10" + bytes([X, 0x06]) + b"\x28\x00"
+        b += b"\x2a" + bytes([len(env)]) + env
+        rec = b"\x09" + bytes([0x7a, 0x5f, X, X, X, 0x19, 0x72, 0x41]) + b"\x28\x01"
+        b += b"\x32" + bytes([len(rec)]) + rec + b"\x40" + bytes([X, X, 0x08])
+        t = rm.iperf_de_proto(bytes(b), 10, "TCP")
+        self.assertEqual((t["mbps_enviado"], t["mbps_recebido"], t["mbps"]), (21.07, 18.98, 18.98))
+        self.assertEqual((t["origem"], t["destino"], t["latencia"]),
+                         ("10.188.97.139", "10.188.96.140", 10.71))
+        self.assertEqual(t["retransmissoes"], 768)
+
+    def test_sem_resultado_mostra_os_bytes_em_hexadecimal(self):
+        with self.assertRaises(rm.IperfIndisponivel) as ctx:
+            rm.bc_iperf3(_bc_de_teste(_RadioBCAPI(saida_iperf="nada de útil aqui")),
+                         "10.0.0.1", segundos=1)
+        self.assertRegex(str(ctx.exception), r"hex: (?:[0-9a-f]{2} )+")
+        self.assertIn("bytes", str(ctx.exception))
+
+    def test_espera_pelo_resultado_cresce_com_o_teste(self):
+        # 5 s de teste → 40 s de espera; 10 s → 50 s. Os 15 s de antes não
+        # bastaram para um teste de 10 s (TT-3503, 13/11/2026).
+        self.assertEqual(rm.espera_resultado_iperf_s(5), 40.0)
+        self.assertEqual(rm.espera_resultado_iperf_s(10), 50.0)
+        self.assertGreater(rm.espera_resultado_iperf_s(10), 15.0)
 
     def test_saida_sem_resultado_explica(self):
         with self.assertRaises(rm.IperfIndisponivel) as ctx:

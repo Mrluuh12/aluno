@@ -7286,7 +7286,7 @@ def iperf_de_proto(dados, segundos=None, modo="TCP"):
 
 
 def bc_iperf3(bc, servidor, segundos=5, modo="TCP", reverso=False,
-              limite_mbps=0, registro=None, espera_extra_s=15.0):
+              limite_mbps=0, registro=None, espera_extra_s=None):
     """Throughput medido pelo PRÓPRIO rádio: a tarefa IPERF3 (o "Test
     Performance" do BC|Commander), com este rádio de cliente e `servidor`
     (IP de outro BreadCrumb ou de um servidor iperf3) do outro lado.
@@ -7327,6 +7327,8 @@ def bc_iperf3(bc, servidor, segundos=5, modo="TCP", reverso=False,
     tid = res.id if res.HasField("id") else None
     # O teste dura `segundos`; perguntar antes disso só gasta a malha.
     time.sleep(segundos)
+    if espera_extra_s is None:
+        espera_extra_s = espera_resultado_iperf_s(segundos)
     prazo = time.monotonic() + espera_extra_s
     dados, pos, ultimo = b"", 0, None
     while True:
@@ -7351,36 +7353,52 @@ def bc_iperf3(bc, servidor, segundos=5, modo="TCP", reverso=False,
             dados += o.data
             break
         if time.monotonic() >= prazo:
-            raise IperfIndisponivel("resultado do iperf3 indisponível: "
-                                    + type(o).Status.Name(o.status))
+            raise IperfIndisponivel(
+                f"resultado do iperf3 indisponível: {type(o).Status.Name(o.status)} "
+                f"por {espera_extra_s:g} s depois do fim do teste")
         time.sleep(0.5)
     saida = ultimo.output if ultimo is not None and ultimo.HasField("output") else None
     compressao = (saida.compression if saida is not None
                   and saida.HasField("compression") else None)
+    # O firmware devolve um Iperf3Result (protobuf), cru. O que o rádio
+    # declara em `content` não decide nada: a saída é lida como
+    # Iperf3Result primeiro — nos bytes crus e nos descomprimidos — e só
+    # então como texto/JSON do iperf3. Decidir pelo `content` deixava um
+    # resultado bom (ERM-30 PTP, 13/11/2026: 21 Mbps) sair como "sem
+    # resultado" quando o rádio o marcava como TEXT.
     bruto = _descomprimir_saida(dados, compressao)
-    # O firmware devolve um Iperf3Result (protobuf). Só se o rádio disser
-    # que é TEXTO a saída vai direto para o leitor de texto/JSON.
-    eh_texto = (saida is not None and saida.HasField("content")
-                and saida.content == type(saida).TEXT)
-    t = None if eh_texto else iperf_de_proto(bruto, segundos, modo)
-    if t is not None:
-        from google.protobuf import text_format
-        from rajant_api import Common_pb2
-        msg = Common_pb2.Iperf3Result(); msg.ParseFromString(bruto)
-        texto = text_format.MessageToString(msg, as_utf8=True)
-        _reg("saída (Iperf3Result)", texto)
-        t["texto"] = texto
-        return t
+    for candidato in (dados, bruto):
+        t = iperf_de_proto(candidato, segundos, modo)
+        if t is not None:
+            from google.protobuf import text_format
+            from rajant_api import Common_pb2
+            msg = Common_pb2.Iperf3Result(); msg.ParseFromString(candidato)
+            texto = text_format.MessageToString(msg, as_utf8=True)
+            _reg("saída (Iperf3Result)", texto)
+            t["texto"] = texto
+            return t
     texto = bruto.decode("utf-8", "replace")
     _reg("saída (texto)", texto.replace("\x00", ""))
     t = iperf_de_texto(texto)
     if t is None or t.get("erro"):
-        dito = " ".join(texto.replace("\x00", "").split())
+        if t and t.get("erro"):
+            raise IperfIndisponivel(f"iperf3: {t['erro']}")
+        # Em hexadecimal: o texto de bytes binários no log perde os bytes
+        # acima de 127 e os zeros, e não dá para reconstruir o que veio.
         raise IperfIndisponivel(
-            (f"iperf3: {t['erro']}" if t and t.get("erro")
-             else f"saída do iperf3 sem resultado: {dito[:160]!r}"))
+            f"saída do iperf3 sem resultado ({len(bruto)} bytes, hex: "
+            f"{bruto[:96].hex(' ')}{'…' if len(bruto) > 96 else ''})")
     t["texto"] = texto.replace("\x00", "")
     return t
+
+
+def espera_resultado_iperf_s(segundos):
+    """Quanto esperar pelo resultado DEPOIS do fim do teste. Em campo o
+    rádio levou ~9 s para montar a saída de um teste de 5 s, e um de 10 s
+    passou de 15 s (TT-3503, 13/11/2026: UNAVAILABLE até o prazo). Cresce
+    com a duração do teste: o iperf3 com conexão lenta demora mais que o
+    tempo pedido."""
+    return 30.0 + 2.0 * max(1, min(60, int(segundos)))
 
 
 # ══════════════════════════════════════════════════════════════
